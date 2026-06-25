@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+dist-ssr/
+
+# Rust / Tauri build artifacts
+src-tauri/target/
+
+# Vite
+*.local
+.vite/
+
+# Editor
+.DS_Store
