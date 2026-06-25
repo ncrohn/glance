@@ -18,7 +18,7 @@ fn emit_open_files(app: &tauri::AppHandle, argv: &[String], cwd: &Path) {
 
 #[tauri::command]
 fn take_launch_args(state: tauri::State<LaunchArgs>) -> Vec<String> {
-    let mut paths = state.0.lock().unwrap();
+    let mut paths = state.0.lock().unwrap_or_else(|e| e.into_inner());
     std::mem::take(&mut *paths)
 }
 
@@ -74,7 +74,7 @@ pub fn run() {
             let argv: Vec<String> = std::env::args().collect();
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
             let launch_args = app.state::<LaunchArgs>();
-            let mut stored = launch_args.0.lock().unwrap();
+            let mut stored = launch_args.0.lock().unwrap_or_else(|e| e.into_inner());
             for raw in cli::md_paths_from_argv(&argv) {
                 stored.push(cli::to_abs(&raw, &cwd));
             }
