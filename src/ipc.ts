@@ -34,3 +34,9 @@ export function onFileRemoved(cb: (path: string) => void): Promise<UnlistenFn> {
 export function takeLaunchArgs(): Promise<string[]> {
   return invoke<string[]>("take_launch_args");
 }
+
+export function onCliInstallResult(
+  cb: (r: { ok: boolean; message: string }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ ok: boolean; message: string }>("cli-install-result", (e) => cb(e.payload));
+}

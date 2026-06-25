@@ -1,9 +1,10 @@
 mod cli;
+mod cli_install;
 mod commands;
 mod watcher;
 
 use std::path::Path;
-use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
 
 #[derive(Default)]
@@ -42,14 +43,29 @@ pub fn run() {
             watcher::unwatch_file,
             take_launch_args,
         ])
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "install_cli" {
+                let result = cli_install::install_cli_tool();
+                let _ = app.emit("cli-install-result", result);
+            }
+        })
         .setup(|app| {
             let handle = app.handle();
 
+            let install_cli_item = MenuItem::with_id(
+                handle,
+                "install_cli",
+                "Install 'mdview' Command Line Tool",
+                true,
+                None::<&str>,
+            )?;
             let app_menu = Submenu::with_items(
                 handle,
                 "Glance",
                 true,
                 &[
+                    &install_cli_item,
+                    &PredefinedMenuItem::separator(handle)?,
                     &PredefinedMenuItem::hide(handle, None)?,
                     &PredefinedMenuItem::quit(handle, None)?,
                 ],

@@ -6,10 +6,10 @@ import {
 } from "./store";
 import { isDirty } from "./document";
 import { renderMarkdown } from "./renderer";
-import { readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs } from "./ipc";
+import { readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs, onCliInstallResult } from "./ipc";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
-import { confirmReload } from "./modal";
+import { confirmReload, showNotice } from "./modal";
 import { openPaths, pushRecent } from "./session";
 
 const LS_OPEN = "glance.openPaths";
@@ -121,6 +121,7 @@ export async function openPath(absPath: string): Promise<void> {
 export async function start(): Promise<void> {
   await onOpenFile((absPath) => { void openPath(absPath); });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
+  await onCliInstallResult((r) => { showNotice(r.message); });
   await onFileChanged(async (e) => {
     const doc = state.docs.find((d) => d.absPath === e.path);
     if (!doc) return;

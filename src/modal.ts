@@ -23,3 +23,20 @@ export function confirmReload(fileName: string): Promise<"mine" | "disk"> {
     overlay.appendChild(box); root.appendChild(overlay);
   });
 }
+
+export function showNotice(message: string): void {
+  const root = document.getElementById("modal-root")!;
+  root.innerHTML = "";
+  const overlay = document.createElement("div");
+  overlay.className = "modal";
+  const box = document.createElement("div");
+  box.className = "box";
+  const msg = document.createElement("p");
+  msg.textContent = message;
+  box.appendChild(msg);
+  const ok = document.createElement("button");
+  ok.textContent = "OK";
+  ok.onclick = () => { root.innerHTML = ""; };
+  box.appendChild(ok);
+  overlay.appendChild(box); root.appendChild(overlay);
+}

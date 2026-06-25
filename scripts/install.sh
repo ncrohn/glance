@@ -16,21 +16,17 @@ echo "Installing Glance.app to /Applications…"
 rm -rf "/Applications/Glance.app"
 cp -R "$APP_SRC" "/Applications/Glance.app"
 
-# Link the CLI into a dir that is BOTH on PATH and writable, so the symlink
-# actually resolves and we don't need sudo. Try, in order: the user's dotfiles
-# bin, ~/.local/bin, then /usr/local/bin (last resort — may need sudo).
-TARGET=""
-for d in "$HOME/dev/dotfiles/bin" "$HOME/.local/bin" "/usr/local/bin"; do
-  case ":${PATH}:" in *":${d}:"*) ;; *) continue ;; esac  # must be on PATH
-  [[ -d "$d" && -w "$d" ]] || continue                    # must be writable
-  TARGET="$d/mdview"
-  break
-done
-if [[ -z "$TARGET" ]]; then
-  echo "No writable dir on PATH found for mdview. Add ~/.local/bin to PATH and re-run, or symlink bin/mdview manually." >&2
-  exit 1
-fi
-chmod +x bin/mdview
-ln -sf "$(pwd)/bin/mdview" "$TARGET"
-echo "Linked mdview -> $TARGET"
-echo "Done. Try: mdview README.md"
+# Link the `mdview` CLI to the installed app binary. The binary itself resolves
+# relative paths and forwards to the running instance, so no wrapper script is
+# needed — the symlink IS the CLI. This matches the in-app "Install 'mdview'
+# Command Line Tool" menu item; both point at the bundle binary so the CLI is
+# independent of this repo and survives app updates.
+APP_BIN="/Applications/Glance.app/Contents/MacOS/glance"
+BINDIR="$HOME/.local/bin"
+mkdir -p "$BINDIR"
+ln -sf "$APP_BIN" "$BINDIR/mdview"
+echo "Linked mdview -> $BINDIR/mdview -> $APP_BIN"
+case ":${PATH}:" in
+  *":${BINDIR}:"*) echo "Done. Try: mdview README.md" ;;
+  *) echo "Done. Add ~/.local/bin to your shell PATH, then: mdview README.md" ;;
+esac

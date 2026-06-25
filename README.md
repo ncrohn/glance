@@ -13,9 +13,20 @@ A lightweight macOS markdown viewer and editor. Defaults to formatted view. Desi
 - **Session restore** — open tabs are saved at quit and restored on next launch.
 - **Deleted-file marker** — tabs whose files have been removed are marked visually.
 - **macOS light/dark** — follows the system appearance.
-- **Native macOS menu** — app (Glance) and Edit menus with the standard editing shortcuts (undo/redo, cut/copy/paste/select-all) and Quit. App actions (⌘E toggle, ⌘S save) are handled in-window via keyboard shortcuts.
+- **Native macOS menu** — app (Glance) and Edit menus with the standard editing shortcuts (undo/redo, cut/copy/paste/select-all) and Quit. The Glance menu also has **"Install 'mdview' Command Line Tool"**. App actions (⌘E toggle, ⌘S save) are handled in-window via keyboard shortcuts.
 
 ## Install
+
+### On any Mac (recommended)
+
+1. Get `Glance.app` (build it once with `scripts/install.sh` below, or open the generated `Glance_<version>_aarch64.dmg`) and drag it to `/Applications`.
+2. Open Glance.
+3. Menu **Glance ▸ Install 'mdview' Command Line Tool**. This symlinks the app's own binary to `~/.local/bin/mdview` — no terminal, no repo, and it stays valid across app updates.
+4. Ensure `~/.local/bin` is on your shell `PATH`.
+
+The CLI is just a symlink to the binary inside `Glance.app`; there is no separate wrapper script and it does not depend on this source checkout.
+
+### From source (development machine)
 
 **Requirements:** Rust toolchain (stable), pnpm.
 
@@ -23,7 +34,7 @@ A lightweight macOS markdown viewer and editor. Defaults to formatted view. Desi
 bash scripts/install.sh
 ```
 
-This builds Glance in release mode, copies `Glance.app` to `/Applications`, and symlinks the `mdview` CLI to `~/dev/dotfiles/bin/mdview` (or `/usr/local/bin/mdview` if that directory is absent).
+Builds Glance in release mode, copies `Glance.app` to `/Applications`, and symlinks `mdview` into `~/.local/bin` (same target as the menu item).
 
 ## Usage
 
