@@ -6,7 +6,12 @@ export function confirmReload(fileName: string): Promise<"mine" | "disk"> {
     overlay.className = "modal";
     const box = document.createElement("div");
     box.className = "box";
-    box.innerHTML = `<p><strong>${fileName}</strong> changed on disk while you have unsaved edits.</p>`;
+    const msg = document.createElement("p");
+    const name = document.createElement("strong");
+    name.textContent = fileName;
+    msg.appendChild(name);
+    msg.appendChild(document.createTextNode(" changed on disk while you have unsaved edits."));
+    box.appendChild(msg);
     const keep = document.createElement("button");
     keep.textContent = "Keep mine";
     const load = document.createElement("button");
