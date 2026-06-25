@@ -26,3 +26,7 @@ export function onFileChanged(
 ): Promise<UnlistenFn> {
   return listen<{ path: string; contents: string }>("file-changed", (e) => cb(e.payload));
 }
+
+export function onFileRemoved(cb: (path: string) => void): Promise<UnlistenFn> {
+  return listen<string>("file-removed", (e) => cb(e.payload));
+}

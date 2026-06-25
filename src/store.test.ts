@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   emptyState, openDoc, closeDoc, setActive, updateEditorContent,
-  toggleViewMode, markSaved, applyDiskChange, getActive,
+  toggleViewMode, markSaved, applyDiskChange, markRemoved, getActive,
 } from "./store";
 import { isDirty } from "./document";
 
@@ -68,5 +68,15 @@ describe("store", () => {
     s = openDoc(s, "/b.md", "B");
     s = setActive(s, "/a.md");
     expect(s.activeId).toBe("/a.md");
+  });
+
+  it("markRemoved sets existsOnDisk=false on the matching doc, leaves others untouched", () => {
+    let s = openDoc(emptyState(), "/a.md", "A");
+    s = openDoc(s, "/b.md", "B");
+    s = markRemoved(s, "/a.md");
+    const a = s.docs.find((d) => d.absPath === "/a.md")!;
+    const b = s.docs.find((d) => d.absPath === "/b.md")!;
+    expect(a.existsOnDisk).toBe(false);
+    expect(b.existsOnDisk).toBe(true);
   });
 });

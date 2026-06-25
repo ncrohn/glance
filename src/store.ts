@@ -52,6 +52,10 @@ export function markSaved(s: State, id: string): State {
   return mapDoc(s, id, (d) => ({ ...d, diskContent: d.editorContent, existsOnDisk: true }));
 }
 
+export function markRemoved(s: State, absPath: string): State {
+  return { ...s, docs: s.docs.map((d) => d.absPath === absPath ? { ...d, existsOnDisk: false } : d) };
+}
+
 export function applyDiskChange(s: State, id: string, diskContent: string): State {
   return mapDoc(s, id, (d) => ({
     ...d,

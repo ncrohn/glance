@@ -2,11 +2,11 @@ import "./styles.css";
 import "highlight.js/styles/github.css";
 import {
   State, emptyState, openDoc, closeDoc, setActive, getActive,
-  toggleViewMode, updateEditorContent, markSaved, applyDiskChange,
+  toggleViewMode, updateEditorContent, markSaved, applyDiskChange, markRemoved,
 } from "./store";
 import { isDirty } from "./document";
 import { renderMarkdown } from "./renderer";
-import { readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged } from "./ipc";
+import { readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved } from "./ipc";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
 import { confirmReload } from "./modal";
@@ -45,6 +45,7 @@ function renderTabBar(): void {
     const label = el("span", "label", d.fileName);
     label.onclick = () => { state = setActive(state, d.id); render(); };
     tab.appendChild(label);
+    if (!d.existsOnDisk) { const m = el("span", "removed", "(deleted)"); tab.appendChild(m); }
     const close = el("span", "close", "×");
     close.onclick = (ev) => { ev.stopPropagation(); closeTab(d.id); };
     tab.appendChild(close);
@@ -115,6 +116,7 @@ export async function openPath(absPath: string): Promise<void> {
 
 export async function start(): Promise<void> {
   await onOpenFile((absPath) => { void openPath(absPath); });
+  await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
   await onFileChanged(async (e) => {
     const doc = state.docs.find((d) => d.absPath === e.path);
     if (!doc) return;

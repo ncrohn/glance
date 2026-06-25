@@ -38,6 +38,9 @@ pub fn watch_file(
                     );
                 }
             }
+            if matches!(event.kind, EventKind::Remove(_)) {
+                let _ = app2.emit("file-removed", path2.clone());
+            }
         }
     })
     .map_err(|e| e.to_string())?;
