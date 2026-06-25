@@ -13,21 +13,26 @@ fn err(message: impl Into<String>) -> CliInstallResult {
     }
 }
 
-/// Symlink the currently-running Glance binary to `~/.local/bin/mdview`.
+/// Install a `~/.local/bin/mdview` wrapper that launches the currently-running
+/// Glance binary detached.
 ///
-/// Pointing at `current_exe()` (rather than a hardcoded /Applications path or a
-/// source-checkout wrapper) makes the CLI independent of where the repo lives
-/// and keeps it valid across app updates: it always resolves to the live binary
-/// inside whatever Glance.app is running.
+/// The wrapper backgrounds the binary (`… "$@" & `) so the CLI returns
+/// immediately even on a cold start — without it, the first `mdview <file>` of a
+/// session would *become* the GUI process and block the calling terminal until
+/// Glance quit. It targets `current_exe()` (not a hardcoded path or a
+/// source-checkout script), so it's independent of where the repo lives and
+/// stays valid across app updates.
 pub fn install_cli_tool() -> CliInstallResult {
+    use std::os::unix::fs::PermissionsExt;
+
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => return err(format!("Could not locate the Glance binary: {e}")),
     };
 
-    // A quarantined/translocated copy lives at a randomized read-only path; a
-    // symlink to it would break once the OS cleans it up. Tell the user to move
-    // the app into place first.
+    // A quarantined/translocated copy lives at a randomized read-only path that
+    // the OS later cleans up, so a wrapper pointing at it would break. Tell the
+    // user to move the app into place first.
     if exe.to_string_lossy().contains("AppTranslocation") {
         return err(
             "Glance is running from a quarantined copy. Move Glance.app to /Applications, reopen it, then try again.",
@@ -44,11 +49,21 @@ pub fn install_cli_tool() -> CliInstallResult {
     }
 
     let target = bindir.join("mdview");
+    let script = format!(
+        "#!/bin/sh\n\
+         # Glance CLI: launch/forward to Glance detached so the terminal returns\n\
+         # immediately even on a cold start (when this invocation becomes the app).\n\
+         \"{}\" \"$@\" >/dev/null 2>&1 &\n",
+        exe.display()
+    );
     // Replace any existing file or symlink at the target.
     let _ = std::fs::remove_file(&target);
-    if let Err(e) = std::os::unix::fs::symlink(&exe, &target) {
+    if let Err(e) = std::fs::write(&target, script) {
+        return err(format!("Could not write {}: {e}", target.display()));
+    }
+    if let Err(e) = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)) {
         return err(format!(
-            "Could not create the symlink at {}: {e}",
+            "Could not make {} executable: {e}",
             target.display()
         ));
     }

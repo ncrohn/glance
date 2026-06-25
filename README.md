@@ -21,10 +21,10 @@ A lightweight macOS markdown viewer and editor. Defaults to formatted view. Desi
 
 1. Get `Glance.app` (build it once with `scripts/install.sh` below, or open the generated `Glance_<version>_aarch64.dmg`) and drag it to `/Applications`.
 2. Open Glance.
-3. Menu **Glance ▸ Install 'mdview' Command Line Tool**. This symlinks the app's own binary to `~/.local/bin/mdview` — no terminal, no repo, and it stays valid across app updates.
+3. Menu **Glance ▸ Install 'mdview' Command Line Tool**. This writes a tiny `~/.local/bin/mdview` wrapper that launches the app's own binary — no terminal, no repo, and it stays valid across app updates.
 4. Ensure `~/.local/bin` is on your shell `PATH`.
 
-The CLI is just a symlink to the binary inside `Glance.app`; there is no separate wrapper script and it does not depend on this source checkout.
+The `mdview` wrapper is a two-line script that launches the binary inside `Glance.app` **detached**, so the command returns immediately even on a cold start (otherwise the first invocation would become the GUI process and block your terminal). It targets the installed binary, so it does not depend on this source checkout.
 
 ### From source (development machine)
 
@@ -34,7 +34,7 @@ The CLI is just a symlink to the binary inside `Glance.app`; there is no separat
 bash scripts/install.sh
 ```
 
-Builds Glance in release mode, copies `Glance.app` to `/Applications`, and symlinks `mdview` into `~/.local/bin` (same target as the menu item).
+Builds Glance in release mode, copies `Glance.app` to `/Applications`, and installs the `mdview` wrapper into `~/.local/bin` (same as the menu item).
 
 ## Usage
 
