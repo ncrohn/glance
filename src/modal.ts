@@ -34,9 +34,9 @@ export function showNotice(message: string, ok = true): void {
   const msg = document.createElement("p");
   msg.textContent = ok ? message : `⚠️ ${message}`;
   box.appendChild(msg);
-  const ok = document.createElement("button");
-  ok.textContent = "OK";
-  ok.onclick = () => { root.innerHTML = ""; };
-  box.appendChild(ok);
+  const okBtn = document.createElement("button");
+  okBtn.textContent = "OK";
+  okBtn.onclick = () => { root.innerHTML = ""; };
+  box.appendChild(okBtn);
   overlay.appendChild(box); root.appendChild(overlay);
 }
