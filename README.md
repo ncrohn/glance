@@ -13,7 +13,7 @@ A lightweight macOS markdown viewer and editor. Defaults to formatted view. Desi
 - **Session restore** — open tabs are saved at quit and restored on next launch.
 - **Deleted-file marker** — tabs whose files have been removed are marked visually.
 - **macOS light/dark** — follows the system appearance.
-- **Native macOS menu** — File, Edit, View, Window, Help with standard keyboard shortcuts.
+- **Native macOS menu** — app (Glance) and Edit menus with the standard editing shortcuts (undo/redo, cut/copy/paste/select-all) and Quit. App actions (⌘E toggle, ⌘S save) are handled in-window via keyboard shortcuts.
 
 ## Install
 
