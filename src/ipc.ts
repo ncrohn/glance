@@ -30,3 +30,7 @@ export function onFileChanged(
 export function onFileRemoved(cb: (path: string) => void): Promise<UnlistenFn> {
   return listen<string>("file-removed", (e) => cb(e.payload));
 }
+
+export function takeLaunchArgs(): Promise<string[]> {
+  return invoke<string[]>("take_launch_args");
+}

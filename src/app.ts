@@ -6,7 +6,7 @@ import {
 } from "./store";
 import { isDirty } from "./document";
 import { renderMarkdown } from "./renderer";
-import { readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved } from "./ipc";
+import { readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs } from "./ipc";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
 import { confirmReload } from "./modal";
@@ -108,7 +108,11 @@ export async function openPath(absPath: string): Promise<void> {
   if (already) { state = setActive(state, absPath); render(); return; }
   const contents = await readFile(absPath);
   state = openDoc(state, absPath, contents);
-  await watchFile(absPath);
+  try {
+    await watchFile(absPath);
+  } catch (err) {
+    console.warn("watchFile failed for", absPath, err);
+  }
   const recent = pushRecent(loadRecent(), absPath);
   localStorage.setItem(LS_RECENT, JSON.stringify(recent));
   render();
@@ -150,6 +154,10 @@ export async function start(): Promise<void> {
       if (doc) { state = toggleViewMode(state, doc.id); render(); }
     }
   });
+  const launchPaths = await takeLaunchArgs();
+  for (const p of launchPaths) {
+    try { await openPath(p); } catch { /* file gone or unreadable; skip */ }
+  }
   let toRestore: string[] = [];
   try { toRestore = JSON.parse(localStorage.getItem(LS_OPEN) || "[]"); } catch { /* ignore */ }
   for (const p of toRestore) {

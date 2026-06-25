@@ -6,11 +6,20 @@ use std::path::Path;
 use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
 
+#[derive(Default)]
+struct LaunchArgs(std::sync::Mutex<Vec<String>>);
+
 fn emit_open_files(app: &tauri::AppHandle, argv: &[String], cwd: &Path) {
     for raw in cli::md_paths_from_argv(argv) {
         let abs = cli::to_abs(&raw, cwd);
         let _ = app.emit("open-file", abs);
     }
+}
+
+#[tauri::command]
+fn take_launch_args(state: tauri::State<LaunchArgs>) -> Vec<String> {
+    let mut paths = state.0.lock().unwrap();
+    std::mem::take(&mut *paths)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -25,11 +34,13 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .manage(watcher::Watchers::default())
+        .manage(LaunchArgs::default())
         .invoke_handler(tauri::generate_handler![
             commands::read_file,
             commands::write_file,
             watcher::watch_file,
             watcher::unwatch_file,
+            take_launch_args,
         ])
         .setup(|app| {
             let handle = app.handle();
@@ -62,7 +73,11 @@ pub fn run() {
 
             let argv: Vec<String> = std::env::args().collect();
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
-            emit_open_files(&app.handle(), &argv, &cwd);
+            let launch_args = app.state::<LaunchArgs>();
+            let mut stored = launch_args.0.lock().unwrap();
+            for raw in cli::md_paths_from_argv(&argv) {
+                stored.push(cli::to_abs(&raw, &cwd));
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
