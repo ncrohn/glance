@@ -14,8 +14,13 @@
     "windows": [
       {
         "title": "Glance",
-        "width": 1000,
-        "height": 720
+        "width": 1040,
+        "height": 760,
+        "minWidth": 640,
+        "minHeight": 420,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "backgroundColor": "#15120E"
       }
     ],
     "security": {

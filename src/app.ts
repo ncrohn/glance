@@ -1,10 +1,9 @@
 import "./styles.css";
-import "highlight.js/styles/github.css";
 import {
   State, emptyState, openDoc, closeDoc, setActive, getActive,
   toggleViewMode, updateEditorContent, markSaved, applyDiskChange, markRemoved,
 } from "./store";
-import { isDirty } from "./document";
+import { isDirty, basename } from "./document";
 import { renderMarkdown } from "./renderer";
 import { readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs, onCliInstallResult } from "./ipc";
 import { mountEditor } from "./editor";
@@ -35,7 +34,7 @@ function el<K extends keyof HTMLElementTagNameMap>(
 }
 
 function renderTabBar(): void {
-  const bar = document.getElementById("tabbar")!;
+  const bar = document.getElementById("tabs")!;
   bar.innerHTML = "";
   for (const d of state.docs) {
     const tab = el("div", "tab");
@@ -53,6 +52,21 @@ function renderTabBar(): void {
   }
 }
 
+function renderActions(): void {
+  const host = document.getElementById("titlebar-actions")!;
+  host.innerHTML = "";
+  const doc = getActive(state);
+  if (!doc) return;
+  const seg = el("div", "segmented");
+  const read = el("button", doc.viewMode === "rendered" ? "on" : undefined, "Read");
+  const edit = el("button", doc.viewMode === "source" ? "on" : undefined, "Edit");
+  read.onclick = () => { if (doc.viewMode !== "rendered") { state = toggleViewMode(state, doc.id); render(); } };
+  edit.onclick = () => { if (doc.viewMode !== "source") { state = toggleViewMode(state, doc.id); render(); } };
+  seg.appendChild(read);
+  seg.appendChild(edit);
+  host.appendChild(seg);
+}
+
 function renderContent(): void {
   const host = document.getElementById("content")!;
   if (activeEditor) { activeEditor.destroy(); activeEditor = null; }
@@ -60,18 +74,31 @@ function renderContent(): void {
   const doc = getActive(state);
   if (!doc) {
     const empty = el("div", "empty");
-    empty.appendChild(el("p", undefined, "No document open."));
+    const wm = el("div", "wordmark");
+    wm.appendChild(document.createTextNode("Glance"));
+    wm.appendChild(el("span", "dot", "."));
+    empty.appendChild(wm);
+    empty.appendChild(el("div", "tagline", "A quiet place to read your markdown."));
     const recent = loadRecent();
     if (recent.length) {
-      empty.appendChild(el("p", undefined, "Recent:"));
+      const wrap = el("div", "recent");
+      wrap.appendChild(el("div", "recent-head", "Recent"));
       const ul = el("ul");
       for (const p of recent) {
-        const li = el("li", undefined, p);
+        const li = el("li");
+        li.appendChild(el("span", "name", basename(p)));
+        li.appendChild(el("span", "path", p));
         li.onclick = () => { void openPath(p); };
         ul.appendChild(li);
       }
-      empty.appendChild(ul);
+      wrap.appendChild(ul);
+      empty.appendChild(wrap);
     }
+    const hint = el("div", "hint");
+    hint.innerHTML =
+      'Open files with <kbd>mdview &lt;file&gt;</kbd> &nbsp;·&nbsp; ' +
+      'toggle source <kbd>⌘E</kbd> &nbsp;·&nbsp; save <kbd>⌘S</kbd>';
+    empty.appendChild(hint);
     host.appendChild(empty);
     return;
   }
@@ -92,6 +119,7 @@ function renderContent(): void {
 
 export function render(): void {
   renderTabBar();
+  renderActions();
   renderContent();
   saveSession();
 }
