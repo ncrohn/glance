@@ -3,6 +3,7 @@ mod commands;
 mod watcher;
 
 use std::path::Path;
+use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
 
 fn emit_open_files(app: &tauri::AppHandle, argv: &[String], cwd: &Path) {
@@ -31,6 +32,34 @@ pub fn run() {
             watcher::unwatch_file,
         ])
         .setup(|app| {
+            let handle = app.handle();
+
+            let app_menu = Submenu::with_items(
+                handle,
+                "Glance",
+                true,
+                &[
+                    &PredefinedMenuItem::hide(handle, None)?,
+                    &PredefinedMenuItem::quit(handle, None)?,
+                ],
+            )?;
+            let edit_menu = Submenu::with_items(
+                handle,
+                "Edit",
+                true,
+                &[
+                    &PredefinedMenuItem::undo(handle, None)?,
+                    &PredefinedMenuItem::redo(handle, None)?,
+                    &PredefinedMenuItem::separator(handle)?,
+                    &PredefinedMenuItem::cut(handle, None)?,
+                    &PredefinedMenuItem::copy(handle, None)?,
+                    &PredefinedMenuItem::paste(handle, None)?,
+                    &PredefinedMenuItem::select_all(handle, None)?,
+                ],
+            )?;
+            let menu = Menu::with_items(handle, &[&app_menu, &edit_menu])?;
+            app.set_menu(menu)?;
+
             let argv: Vec<String> = std::env::args().collect();
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
             emit_open_files(&app.handle(), &argv, &cwd);
