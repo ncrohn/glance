@@ -16,14 +16,20 @@ echo "Installing Glance.app to /Applications…"
 rm -rf "/Applications/Glance.app"
 cp -R "$APP_SRC" "/Applications/Glance.app"
 
-# Link the CLI into a dir that is actually on PATH. Prefer the user's dotfiles
-# bin, but only if it's on PATH (a dir that exists but isn't on PATH would leave
-# mdview uncallable); otherwise fall back to /usr/local/bin.
-DOTBIN="$HOME/dev/dotfiles/bin"
-case ":${PATH}:" in
-  *":${DOTBIN}:"*) TARGET="$DOTBIN/mdview" ;;
-  *)               TARGET="/usr/local/bin/mdview" ;;
-esac
+# Link the CLI into a dir that is BOTH on PATH and writable, so the symlink
+# actually resolves and we don't need sudo. Try, in order: the user's dotfiles
+# bin, ~/.local/bin, then /usr/local/bin (last resort — may need sudo).
+TARGET=""
+for d in "$HOME/dev/dotfiles/bin" "$HOME/.local/bin" "/usr/local/bin"; do
+  case ":${PATH}:" in *":${d}:"*) ;; *) continue ;; esac  # must be on PATH
+  [[ -d "$d" && -w "$d" ]] || continue                    # must be writable
+  TARGET="$d/mdview"
+  break
+done
+if [[ -z "$TARGET" ]]; then
+  echo "No writable dir on PATH found for mdview. Add ~/.local/bin to PATH and re-run, or symlink bin/mdview manually." >&2
+  exit 1
+fi
 chmod +x bin/mdview
 ln -sf "$(pwd)/bin/mdview" "$TARGET"
 echo "Linked mdview -> $TARGET"
