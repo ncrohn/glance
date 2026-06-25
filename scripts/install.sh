@@ -22,6 +22,10 @@ cp -R "$APP_SRC" "/Applications/Glance.app"
 # Command Line Tool" menu item; both point at the bundle binary so the CLI is
 # independent of this repo and survives app updates.
 APP_BIN="/Applications/Glance.app/Contents/MacOS/glance"
+if [[ ! -x "$APP_BIN" ]]; then
+  echo "Expected app binary not found at $APP_BIN" >&2
+  exit 1
+fi
 BINDIR="$HOME/.local/bin"
 mkdir -p "$BINDIR"
 ln -sf "$APP_BIN" "$BINDIR/mdview"

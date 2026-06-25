@@ -24,15 +24,15 @@ export function confirmReload(fileName: string): Promise<"mine" | "disk"> {
   });
 }
 
-export function showNotice(message: string): void {
+export function showNotice(message: string, ok = true): void {
   const root = document.getElementById("modal-root")!;
   root.innerHTML = "";
   const overlay = document.createElement("div");
   overlay.className = "modal";
   const box = document.createElement("div");
-  box.className = "box";
+  box.className = ok ? "box" : "box error";
   const msg = document.createElement("p");
-  msg.textContent = message;
+  msg.textContent = ok ? message : `⚠️ ${message}`;
   box.appendChild(msg);
   const ok = document.createElement("button");
   ok.textContent = "OK";

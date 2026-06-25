@@ -121,7 +121,7 @@ export async function openPath(absPath: string): Promise<void> {
 export async function start(): Promise<void> {
   await onOpenFile((absPath) => { void openPath(absPath); });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
-  await onCliInstallResult((r) => { showNotice(r.message); });
+  await onCliInstallResult((r) => { showNotice(r.message, r.ok); });
   await onFileChanged(async (e) => {
     const doc = state.docs.find((d) => d.absPath === e.path);
     if (!doc) return;
