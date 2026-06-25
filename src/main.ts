@@ -1,1 +1,2 @@
-export {};
+import { start } from "./app";
+start();
