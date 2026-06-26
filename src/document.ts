@@ -8,6 +8,8 @@ export interface Doc {
   editorContent: string;
   viewMode: ViewMode;
   existsOnDisk: boolean;
+  annotations: import("./annotations").Annotation[];
+  resolutions: Record<string, import("./annotations").Resolution>;
 }
 
 export function basename(path: string): string {
@@ -24,6 +26,8 @@ export function createDoc(absPath: string, diskContent: string): Doc {
     editorContent: diskContent,
     viewMode: "rendered",
     existsOnDisk: true,
+    annotations: [],
+    resolutions: {},
   };
 }
 

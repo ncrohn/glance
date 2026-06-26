@@ -1,4 +1,5 @@
 import { Doc, ViewMode, createDoc } from "./document";
+import type { Annotation, Resolution } from "./annotations";
 
 export interface State {
   docs: Doc[];
@@ -63,4 +64,12 @@ export function applyDiskChange(s: State, id: string, diskContent: string): Stat
     editorContent: diskContent,
     existsOnDisk: true,
   }));
+}
+
+export function setDocAnnotations(s: State, id: string, annotations: Annotation[]): State {
+  return mapDoc(s, id, (d) => ({ ...d, annotations }));
+}
+
+export function setDocResolutions(s: State, id: string, resolutions: Record<string, Resolution>): State {
+  return mapDoc(s, id, (d) => ({ ...d, resolutions }));
 }
