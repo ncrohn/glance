@@ -3,6 +3,7 @@ pub mod annotations;
 mod cli;
 mod cli_install;
 mod commands;
+mod setup;
 mod watcher;
 
 use std::path::Path;
@@ -52,9 +53,9 @@ pub fn run() {
             take_launch_args,
         ])
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == "install_cli" {
-                let result = cli_install::install_cli_tool();
-                let _ = app.emit("cli-install-result", result);
+            if event.id().as_ref() == "setup_integration" {
+                let results = setup::setup_claude_integration();
+                let _ = app.emit("setup-result", results);
             }
         })
         .setup(|app| {
@@ -62,8 +63,8 @@ pub fn run() {
 
             let install_cli_item = MenuItem::with_id(
                 handle,
-                "install_cli",
-                "Install 'mdview' Command Line Tool",
+                "setup_integration",
+                "Set up Claude Integration…",
                 true,
                 None::<&str>,
             )?;
