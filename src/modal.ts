@@ -1,4 +1,6 @@
 import type { SetupStep } from "./ipc";
+import { openExternal } from "./ipc";
+import appIcon from "./assets/app-icon.png";
 
 // Shared modal scaffold. Builds the overlay + card, wires Escape / backdrop
 // click to a `close` callback, and returns the card so callers fill the body.
@@ -152,6 +154,54 @@ export function showSetupResult(steps: SetupStep[]): void {
     list.appendChild(row);
   }
   m.body.appendChild(list);
+
+  const okBtn = button("OK", true);
+  okBtn.onclick = m.close;
+  m.footer.appendChild(okBtn);
+  okBtn.focus();
+}
+
+// About box — app icon, wordmark, version, and attribution. Centered layout,
+// no title bar (the icon is the header).
+export function showAbout(version: string): void {
+  const m = openModal({ title: "", onEscape: () => m.close() });
+  m.card.classList.add("about");
+  m.card.querySelector(".modal-title")?.remove();
+
+  const icon = document.createElement("img");
+  icon.className = "about-icon";
+  icon.src = appIcon;
+  icon.alt = "Glance";
+
+  const name = document.createElement("div");
+  name.className = "about-name";
+  name.textContent = "Glance";
+
+  const tagline = document.createElement("div");
+  tagline.className = "about-tagline";
+  tagline.textContent = "A markdown companion for working with AI.";
+
+  const ver = document.createElement("div");
+  ver.className = "about-version";
+  ver.textContent = `Version ${version}`;
+
+  const meta = document.createElement("div");
+  meta.className = "about-meta";
+  const dev = document.createElement("div");
+  dev.textContent = "Developed by Nick Crohn";
+  const copy = document.createElement("div");
+  copy.textContent = "© 2026 Escapement Labs, LLC";
+  meta.append(dev, copy);
+
+  // <a> for semantics, but preventDefault + openExternal so it opens in the
+  // system browser instead of navigating (and replacing) the app webview.
+  const link = document.createElement("a");
+  link.className = "about-link";
+  link.href = "https://escapementlab.com";
+  link.textContent = "escapementlab.com";
+  link.onclick = (e) => { e.preventDefault(); void openExternal("https://escapementlab.com"); };
+
+  m.body.append(icon, name, tagline, ver, meta, link);
 
   const okBtn = button("OK", true);
   okBtn.onclick = m.close;

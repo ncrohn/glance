@@ -52,14 +52,27 @@ pub fn run() {
             take_launch_args,
         ])
         .on_menu_event(|app, event| {
-            if event.id().as_ref() == "setup_integration" {
-                let results = setup::setup_claude_integration();
-                let _ = app.emit("setup-result", results);
+            match event.id().as_ref() {
+                "setup_integration" => {
+                    let results = setup::setup_claude_integration();
+                    let _ = app.emit("setup-result", results);
+                }
+                "about_glance" => {
+                    let _ = app.emit("show-about", ());
+                }
+                _ => {}
             }
         })
         .setup(|app| {
             let handle = app.handle();
 
+            let about_item = MenuItem::with_id(
+                handle,
+                "about_glance",
+                "About Glance",
+                true,
+                None::<&str>,
+            )?;
             let install_cli_item = MenuItem::with_id(
                 handle,
                 "setup_integration",
@@ -72,6 +85,8 @@ pub fn run() {
                 "Glance",
                 true,
                 &[
+                    &about_item,
+                    &PredefinedMenuItem::separator(handle)?,
                     &install_cli_item,
                     &PredefinedMenuItem::separator(handle)?,
                     &PredefinedMenuItem::hide(handle, None)?,

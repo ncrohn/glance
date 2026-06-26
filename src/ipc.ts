@@ -1,6 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { Annotation, AnnotationStore, Resolution } from "./annotations";
+
+export function appVersion(): Promise<string> {
+  return getVersion();
+}
+
+// Open a URL in the user's default browser (never in the app webview).
+export function openExternal(url: string): Promise<void> {
+  return openUrl(url);
+}
 
 export function readFile(path: string): Promise<string> {
   return invoke<string>("read_file", { path });
@@ -68,4 +79,8 @@ export function onAnnotationsChanged(cb: (docPath: string) => void): Promise<Unl
 
 export function onSetupResult(cb: (steps: SetupStep[]) => void): Promise<UnlistenFn> {
   return listen<SetupStep[]>("setup-result", (e) => cb(e.payload));
+}
+
+export function onShowAbout(cb: () => void): Promise<UnlistenFn> {
+  return listen("show-about", () => cb());
 }

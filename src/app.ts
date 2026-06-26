@@ -9,14 +9,14 @@ import { renderMarkdown } from "./renderer";
 import {
   readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs,
   readAnnotations, writeAnnotations, resolveAnchors, ensureAnnotationStore,
-  watchAnnotations, onAnnotationsChanged, onSetupResult,
+  watchAnnotations, onAnnotationsChanged, onSetupResult, onShowAbout, appVersion,
 } from "./ipc";
 import { addAnnotation, removeAnnotation, genId, type Annotation } from "./annotations";
 import { captureSelection } from "./anchor-capture";
 import { renderRail, applyHighlights, mountSelectionToolbar } from "./annotation-ui";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
-import { confirmReload, promptText, showSetupResult } from "./modal";
+import { confirmReload, promptText, showSetupResult, showAbout } from "./modal";
 import { openPaths, pushRecent } from "./session";
 
 const LS_OPEN = "glance.openPaths";
@@ -229,6 +229,7 @@ export async function start(): Promise<void> {
   await onOpenFile((absPath) => { void openPath(absPath); });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
   await onSetupResult((steps) => { showSetupResult(steps); });
+  await onShowAbout(async () => { showAbout(await appVersion()); });
   await onAnnotationsChanged((docPath) => { void loadAnnotations(docPath); });
   await onFileChanged(async (e) => {
     const doc = state.docs.find((d) => d.absPath === e.path);
