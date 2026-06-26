@@ -317,6 +317,8 @@ pub fn setup_claude_integration() -> Vec<StepResult> {
         StepResult { ok: cli.ok, label: "Install mdview CLI".to_string(), message: cli.message },
         register_mcp(),
         write_guidance(),
+        install_skill(),
+        install_open_hook(),
     ]
 }
 
