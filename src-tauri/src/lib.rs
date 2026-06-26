@@ -1,4 +1,5 @@
 mod anchor;
+mod annotations;
 mod cli;
 mod cli_install;
 mod commands;
