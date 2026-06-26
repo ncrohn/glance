@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { Annotation, AnnotationStore, Resolution } from "./annotations";
 
 export function readFile(path: string): Promise<string> {
   return invoke<string>("read_file", { path });
@@ -34,14 +35,6 @@ export function onFileRemoved(cb: (path: string) => void): Promise<UnlistenFn> {
 export function takeLaunchArgs(): Promise<string[]> {
   return invoke<string[]>("take_launch_args");
 }
-
-export function onCliInstallResult(
-  cb: (r: { ok: boolean; message: string }) => void,
-): Promise<UnlistenFn> {
-  return listen<{ ok: boolean; message: string }>("cli-install-result", (e) => cb(e.payload));
-}
-
-import type { Annotation, AnnotationStore, Resolution } from "./annotations";
 
 export interface SetupStep {
   ok: boolean;

@@ -1,4 +1,6 @@
+use crate::cli_install::install_cli_tool;
 use serde::Serialize;
+use std::path::PathBuf;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct StepResult {
@@ -49,9 +51,6 @@ pub fn merge_mcp_config(existing: &str, name: &str, command: &str) -> String {
     );
     serde_json::to_string_pretty(&root).unwrap()
 }
-
-use crate::cli_install::install_cli_tool;
-use std::path::PathBuf;
 
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)

@@ -34,13 +34,26 @@ fn view_of(a: &Annotation, text: &str) -> AnnotationView {
 }
 
 /// Build the view list, optionally filtered by status (default "open").
+///
+/// Filtering happens on the resolved view so that `orphaned` (a live anchor
+/// state, not a stored status) is meaningful:
+///   "all"      → every annotation
+///   "open"     → status == "open" AND anchor != "orphaned"
+///   "resolved" → status == "resolved"
+///   "orphaned" → anchor == "orphaned" (quote absent from current text)
 fn build_views(store: &AnnotationStore, text: &str, status_filter: Option<&str>) -> Vec<AnnotationView> {
     let filter = status_filter.unwrap_or("open");
     store
         .annotations
         .iter()
-        .filter(|a| filter == "all" || a.status == filter)
         .map(|a| view_of(a, text))
+        .filter(|v| match filter {
+            "all" => true,
+            "open" => v.status == "open" && v.anchor != "orphaned",
+            "resolved" => v.status == "resolved",
+            "orphaned" => v.anchor == "orphaned",
+            _ => false,
+        })
         .collect()
 }
 
@@ -101,6 +114,40 @@ mod tests {
         assert!(apply_resolve(&mut store, "a"));
         assert_eq!(store.annotations[0].status, "resolved");
         assert!(!apply_resolve(&mut store, "missing"));
+    }
+
+    #[test]
+    fn handle_ping_returns_empty_ok() {
+        let result = handle("ping", &json!({}));
+        assert!(matches!(result, Some(Ok(_))), "ping must return Some(Ok(_))");
+        if let Some(Ok(v)) = result {
+            assert_eq!(v, json!({}));
+        }
+    }
+
+    #[test]
+    fn build_views_orphaned_filter_returns_unresolvable() {
+        // Quote absent from text AND line_hint out of range → resolve_anchor returns "orphaned".
+        // (If line_hint were in range the fallback would be "drifted", not "orphaned".)
+        let a = Annotation {
+            id: "a".into(),
+            quote: "NOTINTEXTEVER".into(),
+            prefix: "".into(),
+            suffix: "".into(),
+            line_hint: LineHint { start: 99, end: 99 },
+            note: "note".into(),
+            status: "open".into(),
+            author: "user".into(),
+            created_at: "t".into(),
+        };
+        let store = store_of(vec![a]);
+        let text = "hello world\n"; // 1 line only, so line_hint 99 is out of range → orphaned
+        let orphaned = build_views(&store, text, Some("orphaned"));
+        assert_eq!(orphaned.len(), 1, "orphaned filter must include unresolvable annotation");
+        assert_eq!(orphaned[0].id, "a");
+        assert_eq!(orphaned[0].anchor, "orphaned");
+        let open = build_views(&store, text, Some("open"));
+        assert_eq!(open.len(), 0, "open filter must exclude orphaned annotations");
     }
 }
 
@@ -223,7 +270,8 @@ fn handle(method: &str, params: &Value) -> Option<Result<Value, (i64, String)>> 
                 } ]
             })))
         }
-        _ => None, // notifications (e.g. notifications/initialized) and unknowns: no reply
+        "ping" => Some(Ok(json!({}))),
+        _ => None, // JSON-RPC notifications (no id): stay silent; unknown requests handled in main
     }
 }
 
@@ -250,7 +298,12 @@ fn main() {
             Some(Err((code, message))) => {
                 id.map(|id| json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }))
             }
-            None => None,
+            // Notification (no id): stay silent. Unknown method WITH id: return -32601.
+            None => id.map(|id| json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32601, "message": format!("Method not found: {method}") }
+            })),
         };
 
         if let Some(resp) = response {

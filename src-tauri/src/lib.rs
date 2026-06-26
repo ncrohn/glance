@@ -48,7 +48,6 @@ pub fn run() {
             annotations::read_annotations,
             annotations::write_annotations,
             annotations::resolve_anchors,
-            annotations::annotation_store_path,
             annotations::ensure_annotation_store,
             take_launch_args,
         ])

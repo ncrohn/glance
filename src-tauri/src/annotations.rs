@@ -1,4 +1,4 @@
-use crate::anchor::Annotation;
+use crate::anchor::{resolve_anchor, Annotation, Resolution};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::path::PathBuf;
@@ -50,8 +50,6 @@ pub fn write_store(store: &AnnotationStore) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
-use crate::anchor::{resolve_anchor, Resolution};
-
 #[tauri::command]
 pub fn read_annotations(path: String) -> AnnotationStore {
     read_store(&path)
@@ -65,11 +63,6 @@ pub fn write_annotations(store: AnnotationStore) -> Result<(), String> {
 #[tauri::command]
 pub fn resolve_anchors(text: String, annotations: Vec<Annotation>) -> Vec<Resolution> {
     annotations.iter().map(|a| resolve_anchor(&text, a)).collect()
-}
-
-#[tauri::command]
-pub fn annotation_store_path(path: String) -> Option<String> {
-    store_path_for(&path).map(|p| p.to_string_lossy().to_string())
 }
 
 /// Ensure the store file exists (so the OS file watcher can attach to it) and
