@@ -304,7 +304,7 @@ fn install_open_hook() -> StepResult {
     }
     let settings_path = home.join(".claude").join("settings.json");
     let existing = std::fs::read_to_string(&settings_path).unwrap_or_default();
-    let merged = merge_settings_hook(&existing, &script_path.to_string_lossy());
+    let merged = merge_settings_hook(&existing, script_path.to_string_lossy().as_ref());
     match std::fs::write(&settings_path, merged) {
         Ok(_) => StepResult { ok: true, label, message: format!("Installed auto-open hook → {}", script_path.display()) },
         Err(e) => StepResult { ok: false, label, message: format!("Could not write {}: {e}", settings_path.display()) },
