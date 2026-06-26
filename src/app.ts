@@ -2,10 +2,18 @@ import "./styles.css";
 import {
   State, emptyState, openDoc, closeDoc, setActive, getActive,
   toggleViewMode, updateEditorContent, markSaved, applyDiskChange, markRemoved,
+  setDocAnnotations, setDocResolutions,
 } from "./store";
 import { isDirty, basename } from "./document";
 import { renderMarkdown } from "./renderer";
-import { readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs, onCliInstallResult } from "./ipc";
+import { readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs } from "./ipc";
+import {
+  readAnnotations, writeAnnotations, resolveAnchors, ensureAnnotationStore,
+  watchAnnotations, onAnnotationsChanged, onSetupResult,
+} from "./ipc";
+import { addAnnotation, removeAnnotation, genId, type Annotation } from "./annotations";
+import { captureSelection } from "./anchor-capture";
+import { renderRail, applyHighlights, mountSelectionToolbar } from "./annotation-ui";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
 import { confirmReload, showNotice } from "./modal";
@@ -23,6 +31,7 @@ function saveSession(): void {
 
 let state: State = emptyState();
 let activeEditor: { destroy(): void } | null = null;
+let teardownToolbar: (() => void) | null = null;
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K, cls?: string, text?: string,
@@ -31,6 +40,66 @@ function el<K extends keyof HTMLElementTagNameMap>(
   if (cls) e.className = cls;
   if (text != null) e.textContent = text;
   return e;
+}
+
+async function loadAnnotations(absPath: string): Promise<void> {
+  const store = await readAnnotations(absPath);
+  state = setDocAnnotations(state, absPath, store.annotations);
+  await refreshResolutions(absPath);
+  render();
+}
+
+async function refreshResolutions(absPath: string): Promise<void> {
+  const doc = state.docs.find((d) => d.absPath === absPath);
+  if (!doc) return;
+  const resList = await resolveAnchors(doc.editorContent, doc.annotations);
+  const map: Record<string, import("./annotations").Resolution> = {};
+  for (const r of resList) map[r.id] = r;
+  state = setDocResolutions(state, absPath, map);
+}
+
+async function persistAnnotations(absPath: string): Promise<void> {
+  const doc = state.docs.find((d) => d.absPath === absPath);
+  if (!doc) return;
+  await writeAnnotations({ docPath: absPath, annotations: doc.annotations });
+  await refreshResolutions(absPath);
+}
+
+async function startComment(absPath: string): Promise<void> {
+  const doc = state.docs.find((d) => d.absPath === absPath);
+  if (!doc) return;
+  const cap = captureSelection(doc.editorContent);
+  if (!cap) return;
+  const note = window.prompt(`Comment on "${cap.quote.slice(0, 40)}…"`);
+  if (!note) return;
+  const annotation: Annotation = {
+    id: genId(), quote: cap.quote, prefix: cap.prefix, suffix: cap.suffix,
+    lineHint: cap.lineHint, note, status: "open", author: "user",
+    createdAt: new Date().toISOString(),
+  };
+  state = setDocAnnotations(state, absPath, addAnnotation(doc.annotations, annotation));
+  await persistAnnotations(absPath);
+  render();
+}
+
+function renderRailFor(): void {
+  const host = document.getElementById("rail");
+  if (!host) return;
+  const doc = getActive(state);
+  if (!doc) { host.innerHTML = ""; return; }
+  renderRail(host, doc.annotations, doc.resolutions, {
+    onScrollTo: (a) => {
+      const r = doc.resolutions[a.id];
+      if (r?.startLine == null) return;
+      const node = document.querySelector(`[data-sourceline="${r.startLine}"]`);
+      node?.scrollIntoView({ behavior: "smooth", block: "center" });
+    },
+    onRemove: (a) => {
+      state = setDocAnnotations(state, doc.absPath, removeAnnotation(doc.annotations, a.id));
+      void persistAnnotations(doc.absPath);
+      render();
+    },
+  });
 }
 
 function renderTabBar(): void {
@@ -114,6 +183,9 @@ function renderContent(): void {
     const view = el("div", "rendered");
     view.innerHTML = renderMarkdown(doc.editorContent);
     host.appendChild(view);
+    applyHighlights(view, doc.resolutions);
+    if (teardownToolbar) teardownToolbar();
+    teardownToolbar = mountSelectionToolbar(view, () => void startComment(doc.absPath));
   }
 }
 
@@ -121,6 +193,7 @@ export function render(): void {
   renderTabBar();
   renderActions();
   renderContent();
+  renderRailFor();
   saveSession();
 }
 
@@ -143,13 +216,24 @@ export async function openPath(absPath: string): Promise<void> {
   }
   const recent = pushRecent(loadRecent(), absPath);
   localStorage.setItem(LS_RECENT, JSON.stringify(recent));
-  render();
+  try {
+    const storePath = await ensureAnnotationStore(absPath);
+    await watchAnnotations(storePath, absPath);
+  } catch (err) {
+    console.warn("annotation store watch failed for", absPath, err);
+  }
+  await loadAnnotations(absPath);
 }
 
 export async function start(): Promise<void> {
   await onOpenFile((absPath) => { void openPath(absPath); });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
-  await onCliInstallResult((r) => { showNotice(r.message, r.ok); });
+  await onSetupResult((steps) => {
+    const ok = steps.every((s) => s.ok);
+    const body = steps.map((s) => `${s.ok ? "✓" : "✗"} ${s.label}: ${s.message}`).join("\n");
+    showNotice(body, ok);
+  });
+  await onAnnotationsChanged((docPath) => { void loadAnnotations(docPath); });
   await onFileChanged(async (e) => {
     const doc = state.docs.find((d) => d.absPath === e.path);
     if (!doc) return;

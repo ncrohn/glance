@@ -12,7 +12,10 @@
       <div id="tabs" class="tabs" data-tauri-drag-region></div>
       <div id="titlebar-actions" class="titlebar-actions" data-tauri-drag-region></div>
     </header>
-    <main id="content"></main>
+    <div id="workspace">
+      <main id="content"></main>
+      <aside id="rail" class="empty"></aside>
+    </div>
     <div id="modal-root"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>
