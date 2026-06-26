@@ -4,7 +4,10 @@ cd "$(dirname "$0")/.."
 
 echo "Building Glance (release)…"
 pnpm install
-pnpm tauri build
+# The bundle config overlay adds the glance-mcp sidecar (externalBin) and a
+# beforeBuildCommand that stages it. Kept out of the base tauri.conf.json so
+# everyday `cargo test` / `tauri dev` don't require the sidecar to exist.
+pnpm tauri build --config src-tauri/tauri.bundle.conf.json
 
 APP_SRC="src-tauri/target/release/bundle/macos/Glance.app"
 if [[ ! -d "$APP_SRC" ]]; then

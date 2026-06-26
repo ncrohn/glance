@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "pnpm build && bash scripts/prepare-sidecar.sh"
+  },
+  "bundle": {
+    "externalBin": ["binaries/glance-mcp"]
+  }
+}
