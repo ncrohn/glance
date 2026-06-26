@@ -403,34 +403,82 @@ body {
 /* ---- Modal / notice --------------------------------------------------- */
 .modal {
   position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+  padding: 24px;
   background: color-mix(in srgb, var(--bg) 40%, rgba(0,0,0,0.45));
   backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
   z-index: 100;
+  animation: modal-fade 0.14s ease;
 }
+@keyframes modal-fade { from { opacity: 0; } to { opacity: 1; } }
+
 .modal .box {
-  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
-  padding: 22px 24px; max-width: 440px; box-shadow: var(--shadow);
+  display: flex; flex-direction: column;
+  width: 100%; max-width: 460px; max-height: 100%;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+  padding: 24px 26px 20px; box-shadow: var(--shadow);
   font-family: var(--font-ui);
+  animation: modal-pop 0.16s cubic-bezier(0.2, 0.9, 0.3, 1.2);
 }
-.modal .box.error { border-color: var(--accent); }
-.modal .modal-input {
-  width: 100%; box-sizing: border-box; margin-top: 10px;
+@keyframes modal-pop { from { transform: translateY(6px) scale(0.985); } to { transform: none; } }
+.modal .box.error { border-color: var(--accent-line); }
+
+.modal-title {
+  margin: 0 0 14px; font-family: var(--font-display); font-weight: 600;
+  font-size: 21px; line-height: 1.2; letter-spacing: -0.01em; color: var(--ink);
+}
+.modal .box.error .modal-title { color: var(--accent); }
+
+.modal-body { overflow-y: auto; }
+.modal-body p { margin: 0; color: var(--ink-soft); line-height: 1.55; font-size: 14px; }
+.modal-body strong { font-weight: 600; color: var(--ink); }
+
+.modal-input {
+  width: 100%; box-sizing: border-box; margin-top: 4px;
   font-family: var(--font-ui); font-size: 14px;
-  padding: 9px 12px; border-radius: 9px;
+  padding: 10px 12px; border-radius: 10px;
   border: 1px solid var(--border); background: var(--bg); color: var(--ink);
+  transition: border-color 0.13s ease, box-shadow 0.13s ease;
 }
-.modal .modal-input:focus { outline: none; border-color: var(--accent); }
-.modal .box p { margin: 0 0 4px; color: var(--ink); line-height: 1.5; }
-.modal .box strong { font-weight: 600; }
-.modal button {
+.modal-input:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+
+.modal-footer {
+  display: flex; justify-content: flex-end; gap: 8px;
+  margin-top: 18px;
+}
+.modal-btn {
   font-family: var(--font-ui); font-size: 13px; font-weight: 600;
-  margin: 14px 8px 0 0; padding: 7px 16px; border-radius: 9px;
-  border: 1px solid var(--border); background: var(--raised); color: var(--ink);
-  cursor: default; transition: background 0.13s ease, border-color 0.13s ease;
+  padding: 8px 16px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--raised); color: var(--ink-soft);
+  cursor: default; transition: background 0.13s ease, border-color 0.13s ease, color 0.13s ease;
 }
-.modal button:hover { border-color: var(--accent); color: var(--accent); }
-.modal button:first-of-type { background: var(--accent); color: #fff; border-color: var(--accent); }
-.modal button:first-of-type:hover { background: var(--accent-bright); color: #fff; }
+.modal-btn:hover { border-color: var(--accent); color: var(--accent); }
+.modal-btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.modal-btn.primary:hover { background: var(--accent-bright); border-color: var(--accent-bright); color: #fff; }
+
+/* Setup result — one row per step */
+.setup-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.setup-step {
+  display: flex; gap: 11px; align-items: baseline;
+  padding: 9px 10px; border-radius: 10px;
+}
+.setup-step + .setup-step { border-top: 1px solid var(--border-soft); }
+.setup-glyph {
+  flex: none; width: 18px; text-align: center;
+  font-weight: 700; font-size: 13px; line-height: 1.4;
+}
+.setup-step.ok .setup-glyph { color: var(--accent); }
+.setup-step.fail .setup-glyph { color: #c0392b; }
+.setup-step.fail { background: var(--accent-tint); }
+.setup-text { min-width: 0; }
+.setup-label { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.setup-detail {
+  margin-top: 2px; font-size: 12.5px; line-height: 1.5; color: var(--muted);
+  word-break: break-word;
+}
+.setup-detail { font-family: var(--font-ui); }
 
 /* ── Annotation workspace + rail ───────────────────────────── */
 #workspace { display: flex; flex: 1; min-height: 0; }

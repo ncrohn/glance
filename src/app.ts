@@ -16,7 +16,7 @@ import { captureSelection } from "./anchor-capture";
 import { renderRail, applyHighlights, mountSelectionToolbar } from "./annotation-ui";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
-import { confirmReload, showNotice, promptText } from "./modal";
+import { confirmReload, promptText, showSetupResult } from "./modal";
 import { openPaths, pushRecent } from "./session";
 
 const LS_OPEN = "glance.openPaths";
@@ -228,11 +228,7 @@ export async function openPath(absPath: string): Promise<void> {
 export async function start(): Promise<void> {
   await onOpenFile((absPath) => { void openPath(absPath); });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
-  await onSetupResult((steps) => {
-    const ok = steps.every((s) => s.ok);
-    const body = steps.map((s) => `${s.ok ? "✓" : "✗"} ${s.label}: ${s.message}`).join("\n");
-    showNotice(body, ok);
-  });
+  await onSetupResult((steps) => { showSetupResult(steps); });
   await onAnnotationsChanged((docPath) => { void loadAnnotations(docPath); });
   await onFileChanged(async (e) => {
     const doc = state.docs.find((d) => d.absPath === e.path);
