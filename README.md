@@ -14,7 +14,7 @@ A lightweight macOS markdown viewer and editor. Defaults to formatted view. Desi
 - **Session restore** — open tabs are saved at quit and restored on next launch.
 - **Deleted-file marker** — tabs whose files have been removed are marked visually.
 - **macOS light/dark** — follows the system appearance.
-- **Native macOS menu** — app (Glance) and Edit menus with the standard editing shortcuts (undo/redo, cut/copy/paste/select-all) and Quit. The Glance menu also has **"Install 'mdview' Command Line Tool"**. App actions (⌘E toggle, ⌘S save) are handled in-window via keyboard shortcuts.
+- **Native macOS menu** — app (Glance) and Edit menus with the standard editing shortcuts (undo/redo, cut/copy/paste/select-all) and Quit. The Glance menu also has **"Set up Claude Integration…"**. App actions (⌘E toggle, ⌘S save) are handled in-window via keyboard shortcuts.
 
 ## Install
 
@@ -22,7 +22,7 @@ A lightweight macOS markdown viewer and editor. Defaults to formatted view. Desi
 
 1. Get `Glance.app` (build it once with `scripts/install.sh` below, or open the generated `Glance_<version>_aarch64.dmg`) and drag it to `/Applications`.
 2. Open Glance.
-3. Menu **Glance ▸ Install 'mdview' Command Line Tool**. This writes a tiny `~/.local/bin/mdview` wrapper that launches the app's own binary — no terminal, no repo, and it stays valid across app updates.
+3. Menu **Glance ▸ Set up Claude Integration…**. This installs a tiny `~/.local/bin/mdview` wrapper, registers the `glance-mcp` server into `~/.claude.json`, and appends review guidance to `~/.claude/CLAUDE.md` — all in one click.
 4. Ensure `~/.local/bin` is on your shell `PATH`.
 
 The `mdview` wrapper is a two-line script that launches the binary inside `Glance.app` **detached**, so the command returns immediately even on a cold start (otherwise the first invocation would become the GUI process and block your terminal). It targets the installed binary, so it does not depend on this source checkout.
@@ -35,7 +35,7 @@ The `mdview` wrapper is a two-line script that launches the binary inside `Glanc
 bash scripts/install.sh
 ```
 
-Builds Glance in release mode, copies `Glance.app` to `/Applications`, and installs the `mdview` wrapper into `~/.local/bin` (same as the menu item).
+Builds Glance in release mode, copies `Glance.app` to `/Applications`, and installs the `mdview` wrapper into `~/.local/bin` (same as the **Set up Claude Integration…** menu item).
 
 ## Usage
 
@@ -70,7 +70,7 @@ When creating or updating a markdown file that the user should review, open it w
 
 **Glance ▸ Set up Claude Integration…** wires everything up in one click:
 
-1. Installs the `mdview` CLI wrapper (same as "Install 'mdview' Command Line Tool").
+1. Installs the `~/.local/bin/mdview` CLI wrapper.
 2. Registers the bundled `glance-mcp` server into `~/.claude.json` under `mcpServers.glance`. The command path points to the binary inside the running `Glance.app`, so it works on any machine where Glance is installed and survives app updates.
 3. Appends a review guidance block to `~/.claude/CLAUDE.md` (idempotent — safe to run again).
 
