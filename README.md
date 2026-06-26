@@ -22,7 +22,7 @@ A lightweight macOS markdown viewer and editor. Defaults to formatted view. Desi
 
 1. Get `Glance.app` (build it once with `scripts/install.sh` below, or open the generated `Glance_<version>_aarch64.dmg`) and drag it to `/Applications`.
 2. Open Glance.
-3. Menu **Glance ▸ Set up Claude Integration…**. This installs a tiny `~/.local/bin/mdview` wrapper, registers the `glance-mcp` server into `~/.claude.json`, and appends review guidance to `~/.claude/CLAUDE.md` — all in one click.
+3. Menu **Glance ▸ Set up Claude Integration…**. This installs a tiny `~/.local/bin/mdview` wrapper, registers the `glance-mcp` server into `~/.claude.json`, appends review guidance to `~/.claude/CLAUDE.md`, installs the `glance` agent skill, and registers an auto-open hook — all in one click.
 4. Ensure `~/.local/bin` is on your shell `PATH`.
 
 The `mdview` wrapper is a two-line script that launches the binary inside `Glance.app` **detached**, so the command returns immediately even on a cold start (otherwise the first invocation would become the GUI process and block your terminal). It targets the installed binary, so it does not depend on this source checkout.
@@ -73,6 +73,8 @@ When creating or updating a markdown file that the user should review, open it w
 1. Installs the `~/.local/bin/mdview` CLI wrapper.
 2. Registers the bundled `glance-mcp` server into `~/.claude.json` under `mcpServers.glance`. The command path points to the binary inside the running `Glance.app`, so it works on any machine where Glance is installed and survives app updates.
 3. Appends a review guidance block to `~/.claude/CLAUDE.md` (idempotent — safe to run again).
+4. Installs a `glance` agent skill at `~/.claude/skills/glance/SKILL.md`. The skill teaches Claude the review-comment loop: open a file with `mdview`, read open comments with `list_annotations`, make the changes, then call `resolve_annotation` on each comment. It also describes how to interpret anchor states (`exact`, `quote-only`, `drifted`, `orphaned`) so Claude handles drifted or ambiguous annotations correctly.
+5. Installs an auto-open hook (`~/.claude/skills/glance/open-md-hook.sh`) and registers it as a `PostToolUse`/`Write` entry in `~/.claude/settings.json`. Whenever Claude writes a new `.md` file inside the current project directory, the hook opens it in Glance automatically — so you see the document appear without running `mdview` yourself. The hook skips `node_modules`, dot-directories, and files outside the working directory, and always exits 0 so it can never block the agent.
 
 All paths are derived from the running app's binary location, not this source checkout.
 
