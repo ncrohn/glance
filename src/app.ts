@@ -6,8 +6,8 @@ import {
 } from "./store";
 import { isDirty, basename } from "./document";
 import { renderMarkdown } from "./renderer";
-import { readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs } from "./ipc";
 import {
+  readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs,
   readAnnotations, writeAnnotations, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onSetupResult,
 } from "./ipc";
@@ -140,6 +140,7 @@ function renderContent(): void {
   const host = document.getElementById("content")!;
   if (activeEditor) { activeEditor.destroy(); activeEditor = null; }
   host.innerHTML = "";
+  if (teardownToolbar) { teardownToolbar(); teardownToolbar = null; }
   const doc = getActive(state);
   if (!doc) {
     const empty = el("div", "empty");
@@ -184,7 +185,6 @@ function renderContent(): void {
     view.innerHTML = renderMarkdown(doc.editorContent);
     host.appendChild(view);
     applyHighlights(view, doc.resolutions);
-    if (teardownToolbar) teardownToolbar();
     teardownToolbar = mountSelectionToolbar(view, () => void startComment(doc.absPath));
   }
 }

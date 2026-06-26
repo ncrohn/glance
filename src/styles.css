@@ -211,7 +211,7 @@ body {
 
 /* ---- Content scroll area ---------------------------------------------- */
 
-#content { flex: 1 1 auto; overflow: auto; position: relative; }
+#content { flex: 1 1 auto; min-width: 0; overflow-y: auto; position: relative; }
 #content::-webkit-scrollbar { width: 11px; }
 #content::-webkit-scrollbar-thumb {
   background: var(--border); border-radius: 99px;
@@ -427,20 +427,19 @@ body {
 
 /* ── Annotation workspace + rail ───────────────────────────── */
 #workspace { display: flex; flex: 1; min-height: 0; }
-#content { flex: 1; min-width: 0; overflow-y: auto; }
 
 .comment-fab {
   position: absolute; z-index: 50;
   font: 600 12px/1 var(--font-mono, system-ui);
   padding: 6px 10px; border-radius: 6px; border: none;
-  background: var(--accent); color: var(--paper, #fff); cursor: pointer;
+  background: var(--accent); color: var(--surface); cursor: pointer;
   box-shadow: 0 2px 8px rgba(0,0,0,.25);
 }
 .rendered .annotated {
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   border-radius: 3px;
 }
-#rail { width: 260px; overflow-y: auto; padding: 16px; border-left: 1px solid var(--rule, #0002); }
+#rail { width: 260px; overflow-y: auto; padding: 16px; border-left: 1px solid var(--border); }
 #rail.empty { display: none; }
 .rail-head { font: 600 11px/1 var(--font-mono, system-ui); text-transform: uppercase; color: var(--faint); margin: 14px 0 6px; }
 .note-card { display: flex; gap: 8px; align-items: baseline; padding: 8px; border-radius: 6px; cursor: pointer; }
