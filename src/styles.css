@@ -413,6 +413,13 @@ body {
   font-family: var(--font-ui);
 }
 .modal .box.error { border-color: var(--accent); }
+.modal .modal-input {
+  width: 100%; box-sizing: border-box; margin-top: 10px;
+  font-family: var(--font-ui); font-size: 14px;
+  padding: 9px 12px; border-radius: 9px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--ink);
+}
+.modal .modal-input:focus { outline: none; border-color: var(--accent); }
 .modal .box p { margin: 0 0 4px; color: var(--ink); line-height: 1.5; }
 .modal .box strong { font-weight: 600; }
 .modal button {

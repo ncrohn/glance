@@ -16,7 +16,7 @@ import { captureSelection } from "./anchor-capture";
 import { renderRail, applyHighlights, mountSelectionToolbar } from "./annotation-ui";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
-import { confirmReload, showNotice } from "./modal";
+import { confirmReload, showNotice, promptText } from "./modal";
 import { openPaths, pushRecent } from "./session";
 
 const LS_OPEN = "glance.openPaths";
@@ -70,7 +70,7 @@ async function startComment(absPath: string): Promise<void> {
   if (!doc) return;
   const cap = captureSelection(doc.editorContent);
   if (!cap) return;
-  const note = window.prompt(`Comment on "${cap.quote.slice(0, 40)}…"`);
+  const note = await promptText(`Comment on "${cap.quote.slice(0, 40)}…"`, "Your note…");
   if (!note) return;
   const annotation: Annotation = {
     id: genId(), quote: cap.quote, prefix: cap.prefix, suffix: cap.suffix,
