@@ -16,7 +16,8 @@ pnpm test:watch              # vitest watch mode
 pnpm exec vitest run src/store.test.ts   # single test file
 pnpm exec tsc --noEmit       # TypeScript type check
 pnpm build                   # production JS build (tsc + vite)
-cd src-tauri && cargo test   # Rust unit tests (CLI path resolution)
+cd src-tauri && cargo test   # Rust unit tests (CLI path resolution, anchor, annotations, setup)
+cd src-tauri && cargo test --bin glance-mcp   # MCP server unit tests (view/resolve logic)
 bash scripts/install.sh      # release build → copy Glance.app to /Applications + install mdview wrapper
 ```
 
@@ -34,14 +35,21 @@ Pure-reducer pattern. `app.ts` holds a single `State` and fully re-renders the D
 - `session.ts` — open-paths / recent-files lists (persisted to `localStorage`).
 - `renderer.ts` — markdown-it + highlight.js (`html: false`).
 - `editor.ts` — CodeMirror 6 source editor; theme reads CSS custom properties so it tracks light/dark.
+- `annotations.ts` — `Annotation`/`Resolution` types and pure list reducers (`addAnnotation`, `resolveAnnotation`, `removeAnnotation`).
+- `build-anchor.ts` / `anchor-capture.ts` — capture the user's text selection (quote + prefix/suffix context + source-line hint) for storage. Anchor _resolution_ (quote → current line numbers) always happens in Rust; TS only captures and renders.
+- `annotation-ui.ts` — renders the annotation rail (open / orphaned / resolved sections with line badges), applies in-view highlights to annotated source lines, and mounts the floating "Comment" button that appears on text selection.
 
 ### Backend (`src-tauri/src/`)
 
-- `lib.rs` — `run()`: registers the `tauri-plugin-single-instance` handler, builds the native macOS menu (incl. "Install 'mdview' Command Line Tool"), and seeds first-launch CLI args.
+- `lib.rs` — `run()`: registers the `tauri-plugin-single-instance` handler, builds the native macOS menu (incl. "Install 'mdview' Command Line Tool" and "Set up Claude Integration…"), and seeds first-launch CLI args.
 - `commands.rs` — `read_file` / `write_file`.
 - `watcher.rs` — `notify`-based per-path file watching; emits `file-changed` (Modify/Create) and `file-removed` (Remove).
 - `cli.rs` — `md_paths_from_argv` (drops flags), `to_abs`/`normalize` (resolve relative paths against cwd). Pure, with the Rust tests.
 - `cli_install.rs` — writes the `~/.local/bin/mdview` wrapper.
+- `anchor.rs` — pure fuzzy anchor resolution. Given a stored `Annotation` (quote + prefix/suffix context + line hint), `resolve_anchor` tries in order: exact prefix+quote+suffix match → unique or nearest quote → line-hint fallback → orphan. Returns a `Resolution` (`startLine`/`endLine` or `None` when orphaned). Shared by the GUI (via IPC) and `glance-mcp`; no I/O.
+- `annotations.rs` — on-disk annotation store at `~/.glance/annotations/<sha1(absPath)>.json`. Provides `read_store`/`write_store` plus the Tauri IPC commands `read_annotations`, `write_annotations`, `resolve_anchors`, `annotation_store_path`, and `ensure_annotation_store`.
+- `setup.rs` — the one-click "Set up Claude Integration…" action: installs `mdview`, merges `glance-mcp` into `~/.claude.json` (preserving existing keys), and idempotently appends review guidance to `~/.claude/CLAUDE.md`.
+- `bin/glance-mcp.rs` — standalone stdio MCP server (second `[[bin]]` target, bundled inside `Glance.app`). Spawned by Claude Code as a subprocess. v1 tools: `list_annotations`, `get_annotation`, `resolve_annotation`; resource template `glance://annotations/{path}`. Re-anchors every annotation against the current file bytes on each read (`view_of` calls `resolve_anchor`).
 
 ### Key flows
 

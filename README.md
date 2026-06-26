@@ -5,6 +5,7 @@ A lightweight macOS markdown viewer and editor. Defaults to formatted view. Desi
 ## Features
 
 - **Tabbed single window** — every `mdview <file>` call opens in the same window; duplicate paths are deduped.
+- **Claude annotation review** — select text, leave a comment, and Claude can read and resolve your notes via MCP.
 - **Rendered ↔ source toggle** — `⌘E` switches between formatted view and a CodeMirror editor.
 - **GFM rendering** — GitHub Flavored Markdown with syntax-highlighted code blocks (highlight.js).
 - **Explicit save** — `⌘S` writes the file and clears the dirty dot. No autosave.
@@ -64,6 +65,35 @@ Optionally, add this line to your `~/.claude/CLAUDE.md` so Claude prefers `mdvie
 ```
 When creating or updating a markdown file that the user should review, open it with `mdview <absolute-path>`.
 ```
+
+## Claude integration
+
+**Glance ▸ Set up Claude Integration…** wires everything up in one click:
+
+1. Installs the `mdview` CLI wrapper (same as "Install 'mdview' Command Line Tool").
+2. Registers the bundled `glance-mcp` server into `~/.claude.json` under `mcpServers.glance`. The command path points to the binary inside the running `Glance.app`, so it works on any machine where Glance is installed and survives app updates.
+3. Appends a review guidance block to `~/.claude/CLAUDE.md` (idempotent — safe to run again).
+
+All paths are derived from the running app's binary location, not this source checkout.
+
+### Review loop
+
+1. Open a markdown file with `mdview`.
+2. Select text in the rendered view and click **Comment** to attach a note.
+3. In a Claude Code session, Claude calls `list_annotations` (MCP tool) to read your open comments with **current line numbers** — the server re-anchors every annotation against the live file on each read, so line numbers stay correct even after edits.
+4. Claude makes the requested changes, then calls `resolve_annotation` to mark each comment resolved. The change is reflected live in Glance.
+
+**v1 scope:** user → Claude (read + resolve). Claude-authored highlights are future work (v2).
+
+### MCP tools
+
+| Tool | What it does |
+|---|---|
+| `list_annotations` | List annotations on a file; filters by status (default: `open`). |
+| `get_annotation` | Fetch one annotation by id with its current line range. |
+| `resolve_annotation` | Mark an annotation resolved after applying the change. |
+
+A `glance://annotations/{path}` resource is also registered for direct resource reads.
 
 ## Development
 
