@@ -24,6 +24,16 @@ const md = new MarkdownIt({
 
 md.use(taskLists);
 
+// Stamp 1-based source line numbers onto top-level block-open tokens so the
+// annotation layer can map a rendered selection back to a source line.
+md.core.ruler.push("source_lines", (state) => {
+  for (const token of state.tokens) {
+    if (token.level === 0 && token.map && token.type.endsWith("_open")) {
+      token.attrSet("data-sourceline", String(token.map[0] + 1));
+    }
+  }
+});
+
 export function renderMarkdown(src: string): string {
   return md.render(src);
 }

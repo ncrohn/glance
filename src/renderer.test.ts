@@ -3,12 +3,20 @@ import { renderMarkdown } from "./renderer";
 
 describe("renderMarkdown", () => {
   it("renders headings", () => {
-    expect(renderMarkdown("# Hi")).toContain("<h1>Hi</h1>");
+    const html = renderMarkdown("# Hi");
+    expect(html).toContain("Hi</h1>");
+    expect(html).toContain('data-sourceline="1"');
+  });
+
+  it("stamps source line numbers on block elements", () => {
+    const html = renderMarkdown("# Title\n\nsecond para on line 3");
+    expect(html).toMatch(/<h1 data-sourceline="1">/);
+    expect(html).toMatch(/<p data-sourceline="3">/);
   });
 
   it("renders GFM tables", () => {
     const html = renderMarkdown("| a | b |\n|---|---|\n| 1 | 2 |");
-    expect(html).toContain("<table>");
+    expect(html).toContain("<table");
     expect(html).toContain("<td>1</td>");
   });
 
