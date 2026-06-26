@@ -58,3 +58,32 @@ pub fn unwatch_file(path: String, watchers: State<Watchers>) -> Result<(), Strin
     map.remove(&path); // dropping the watcher unwatches it
     Ok(())
 }
+
+#[tauri::command]
+pub fn watch_annotations(
+    store_path: String,
+    doc_path: String,
+    app: AppHandle,
+    watchers: State<Watchers>,
+) -> Result<(), String> {
+    let mut map = watchers.0.lock().map_err(|e| e.to_string())?;
+    if map.contains_key(&store_path) {
+        return Ok(());
+    }
+    let app2 = app.clone();
+    let doc = doc_path.clone();
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(event) = res {
+            if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                let _ = app2.emit("annotations-changed", doc.clone());
+            }
+        }
+    })
+    .map_err(|e| e.to_string())?;
+
+    watcher
+        .watch(Path::new(&store_path), RecursiveMode::NonRecursive)
+        .map_err(|e| e.to_string())?;
+    map.insert(store_path, watcher);
+    Ok(())
+}

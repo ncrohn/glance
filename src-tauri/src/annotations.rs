@@ -50,6 +50,43 @@ pub fn write_store(store: &AnnotationStore) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
+use crate::anchor::{resolve_anchor, Resolution};
+
+#[tauri::command]
+pub fn read_annotations(path: String) -> AnnotationStore {
+    read_store(&path)
+}
+
+#[tauri::command]
+pub fn write_annotations(store: AnnotationStore) -> Result<(), String> {
+    write_store(&store)
+}
+
+#[tauri::command]
+pub fn resolve_anchors(text: String, annotations: Vec<Annotation>) -> Vec<Resolution> {
+    annotations.iter().map(|a| resolve_anchor(&text, a)).collect()
+}
+
+#[tauri::command]
+pub fn annotation_store_path(path: String) -> Option<String> {
+    store_path_for(&path).map(|p| p.to_string_lossy().to_string())
+}
+
+/// Ensure the store file exists (so the OS file watcher can attach to it) and
+/// return its absolute path.
+#[tauri::command]
+pub fn ensure_annotation_store(path: String) -> Result<String, String> {
+    let store_path =
+        store_path_for(&path).ok_or_else(|| "Could not determine $HOME".to_string())?;
+    if !store_path.exists() {
+        write_store(&AnnotationStore {
+            doc_path: path.clone(),
+            annotations: Vec::new(),
+        })?;
+    }
+    Ok(store_path.to_string_lossy().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

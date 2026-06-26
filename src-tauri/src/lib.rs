@@ -43,6 +43,12 @@ pub fn run() {
             commands::write_file,
             watcher::watch_file,
             watcher::unwatch_file,
+            watcher::watch_annotations,
+            annotations::read_annotations,
+            annotations::write_annotations,
+            annotations::resolve_anchors,
+            annotations::annotation_store_path,
+            annotations::ensure_annotation_store,
             take_launch_args,
         ])
         .on_menu_event(|app, event| {
