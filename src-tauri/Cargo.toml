@@ -3,6 +3,9 @@ name = "glance"
 version = "0.1.0"
 description = "Glance markdown companion"
 edition = "2021"
+# Two bins (glance GUI + glance-mcp). `cargo run` / `tauri dev` need to know
+# which is the app, or they error on ambiguity.
+default-run = "glance"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
