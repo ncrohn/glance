@@ -40,3 +40,39 @@ export function onCliInstallResult(
 ): Promise<UnlistenFn> {
   return listen<{ ok: boolean; message: string }>("cli-install-result", (e) => cb(e.payload));
 }
+
+import type { Annotation, AnnotationStore, Resolution } from "./annotations";
+
+export interface SetupStep {
+  ok: boolean;
+  label: string;
+  message: string;
+}
+
+export function readAnnotations(path: string): Promise<AnnotationStore> {
+  return invoke<AnnotationStore>("read_annotations", { path });
+}
+
+export function writeAnnotations(store: AnnotationStore): Promise<void> {
+  return invoke<void>("write_annotations", { store });
+}
+
+export function resolveAnchors(text: string, annotations: Annotation[]): Promise<Resolution[]> {
+  return invoke<Resolution[]>("resolve_anchors", { text, annotations });
+}
+
+export function ensureAnnotationStore(path: string): Promise<string> {
+  return invoke<string>("ensure_annotation_store", { path });
+}
+
+export function watchAnnotations(storePath: string, docPath: string): Promise<void> {
+  return invoke<void>("watch_annotations", { storePath, docPath });
+}
+
+export function onAnnotationsChanged(cb: (docPath: string) => void): Promise<UnlistenFn> {
+  return listen<string>("annotations-changed", (e) => cb(e.payload));
+}
+
+export function onSetupResult(cb: (steps: SetupStep[]) => void): Promise<UnlistenFn> {
+  return listen<SetupStep[]>("setup-result", (e) => cb(e.payload));
+}
