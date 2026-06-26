@@ -107,6 +107,96 @@ pub fn merge_mcp_config(existing: &str, name: &str, command: &str) -> String {
     serde_json::to_string_pretty(&root).unwrap()
 }
 
+/// The PostToolUse hook script. `app_bin` (absolute path to the Glance GUI
+/// binary) is interpolated via a placeholder so the embedded `python3` heredoc
+/// keeps its literal braces. Opens NEW project markdown; always exits 0.
+pub fn hook_script(app_bin: &str) -> String {
+    const TEMPLATE: &str = r#"#!/bin/sh
+# Glance auto-open hook (PostToolUse). Opens new project markdown in Glance.
+# Reads the Claude Code tool event JSON from stdin and prints the file to open
+# (a Write of a .md inside cwd, skipping node_modules and dotdirs); fires nothing
+# otherwise. Always exits 0 so it can never block the agent.
+#
+# The Python code is captured into a variable first so that python3's stdin
+# remains the outer process's stdin (the JSON event). Using `python3 - <<HEREDOC`
+# would replace python3's stdin with the heredoc, losing the JSON.
+_GLANCE_PY=$(cat <<'PY'
+import sys, json, os
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if d.get("tool_name") != "Write":
+    sys.exit(0)
+ti = d.get("tool_input") or {}
+fp = ti.get("file_path") or ""
+cwd = d.get("cwd") or ""
+if not fp or not cwd:
+    sys.exit(0)
+cwd = os.path.abspath(cwd)
+ap = fp if os.path.isabs(fp) else os.path.join(cwd, fp)
+ap = os.path.abspath(ap)
+if not (ap.endswith(".md") or ap.endswith(".markdown")):
+    sys.exit(0)
+try:
+    if os.path.commonpath([ap, cwd]) != cwd:
+        sys.exit(0)
+except ValueError:
+    sys.exit(0)
+rel = os.path.relpath(ap, cwd)
+parts = rel.split(os.sep)
+if any(p == "node_modules" or p.startswith(".") for p in parts):
+    sys.exit(0)
+print(ap)
+PY
+)
+TARGET=$(python3 -c "$_GLANCE_PY")
+[ -n "$TARGET" ] && "__APP_BIN__" "$TARGET" >/dev/null 2>&1 &
+exit 0
+"#;
+    TEMPLATE.replace("__APP_BIN__", app_bin)
+}
+
+/// Add a PostToolUse/Write hook running `command` to a settings.json string,
+/// preserving everything else. Idempotent: no-op if `command` already appears
+/// under any PostToolUse entry. Tolerates empty/invalid input.
+pub fn merge_settings_hook(existing: &str, command: &str) -> String {
+    let mut root: serde_json::Value =
+        serde_json::from_str(existing).unwrap_or_else(|_| serde_json::json!({}));
+    if !root.is_object() {
+        root = serde_json::json!({});
+    }
+    let obj = root.as_object_mut().unwrap();
+    let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
+    if !hooks.is_object() {
+        *hooks = serde_json::json!({});
+    }
+    let hooks_obj = hooks.as_object_mut().unwrap();
+    let post = hooks_obj
+        .entry("PostToolUse")
+        .or_insert_with(|| serde_json::json!([]));
+    if !post.is_array() {
+        *post = serde_json::json!([]);
+    }
+    let arr = post.as_array_mut().unwrap();
+    let already = arr.iter().any(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_some_and(|hs| {
+                hs.iter()
+                    .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command))
+            })
+    });
+    if !already {
+        arr.push(serde_json::json!({
+            "matcher": "Write",
+            "hooks": [ { "type": "command", "command": command } ]
+        }));
+    }
+    serde_json::to_string_pretty(&root).unwrap()
+}
+
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
@@ -182,6 +272,45 @@ fn install_skill() -> StepResult {
     }
 }
 
+fn install_open_hook() -> StepResult {
+    let label = "Install auto-open hook".to_string();
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => return StepResult { ok: false, label, message: format!("Could not locate the Glance binary: {e}") },
+    };
+    if exe.to_string_lossy().contains("AppTranslocation") {
+        return StepResult {
+            ok: false,
+            label,
+            message: "Glance is running from a quarantined copy. Move Glance.app to /Applications, reopen it, then try again.".to_string(),
+        };
+    }
+    let app_bin = exe.to_string_lossy().to_string();
+    let home = match home() {
+        Some(h) => h,
+        None => return StepResult { ok: false, label, message: "Could not determine your home directory ($HOME).".to_string() },
+    };
+    let dir = home.join(".claude").join("skills").join("glance");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return StepResult { ok: false, label, message: format!("Could not create {}: {e}", dir.display()) };
+    }
+    let script_path = dir.join("open-md-hook.sh");
+    if let Err(e) = std::fs::write(&script_path, hook_script(&app_bin)) {
+        return StepResult { ok: false, label, message: format!("Could not write {}: {e}", script_path.display()) };
+    }
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)) {
+        return StepResult { ok: false, label, message: format!("Could not make {} executable: {e}", script_path.display()) };
+    }
+    let settings_path = home.join(".claude").join("settings.json");
+    let existing = std::fs::read_to_string(&settings_path).unwrap_or_default();
+    let merged = merge_settings_hook(&existing, &script_path.to_string_lossy());
+    match std::fs::write(&settings_path, merged) {
+        Ok(_) => StepResult { ok: true, label, message: format!("Installed auto-open hook → {}", script_path.display()) },
+        Err(e) => StepResult { ok: false, label, message: format!("Could not write {}: {e}", settings_path.display()) },
+    }
+}
+
 pub fn setup_claude_integration() -> Vec<StepResult> {
     let cli = install_cli_tool();
     vec![
@@ -233,5 +362,120 @@ mod tests {
         // names the anchor states the agent must interpret
         assert!(s.contains("orphaned"));
         assert!(s.contains("drifted"));
+    }
+
+    #[test]
+    fn hook_script_interpolates_binary_and_filters() {
+        let s = hook_script("/Applications/Glance.app/Contents/MacOS/glance");
+        assert!(s.contains("/Applications/Glance.app/Contents/MacOS/glance"));
+        // key guards present in the script body
+        assert!(s.contains("python3"));
+        assert!(s.contains("Write"));
+        assert!(s.contains("node_modules"));
+        assert!(s.contains(".md"));
+        assert!(s.contains("exit 0"));
+    }
+
+    #[test]
+    fn merge_settings_hook_creates_entry_in_empty() {
+        let out = merge_settings_hook("", "/h/open-md-hook.sh");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let entry = &v["hooks"]["PostToolUse"][0];
+        assert_eq!(entry["matcher"], "Write");
+        assert_eq!(entry["hooks"][0]["type"], "command");
+        assert_eq!(entry["hooks"][0]["command"], "/h/open-md-hook.sh");
+    }
+
+    #[test]
+    fn merge_settings_hook_preserves_others_and_is_idempotent() {
+        let existing = r#"{"model":"opus","hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/other.sh"}]}]}}"#;
+        let once = merge_settings_hook(existing, "/h/open-md-hook.sh");
+        let twice = merge_settings_hook(&once, "/h/open-md-hook.sh");
+        let v: serde_json::Value = serde_json::from_str(&twice).unwrap();
+        assert_eq!(v["model"], "opus");
+        let arr = v["hooks"]["PostToolUse"].as_array().unwrap();
+        // original Bash entry kept, our Write entry added exactly once
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["matcher"], "Bash");
+        assert_eq!(arr[1]["matcher"], "Write");
+    }
+
+    use std::io::Write as _;
+    use std::path::PathBuf;
+
+    fn python3_available() -> bool {
+        std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    // Run the hook with the given stdin JSON; return true if the stub binary
+    // fired (marker file created) within a short window.
+    fn run_hook(dir: &PathBuf, stub: &PathBuf, marker: &PathBuf, stdin_json: &str) -> bool {
+        let script = dir.join("open-md-hook.sh");
+        std::fs::write(&script, hook_script(&stub.to_string_lossy())).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let _ = std::fs::remove_file(marker);
+        let mut child = std::process::Command::new("sh")
+            .arg(&script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin_json.as_bytes()).unwrap();
+        let _ = child.wait();
+        // the stub is launched detached (`&`); poll briefly for the marker
+        for _ in 0..40 {
+            if marker.exists() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[test]
+    fn hook_fires_only_for_new_project_markdown() {
+        if !python3_available() {
+            eprintln!("skipping hook_fires_only_for_new_project_markdown: python3 not available");
+            return;
+        }
+        // unique temp project dir (this dir is the agent cwd in fixtures)
+        let base = std::env::temp_dir().join(format!("glance-hook-{}", std::process::id()));
+        let proj = base.join("proj");
+        std::fs::create_dir_all(proj.join("node_modules")).unwrap();
+        std::fs::create_dir_all(proj.join(".hidden")).unwrap();
+        let marker = base.join("marker");
+        // stub "app binary": records that it was invoked
+        let stub = base.join("stub.sh");
+        std::fs::write(&stub, format!("#!/bin/sh\nprintf 'x' >> \"{}\"\n", marker.display())).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let cwd = proj.to_string_lossy().to_string();
+        let json = |tool: &str, file: String| {
+            format!(r#"{{"tool_name":"{tool}","cwd":"{cwd}","tool_input":{{"file_path":"{file}"}}}}"#)
+        };
+
+        // FIRES: a Write of a new .md inside the project
+        assert!(run_hook(&base, &stub, &marker, &json("Write", proj.join("notes.md").to_string_lossy().to_string())));
+        // does NOT fire: Edit tool
+        assert!(!run_hook(&base, &stub, &marker, &json("Edit", proj.join("notes.md").to_string_lossy().to_string())));
+        // does NOT fire: non-markdown
+        assert!(!run_hook(&base, &stub, &marker, &json("Write", proj.join("readme.txt").to_string_lossy().to_string())));
+        // does NOT fire: under node_modules
+        assert!(!run_hook(&base, &stub, &marker, &json("Write", proj.join("node_modules").join("x.md").to_string_lossy().to_string())));
+        // does NOT fire: under a dotdir
+        assert!(!run_hook(&base, &stub, &marker, &json("Write", proj.join(".hidden").join("x.md").to_string_lossy().to_string())));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
