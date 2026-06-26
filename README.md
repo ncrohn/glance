@@ -37,6 +37,27 @@ bash scripts/install.sh
 
 Builds Glance in release mode, copies `Glance.app` to `/Applications`, and installs the `mdview` wrapper into `~/.local/bin` (same as the **Set up Claude Integration…** menu item).
 
+### Signed distribution (for sharing the DMG)
+
+`scripts/install.sh` produces a working app for **your** machine, but an unsigned/Development-signed build is blocked by Gatekeeper on other Macs. To build a DMG anyone can open, sign with a **Developer ID Application** certificate and notarize it. The DMG's volume icon is taken automatically from the app icon (`src-tauri/icons/icon.icns`).
+
+One-time setup (requires Apple Developer Program membership):
+
+1. Install a **Developer ID Application** certificate into your login keychain (Xcode ▸ Settings ▸ Accounts ▸ Manage Certificates ▸ **+**).
+2. Store notarization credentials as a keychain profile:
+   ```bash
+   xcrun notarytool store-credentials "glance-notary" \
+     --key AuthKey_XXXX.p8 --key-id KEY_ID --issuer ISSUER_UUID
+   ```
+
+Then build a distributable DMG:
+
+```bash
+bash scripts/release.sh        # build → sign → notarize → staple → verify
+```
+
+Signing lives in a separate overlay, `src-tauri/tauri.sign.conf.json` (`bundle.macOS.signingIdentity` + `entitlements.plist`), layered only by `release.sh` — so `install.sh`'s unsigned dev build never needs the certificate. The hardened runtime that notarization requires is applied automatically.
+
 ## Usage
 
 ```bash

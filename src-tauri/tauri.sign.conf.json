@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "macOS": {
+      "signingIdentity": "Developer ID Application: Nicholas Crohn (Z8DA4B78K9)",
+      "entitlements": "entitlements.plist"
+    }
+  }
+}
