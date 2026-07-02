@@ -24,6 +24,14 @@ const md = new MarkdownIt({
 
 md.use(taskLists);
 
+// Wrap every table in a horizontally-scrollable container so wide tables scroll
+// instead of crushing their columns into the fixed reading width. renderToken
+// preserves the table_open token's attrs (e.g. the data-sourceline stamp below).
+md.renderer.rules.table_open = (tokens, idx, options, _env, self) =>
+  `<div class="table-scroll">${self.renderToken(tokens, idx, options)}`;
+md.renderer.rules.table_close = (tokens, idx, options, _env, self) =>
+  `${self.renderToken(tokens, idx, options)}</div>`;
+
 // Stamp 1-based source line numbers onto top-level block-open tokens so the
 // annotation layer can map a rendered selection back to a source line.
 md.core.ruler.push("source_lines", (state) => {
