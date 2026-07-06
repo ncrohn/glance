@@ -4,6 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Glance</title>
+    <script>
+      // Set the theme before first paint to avoid a flash. Mirrors theme.ts:
+      // "auto" / unknown → Paper (light) or Ink (dark) per the OS.
+      (function () {
+        try {
+          var p = localStorage.getItem("glance.theme");
+          var id = !p || p === "auto"
+            ? (matchMedia("(prefers-color-scheme: dark)").matches ? "ink" : "paper")
+            : p;
+          document.documentElement.dataset.theme = id;
+        } catch (e) {}
+      })();
+    </script>
   </head>
 
   <body>

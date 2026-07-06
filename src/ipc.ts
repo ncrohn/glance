@@ -84,3 +84,7 @@ export function onSetupResult(cb: (steps: SetupStep[]) => void): Promise<Unliste
 export function onShowAbout(cb: () => void): Promise<UnlistenFn> {
   return listen("show-about", () => cb());
 }
+
+export function onShowTheme(cb: () => void): Promise<UnlistenFn> {
+  return listen("show-theme", () => cb());
+}

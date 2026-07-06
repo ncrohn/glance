@@ -6,7 +6,9 @@ import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
 
 // Chrome theme — colors reference the page-level CSS custom properties, so the
-// editor adapts to the Ink/Paper light & dark palette automatically.
+// editor tracks whichever theme is active (see theme.ts) automatically. The
+// `dark` flag passed to mountEditor only sets CodeMirror's own light/dark
+// default, so it must be re-derived from the active theme's appearance.
 const glanceTheme = EditorView.theme({
   "&": { backgroundColor: "transparent", color: "var(--ink)", height: "100%" },
   ".cm-scroller": {
@@ -42,8 +44,8 @@ export function mountEditor(
   host: HTMLElement,
   initial: string,
   onChange: (v: string) => void,
+  dark = false,
 ): { destroy(): void } {
-  const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   const view = new EditorView({
     parent: host,
     state: EditorState.create({

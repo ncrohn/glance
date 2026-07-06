@@ -60,6 +60,9 @@ pub fn run() {
                 "about_glance" => {
                     let _ = app.emit("show-about", ());
                 }
+                "open_theme" => {
+                    let _ = app.emit("show-theme", ());
+                }
                 _ => {}
             }
         })
@@ -107,7 +110,15 @@ pub fn run() {
                     &PredefinedMenuItem::select_all(handle, None)?,
                 ],
             )?;
-            let menu = Menu::with_items(handle, &[&app_menu, &edit_menu])?;
+            let theme_item = MenuItem::with_id(
+                handle,
+                "open_theme",
+                "Theme…",
+                true,
+                None::<&str>,
+            )?;
+            let view_menu = Submenu::with_items(handle, "View", true, &[&theme_item])?;
+            let menu = Menu::with_items(handle, &[&app_menu, &edit_menu, &view_menu])?;
             app.set_menu(menu)?;
 
             let argv: Vec<String> = std::env::args().collect();

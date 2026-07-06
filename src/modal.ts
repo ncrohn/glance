@@ -1,5 +1,6 @@
 import type { SetupStep } from "./ipc";
 import { openExternal } from "./ipc";
+import { AUTO, THEMES, type ThemePref } from "./theme";
 import appIcon from "./assets/app-icon.png";
 
 // Shared modal scaffold. Builds the overlay + card, wires Escape / backdrop
@@ -159,6 +160,69 @@ export function showSetupResult(steps: SetupStep[]): void {
   okBtn.onclick = m.close;
   m.footer.appendChild(okBtn);
   okBtn.focus();
+}
+
+// Theme picker — a radio-style list of Auto + every built-in theme. Selecting a
+// row previews it live (via onPreview) so the change is instantly visible;
+// Done commits + persists, Cancel / Escape reverts to whatever was active on
+// open.
+export function showThemePicker(
+  current: ThemePref,
+  opts: { onPreview: (pref: ThemePref) => void; onCommit: (pref: ThemePref) => void },
+): void {
+  let selected = current;
+
+  const revertAndClose = () => { opts.onPreview(current); m.close(); };
+  const m = openModal({ title: "Theme", onEscape: revertAndClose });
+  m.card.classList.add("theme-picker");
+
+  const list = document.createElement("div");
+  list.className = "theme-list";
+  m.body.appendChild(list);
+
+  const rows: HTMLButtonElement[] = [];
+  const makeRow = (pref: ThemePref, name: string, tag: string, swatchId: string) => {
+    const row = document.createElement("button");
+    row.className = "theme-row";
+    row.dataset.pref = pref;
+    if (pref === selected) row.classList.add("active");
+
+    const swatch = document.createElement("span");
+    swatch.className = `theme-swatch theme-swatch--${swatchId}`;
+    swatch.appendChild(document.createElement("i")); // accent dot
+
+    const label = document.createElement("span");
+    label.className = "theme-label";
+    label.textContent = name;
+
+    const tagEl = document.createElement("span");
+    tagEl.className = "theme-tag";
+    tagEl.textContent = tag;
+
+    const check = document.createElement("span");
+    check.className = "theme-check";
+    check.textContent = "✓";
+
+    row.append(swatch, label, tagEl, check);
+    row.onclick = () => {
+      selected = pref;
+      for (const r of rows) r.classList.toggle("active", r.dataset.pref === pref);
+      opts.onPreview(pref);
+    };
+    rows.push(row);
+    list.appendChild(row);
+  };
+
+  makeRow(AUTO, "Auto", "Follows macOS", "auto");
+  for (const t of THEMES) {
+    makeRow(t.id, t.name, t.appearance === "dark" ? "Dark" : "Light", t.id);
+  }
+
+  const cancel = button("Cancel");
+  cancel.onclick = revertAndClose;
+  const done = button("Done", true);
+  done.onclick = () => { opts.onCommit(selected); m.close(); };
+  m.footer.append(cancel, done);
 }
 
 // About box — app icon, wordmark, version, and attribution. Centered layout,

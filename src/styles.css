@@ -37,15 +37,48 @@
   src: url("./assets/fonts/jetbrains-mono-v24-latin-700.woff2") format("woff2");
 }
 
-:root {
-  color-scheme: light dark;
+/* Theme fonts — Inter (Nord), IBM Plex (Solarized), Atkinson Hyperlegible
+   (High Contrast). Paper/Ink keep the editorial Fraunces/Newsreader set above. */
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 400; font-display: swap; src: url("./assets/fonts/inter-400.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: italic; font-weight: 400; font-display: swap; src: url("./assets/fonts/inter-italic.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 600; font-display: swap; src: url("./assets/fonts/inter-600.woff2") format("woff2"); }
+@font-face { font-family: "Inter"; font-style: normal; font-weight: 700; font-display: swap; src: url("./assets/fonts/inter-700.woff2") format("woff2"); }
 
+@font-face { font-family: "IBM Plex Serif"; font-style: normal; font-weight: 400; font-display: swap; src: url("./assets/fonts/ibm-plex-serif-400.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Serif"; font-style: italic; font-weight: 400; font-display: swap; src: url("./assets/fonts/ibm-plex-serif-italic.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Serif"; font-style: normal; font-weight: 600; font-display: swap; src: url("./assets/fonts/ibm-plex-serif-600.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Serif"; font-style: normal; font-weight: 700; font-display: swap; src: url("./assets/fonts/ibm-plex-serif-700.woff2") format("woff2"); }
+
+@font-face { font-family: "IBM Plex Sans"; font-style: normal; font-weight: 400; font-display: swap; src: url("./assets/fonts/ibm-plex-sans-400.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Sans"; font-style: normal; font-weight: 600; font-display: swap; src: url("./assets/fonts/ibm-plex-sans-600.woff2") format("woff2"); }
+
+@font-face { font-family: "IBM Plex Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("./assets/fonts/ibm-plex-mono-400.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Mono"; font-style: normal; font-weight: 700; font-display: swap; src: url("./assets/fonts/ibm-plex-mono-700.woff2") format("woff2"); }
+
+@font-face { font-family: "Atkinson Hyperlegible"; font-style: normal; font-weight: 400; font-display: swap; src: url("./assets/fonts/atkinson-400.woff2") format("woff2"); }
+@font-face { font-family: "Atkinson Hyperlegible"; font-style: italic; font-weight: 400; font-display: swap; src: url("./assets/fonts/atkinson-italic.woff2") format("woff2"); }
+@font-face { font-family: "Atkinson Hyperlegible"; font-style: normal; font-weight: 700; font-display: swap; src: url("./assets/fonts/atkinson-700.woff2") format("woff2"); }
+
+/* ============================================================================
+   Themes
+   Every theme is a palette (the same variable names) plus a `--code-*` syntax
+   set, a `color-scheme`, and — where it diverges from the editorial default —
+   its own `--font-*` set. The active theme is chosen by `data-theme` on the
+   <html> element (see theme.ts); "Auto" resolves to Paper / Ink from the OS.
+   ========================================================================== */
+
+:root {
+  /* Fonts are theme-independent. */
   --font-display: "Fraunces", ui-serif, Georgia, serif;
   --font-body: "Newsreader", ui-serif, Georgia, "Times New Roman", serif;
   --font-ui: ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
 
-  /* Paper (light) */
+/* ---- Paper (light) — also the pre-JS fallback ------------------------- */
+:root,
+:root[data-theme="paper"] {
+  color-scheme: light;
   --bg: #faf5ea;
   --bg-grad-a: #fcf8ef;
   --bg-grad-b: #f4ecdb;
@@ -63,29 +96,166 @@
   --accent-line: rgba(191, 95, 36, 0.32);
   --shadow: 0 1px 2px rgba(60, 42, 20, 0.06), 0 10px 30px rgba(60, 42, 20, 0.07);
   --selection: rgba(191, 95, 36, 0.18);
+  --code-keyword: #a8437f;
+  --code-string: #5f7d3f;
+  --code-number: #b06a2c;
+  --code-title: #3f7d99;
+  --code-attr: #9a7420;
+  --code-regexp: #b8503f;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    /* Ink (dark) */
-    --bg: #15120d;
-    --bg-grad-a: #181410;
-    --bg-grad-b: #110e0a;
-    --surface: #1e1a13;
-    --raised: #26201a;
-    --border: #352c20;
-    --border-soft: #2a2419;
-    --ink: #ece4d4;
-    --ink-soft: #d3c8b3;
-    --muted: #9d9079;
-    --faint: #6f6451;
-    --accent: #e3935a;
-    --accent-bright: #f0a064;
-    --accent-tint: rgba(227, 147, 90, 0.13);
-    --accent-line: rgba(227, 147, 90, 0.34);
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 14px 40px rgba(0, 0, 0, 0.4);
-    --selection: rgba(227, 147, 90, 0.22);
-  }
+/* ---- Ink (dark) ------------------------------------------------------- */
+:root[data-theme="ink"] {
+  color-scheme: dark;
+  --bg: #15120d;
+  --bg-grad-a: #181410;
+  --bg-grad-b: #110e0a;
+  --surface: #1e1a13;
+  --raised: #26201a;
+  --border: #352c20;
+  --border-soft: #2a2419;
+  --ink: #ece4d4;
+  --ink-soft: #d3c8b3;
+  --muted: #9d9079;
+  --faint: #6f6451;
+  --accent: #e3935a;
+  --accent-bright: #f0a064;
+  --accent-tint: rgba(227, 147, 90, 0.13);
+  --accent-line: rgba(227, 147, 90, 0.34);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 14px 40px rgba(0, 0, 0, 0.4);
+  --selection: rgba(227, 147, 90, 0.22);
+  --code-keyword: #c678a6;
+  --code-string: #7fa563;
+  --code-number: #d18a52;
+  --code-title: #5b9bb8;
+  --code-attr: #c99a4e;
+  --code-regexp: #cd6b5a;
+}
+
+/* ---- Solarized Light -------------------------------------------------- */
+:root[data-theme="solarized-light"] {
+  color-scheme: light;
+  --font-display: "IBM Plex Serif", ui-serif, Georgia, serif;
+  --font-body: "IBM Plex Serif", ui-serif, Georgia, "Times New Roman", serif;
+  --font-ui: "IBM Plex Sans", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --bg: #fdf6e3;
+  --bg-grad-a: #fdf6e3;
+  --bg-grad-b: #f2ead0;
+  --surface: #fffbf0;
+  --raised: #eee8d5;
+  --border: #ddd6c1;
+  --border-soft: #ece5d0;
+  --ink: #073642;
+  --ink-soft: #586e75;
+  --muted: #839496;
+  --faint: #93a1a1;
+  --accent: #268bd2;
+  --accent-bright: #2aa198;
+  --accent-tint: rgba(38, 139, 210, 0.1);
+  --accent-line: rgba(38, 139, 210, 0.32);
+  --shadow: 0 1px 2px rgba(88, 110, 117, 0.08), 0 10px 30px rgba(88, 110, 117, 0.09);
+  --selection: rgba(38, 139, 210, 0.18);
+  --code-keyword: #859900;
+  --code-string: #2aa198;
+  --code-number: #d33682;
+  --code-title: #268bd2;
+  --code-attr: #b58900;
+  --code-regexp: #dc322f;
+}
+
+/* ---- Solarized Dark --------------------------------------------------- */
+:root[data-theme="solarized-dark"] {
+  color-scheme: dark;
+  --font-display: "IBM Plex Serif", ui-serif, Georgia, serif;
+  --font-body: "IBM Plex Serif", ui-serif, Georgia, "Times New Roman", serif;
+  --font-ui: "IBM Plex Sans", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --bg: #002b36;
+  --bg-grad-a: #01323d;
+  --bg-grad-b: #002028;
+  --surface: #073642;
+  --raised: #083d4a;
+  --border: #0f4553;
+  --border-soft: #0a3d49;
+  --ink: #93a1a1;
+  --ink-soft: #839496;
+  --muted: #657b83;
+  --faint: #586e75;
+  --accent: #268bd2;
+  --accent-bright: #2aa198;
+  --accent-tint: rgba(38, 139, 210, 0.15);
+  --accent-line: rgba(38, 139, 210, 0.35);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 14px 40px rgba(0, 0, 0, 0.45);
+  --selection: rgba(38, 139, 210, 0.22);
+  --code-keyword: #859900;
+  --code-string: #2aa198;
+  --code-number: #d33682;
+  --code-title: #268bd2;
+  --code-attr: #b58900;
+  --code-regexp: #dc322f;
+}
+
+/* ---- Nord (dark) ------------------------------------------------------ */
+:root[data-theme="nord"] {
+  color-scheme: dark;
+  --font-display: "Inter", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-body: "Inter", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-ui: "Inter", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --bg: #2e3440;
+  --bg-grad-a: #313847;
+  --bg-grad-b: #2b303b;
+  --surface: #3b4252;
+  --raised: #434c5e;
+  --border: #4c566a;
+  --border-soft: #3f4859;
+  --ink: #eceff4;
+  --ink-soft: #d8dee9;
+  --muted: #8b93a5;
+  --faint: #6b7488;
+  --accent: #88c0d0;
+  --accent-bright: #8fbcbb;
+  --accent-tint: rgba(136, 192, 208, 0.14);
+  --accent-line: rgba(136, 192, 208, 0.34);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 14px 40px rgba(0, 0, 0, 0.4);
+  --selection: rgba(136, 192, 208, 0.22);
+  --code-keyword: #81a1c1;
+  --code-string: #a3be8c;
+  --code-number: #b48ead;
+  --code-title: #88c0d0;
+  --code-attr: #ebcb8b;
+  --code-regexp: #d08770;
+}
+
+/* ---- High Contrast (dark) --------------------------------------------- */
+:root[data-theme="high-contrast"] {
+  color-scheme: dark;
+  --font-display: "Atkinson Hyperlegible", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-body: "Atkinson Hyperlegible", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-ui: "Atkinson Hyperlegible", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --bg: #000000;
+  --bg-grad-a: #000000;
+  --bg-grad-b: #000000;
+  --surface: #0a0a0a;
+  --raised: #141414;
+  --border: #666666;
+  --border-soft: #444444;
+  --ink: #ffffff;
+  --ink-soft: #f0f0f0;
+  --muted: #c8c8c8;
+  --faint: #9a9a9a;
+  --accent: #ffb454;
+  --accent-bright: #ffcb6b;
+  --accent-tint: rgba(255, 180, 84, 0.18);
+  --accent-line: rgba(255, 180, 84, 0.5);
+  --shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 14px 40px rgba(0, 0, 0, 0.6);
+  --selection: rgba(255, 180, 84, 0.35);
+  --code-keyword: #ff8fd1;
+  --code-string: #9fe08f;
+  --code-number: #ffc46b;
+  --code-title: #79d3ff;
+  --code-attr: #ffd479;
+  --code-regexp: #ff8f7a;
 }
 
 * { box-sizing: border-box; }
@@ -375,14 +545,14 @@ body {
 
 .rendered img { max-width: 100%; border-radius: 10px; box-shadow: var(--shadow); }
 
-/* ---- Syntax highlighting (highlight.js classes, warm theme) ----------- */
+/* ---- Syntax highlighting (highlight.js classes; colors are theme vars) - */
 .hljs-comment, .hljs-quote { color: var(--faint); font-style: italic; }
-.hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-meta { color: #c678a6; }
-.hljs-string, .hljs-attr, .hljs-template-tag, .hljs-addition { color: #7fa563; }
-.hljs-number, .hljs-literal, .hljs-variable, .hljs-symbol { color: #d18a52; }
-.hljs-title, .hljs-section, .hljs-name, .hljs-selector-id { color: #5b9bb8; font-weight: 600; }
-.hljs-attribute, .hljs-type { color: #c99a4e; }
-.hljs-regexp, .hljs-link, .hljs-deletion { color: #cd6b5a; }
+.hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-meta { color: var(--code-keyword); }
+.hljs-string, .hljs-attr, .hljs-template-tag, .hljs-addition { color: var(--code-string); }
+.hljs-number, .hljs-literal, .hljs-variable, .hljs-symbol { color: var(--code-number); }
+.hljs-title, .hljs-section, .hljs-name, .hljs-selector-id { color: var(--code-title); font-weight: 600; }
+.hljs-attribute, .hljs-type { color: var(--code-attr); }
+.hljs-regexp, .hljs-link, .hljs-deletion { color: var(--code-regexp); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 700; }
 
@@ -536,6 +706,49 @@ body {
   color: var(--accent); text-decoration: none; cursor: pointer;
 }
 .about-link:hover { color: var(--accent-bright); text-decoration: underline; }
+
+/* Theme picker — radio-style list of themes with a live swatch preview */
+.modal .box.theme-picker { max-width: 400px; }
+.theme-list { display: flex; flex-direction: column; gap: 2px; }
+.theme-row {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  padding: 9px 11px; border-radius: 10px;
+  border: 1px solid transparent; background: transparent;
+  font-family: var(--font-ui); text-align: left; cursor: default;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.theme-row:hover { background: var(--raised); }
+.theme-row.active { background: var(--accent-tint); border-color: var(--accent-line); }
+.theme-label { flex: 1; font-size: 14px; font-weight: 600; color: var(--ink); }
+.theme-tag {
+  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--muted); text-transform: uppercase;
+}
+.theme-check { width: 16px; text-align: center; color: var(--accent); opacity: 0; font-size: 13px; }
+.theme-row.active .theme-check { opacity: 1; }
+
+.theme-swatch {
+  flex: none; position: relative; width: 30px; height: 22px;
+  border-radius: 6px; border: 1px solid rgba(0, 0, 0, 0.15);
+}
+.theme-swatch i {
+  position: absolute; right: 4px; bottom: 4px;
+  width: 8px; height: 8px; border-radius: 50%;
+}
+.theme-swatch--auto { background: linear-gradient(120deg, #faf5ea 0 50%, #15120d 50% 100%); }
+.theme-swatch--auto i { background: #d2702f; }
+.theme-swatch--paper { background: #faf5ea; border-color: #e6dcc6; }
+.theme-swatch--paper i { background: #bf5f24; }
+.theme-swatch--ink { background: #15120d; border-color: #352c20; }
+.theme-swatch--ink i { background: #e3935a; }
+.theme-swatch--solarized-light { background: #fdf6e3; border-color: #ddd6c1; }
+.theme-swatch--solarized-light i { background: #268bd2; }
+.theme-swatch--solarized-dark { background: #002b36; border-color: #0f4553; }
+.theme-swatch--solarized-dark i { background: #2aa198; }
+.theme-swatch--nord { background: #2e3440; border-color: #4c566a; }
+.theme-swatch--nord i { background: #88c0d0; }
+.theme-swatch--high-contrast { background: #000; border-color: #666; }
+.theme-swatch--high-contrast i { background: #ffb454; }
 
 /* ── Annotation workspace + rail ───────────────────────────── */
 #workspace { display: flex; flex: 1; min-height: 0; }

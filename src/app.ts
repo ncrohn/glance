@@ -9,14 +9,17 @@ import { renderMarkdown } from "./renderer";
 import {
   readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs,
   readAnnotations, writeAnnotations, resolveAnchors, ensureAnnotationStore,
-  watchAnnotations, onAnnotationsChanged, onSetupResult, onShowAbout, appVersion,
+  watchAnnotations, onAnnotationsChanged, onSetupResult, onShowAbout, onShowTheme, appVersion,
 } from "./ipc";
 import { addAnnotation, removeAnnotation, genId, type Annotation } from "./annotations";
 import { captureSelection } from "./anchor-capture";
 import { renderRail, applyHighlights, mountSelectionToolbar } from "./annotation-ui";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
-import { confirmReload, promptText, showSetupResult, showAbout } from "./modal";
+import { confirmReload, promptText, showSetupResult, showAbout, showThemePicker } from "./modal";
+import {
+  applyTheme, loadThemePref, saveThemePref, currentAppearance, type ThemePref,
+} from "./theme";
 import { openPaths, pushRecent } from "./session";
 
 const LS_OPEN = "glance.openPaths";
@@ -179,7 +182,7 @@ function renderContent(): void {
     activeEditor = mountEditor(cmHost, doc.editorContent, (v) => {
       state = updateEditorContent(state, doc.id, v);
       renderTabBar(); // refresh dirty dot without tearing down the editor
-    });
+    }, currentAppearance() === "dark");
   } else {
     const view = el("div", "rendered");
     view.innerHTML = renderMarkdown(doc.editorContent);
@@ -225,11 +228,28 @@ export async function openPath(absPath: string): Promise<void> {
   await loadAnnotations(absPath);
 }
 
+function changeTheme(pref: ThemePref): void {
+  saveThemePref(pref);
+  applyTheme(pref, render);
+  render(); // remount editor so its dark flag matches the new appearance
+}
+
 export async function start(): Promise<void> {
+  // Adopt the persisted theme (and wire the OS-follow listener for Auto). The
+  // inline bootstrap in index.html already set data-theme to avoid a flash;
+  // this re-applies it and, for Auto, keeps it in sync with the OS.
+  applyTheme(loadThemePref(), render);
+
   await onOpenFile((absPath) => { void openPath(absPath); });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
   await onSetupResult((steps) => { showSetupResult(steps); });
   await onShowAbout(async () => { showAbout(await appVersion()); });
+  await onShowTheme(() => {
+    showThemePicker(loadThemePref(), {
+      onPreview: (pref) => applyTheme(pref, render),
+      onCommit: changeTheme,
+    });
+  });
   await onAnnotationsChanged((docPath) => { void loadAnnotations(docPath); });
   await onFileChanged(async (e) => {
     const doc = state.docs.find((d) => d.absPath === e.path);
