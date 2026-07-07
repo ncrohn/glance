@@ -506,6 +506,48 @@ body {
 .rendered pre::-webkit-scrollbar { height: 8px; }
 .rendered pre::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
 
+/* mermaid diagrams */
+/* The placeholder <pre class="mermaid-block"> inherits the code-block frame
+   above while the diagram lays out; once rendered it is replaced by the
+   .mermaid-diagram wrapper, which scrolls wide diagrams like tables do. */
+.rendered pre.mermaid-block {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.rendered .mermaid-diagram {
+  margin: 1.4em 0;
+  padding: 18px 20px;
+  overflow-x: auto;
+  display: flex;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.rendered .mermaid-diagram svg { max-width: 100%; height: auto; }
+.rendered .mermaid-diagram::-webkit-scrollbar { height: 8px; }
+.rendered .mermaid-diagram::-webkit-scrollbar-thumb {
+  background: var(--border); border-radius: 99px;
+}
+.rendered .mermaid-error { margin: 1.4em 0; }
+.rendered .mermaid-error .mermaid-error-label {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--accent);
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 10px 10px 0 0;
+  background: var(--accent-tint);
+}
+.rendered .mermaid-error pre.mermaid-block {
+  margin: 0;
+  border-radius: 0 0 12px 12px;
+}
+
 /* tables */
 /* The scroll wrapper owns the frame + rounded corners so a wide table can
    overflow horizontally (scrolling within the reading column) instead of

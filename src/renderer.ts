@@ -7,6 +7,11 @@ const md = new MarkdownIt({
   linkify: true,
   typographer: false,
   highlight(code, lang): string {
+    // Mermaid fences become placeholders holding the escaped source; the
+    // mermaid module swaps them for rendered SVG once the DOM is mounted.
+    if (lang === "mermaid") {
+      return `<pre class="mermaid-block">${md.utils.escapeHtml(code)}</pre>`;
+    }
     const language = lang && hljs.getLanguage(lang) ? lang : "";
     const cls = `hljs language-${lang || "plaintext"}`;
     if (language) {
