@@ -6,6 +6,7 @@ import {
 } from "./store";
 import { isDirty, basename } from "./document";
 import { renderMarkdown } from "./renderer";
+import { renderMermaidBlocks } from "./mermaid";
 import {
   readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs,
   readAnnotations, writeAnnotations, resolveAnchors, ensureAnnotationStore,
@@ -187,6 +188,7 @@ function renderContent(): void {
     const view = el("div", "rendered");
     view.innerHTML = renderMarkdown(doc.editorContent);
     host.appendChild(view);
+    void renderMermaidBlocks(view, currentAppearance());
     applyHighlights(view, doc.resolutions);
     teardownToolbar = mountSelectionToolbar(view, () => void startComment(doc.absPath));
   }

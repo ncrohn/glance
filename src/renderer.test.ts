@@ -35,4 +35,17 @@ describe("renderMarkdown", () => {
     expect(html).toContain("hljs");
     expect(html).toContain("language-js");
   });
+
+  it("emits a mermaid placeholder for mermaid fences", () => {
+    const html = renderMarkdown("```mermaid\ngraph TD;\n  A-->B;\n```");
+    expect(html).toContain('<pre class="mermaid-block">');
+    expect(html).toContain("A--&gt;B;");
+    expect(html).not.toContain("hljs");
+  });
+
+  it("escapes html inside mermaid fences", () => {
+    const html = renderMarkdown('```mermaid\ngraph TD;\n  A["<script>"]\n```');
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("&lt;script&gt;");
+  });
 });
