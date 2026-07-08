@@ -67,6 +67,8 @@ pub fn run() {
             annotations::ensure_annotation_store,
             reviewed::read_reviewed,
             reviewed::write_reviewed,
+            setup::list_integration_targets,
+            setup::run_integration,
             take_launch_args,
         ])
         .on_menu_event(|app, event| {
@@ -109,8 +111,10 @@ pub fn run() {
                     let _ = app.emit("menu-save", ());
                 }
                 "setup_integration" => {
-                    let results = setup::setup_claude_integration();
-                    let _ = app.emit("setup-result", results);
+                    let _ = app.emit("show-integration-picker", "setup");
+                }
+                "remove_integration" => {
+                    let _ = app.emit("show-integration-picker", "remove");
                 }
                 "about_glance" => {
                     let _ = app.emit("show-about", ());
@@ -134,7 +138,14 @@ pub fn run() {
             let install_cli_item = MenuItem::with_id(
                 handle,
                 "setup_integration",
-                "Set up Claude Integration…",
+                "Set up AI Integration…",
+                true,
+                None::<&str>,
+            )?;
+            let remove_cli_item = MenuItem::with_id(
+                handle,
+                "remove_integration",
+                "Remove AI Integration…",
                 true,
                 None::<&str>,
             )?;
@@ -146,6 +157,7 @@ pub fn run() {
                     &about_item,
                     &PredefinedMenuItem::separator(handle)?,
                     &install_cli_item,
+                    &remove_cli_item,
                     &PredefinedMenuItem::separator(handle)?,
                     &PredefinedMenuItem::hide(handle, None)?,
                     &PredefinedMenuItem::quit(handle, None)?,

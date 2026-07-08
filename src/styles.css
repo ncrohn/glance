@@ -637,6 +637,25 @@ body {
   border-radius: 5px; padding: 1px 5px; color: var(--ink-soft);
 }
 
+/* Empty-state prompt to wire up AI integration (shown until configured) */
+.setup-cta {
+  margin-top: 2.4em; width: 100%; max-width: 480px;
+  display: flex; align-items: center; gap: 16px;
+  text-align: left;
+  padding: 14px 16px; border-radius: 12px;
+  border: 1px solid var(--border); background: var(--surface);
+}
+.setup-cta-text { min-width: 0; flex: 1; }
+.setup-cta-title { font-family: var(--font-ui); font-size: 0.92rem; font-weight: 600; color: var(--ink); }
+.setup-cta-sub { margin-top: 2px; font-family: var(--font-ui); font-size: 0.78rem; line-height: 1.45; color: var(--muted); }
+.setup-cta-btn {
+  flex: none; cursor: pointer;
+  font-family: var(--font-ui); font-size: 0.82rem; font-weight: 600;
+  color: #fff; background: var(--accent);
+  border: none; border-radius: 8px; padding: 7px 15px;
+}
+.setup-cta-btn:hover { filter: brightness(1.06); }
+
 /* ---- Modal / notice --------------------------------------------------- */
 .modal {
   position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -716,6 +735,45 @@ body {
   word-break: break-word;
 }
 .setup-detail { font-family: var(--font-ui); }
+
+/* Result section header (per client / Shared) */
+.setup-group {
+  font-family: var(--font-ui);
+  font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--muted);
+  margin: 14px 0 4px; padding: 0 10px;
+}
+.setup-group:first-child { margin-top: 0; }
+
+/* Integration picker — one selectable row per client */
+.integration-clients { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.integration-client {
+  display: flex; gap: 11px; align-items: flex-start;
+  padding: 11px 12px; border-radius: 12px;
+  border: 1px solid var(--border-soft);
+  cursor: pointer;
+}
+.integration-client:hover:not(.disabled) { background: var(--accent-tint); }
+.integration-client.disabled { opacity: 0.5; cursor: default; }
+.integration-check { flex: none; margin-top: 3px; width: 15px; height: 15px; accent-color: var(--accent); }
+.integration-text { min-width: 0; }
+.integration-name {
+  font-family: var(--font-ui);
+  font-size: 14px; font-weight: 600; color: var(--ink);
+  display: flex; align-items: baseline; gap: 8px;
+}
+.integration-badge {
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase;
+  color: var(--muted);
+}
+.integration-caps {
+  margin-top: 3px; font-family: var(--font-ui);
+  font-size: 12.5px; line-height: 1.5; color: var(--muted); word-break: break-word;
+}
+.integration-caps-note {
+  margin-top: 1px; font-family: var(--font-ui);
+  font-size: 11.5px; font-style: italic; color: var(--muted); opacity: 0.8;
+}
 
 /* About box — centered icon + wordmark + attribution */
 .modal .box.about { max-width: 360px; text-align: center; align-items: center; padding-top: 30px; }

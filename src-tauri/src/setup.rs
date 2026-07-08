@@ -29,6 +29,9 @@ pub struct StepResult {
     pub ok: bool,
     pub label: String,
     pub message: String,
+    /// Which section the result modal files this row under: `"Shared"` for the
+    /// mdview CLI, otherwise the client's display name.
+    pub group: String,
 }
 
 const GUIDANCE_MARKER: &str = "<!-- glance-integration -->";
@@ -230,144 +233,591 @@ pub fn merge_settings_hook(existing: &str, command: &str) -> Result<String, Stri
     serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
 }
 
+/// Remove the `mcpServers.<name>` entry from a config string, preserving every
+/// other key. Returns `None` when the file is empty or the entry is absent
+/// (nothing to do), so callers can report "not registered" instead of a
+/// needless rewrite. Refuses to touch content that isn't a JSON object — same
+/// clobber-guard as [`merge_mcp_config`].
+pub fn remove_mcp_config(existing: &str, name: &str, file: &str) -> Result<Option<String>, String> {
+    if existing.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut root = parse_config_object(existing, file)?;
+    let removed = root
+        .as_object_mut()
+        .unwrap()
+        .get_mut("mcpServers")
+        .and_then(|s| s.as_object_mut())
+        .is_some_and(|m| m.remove(name).is_some());
+    if !removed {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?))
+}
+
+/// Remove any PostToolUse entry that runs `command` from a settings.json string,
+/// preserving everything else. Drops an entry entirely if it had only that one
+/// hook. Returns `None` when nothing matched. Tolerates empty input, refuses
+/// non-object content.
+pub fn remove_settings_hook(existing: &str, command: &str, file: &str) -> Result<Option<String>, String> {
+    if existing.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut root = parse_config_object(existing, file)?;
+    let post = root
+        .as_object_mut()
+        .unwrap()
+        .get_mut("hooks")
+        .and_then(|h| h.as_object_mut())
+        .and_then(|h| h.get_mut("PostToolUse"))
+        .and_then(|p| p.as_array_mut());
+    let Some(arr) = post else { return Ok(None) };
+    let before = arr.len();
+    // For each entry, drop the matching inner hook; then drop entries left empty.
+    for entry in arr.iter_mut() {
+        if let Some(hs) = entry.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+            hs.retain(|h| h.get("command").and_then(|c| c.as_str()) != Some(command));
+        }
+    }
+    arr.retain(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .map(|hs| !hs.is_empty())
+            .unwrap_or(true)
+    });
+    if arr.len() == before {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?))
+}
+
+/// Strip the guidance block (and the blank line before it) from a shared doc
+/// like `~/.claude/CLAUDE.md`, leaving the user's own content intact. Returns
+/// `None` when the block isn't present. Matches the exact block [`append_guidance`]
+/// wrote — an older, differently-worded block would not be recognized, so an
+/// install/uninstall pair must be on the same Glance version.
+pub fn strip_guidance(existing: &str) -> Option<String> {
+    let block = guidance_block();
+    let idx = existing.find(&block)?;
+    let mut out = String::with_capacity(existing.len());
+    out.push_str(&existing[..idx]);
+    out.push_str(&existing[idx + block.len()..]);
+    let trimmed = out.trim_end();
+    Some(if trimmed.is_empty() { String::new() } else { format!("{trimmed}\n") })
+}
+
+/// Whether `mcpServers.<name>` is present in a config string. Read-only probe
+/// for "is Glance already wired in" — any parse/shape problem is treated as
+/// "not present" (false), never an error, since this only drives a UI hint.
+pub fn mcp_config_has(existing: &str, name: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(existing)
+        .ok()
+        .and_then(|v| v.get("mcpServers")?.get(name).map(|_| true))
+        .unwrap_or(false)
+}
+
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-fn register_mcp() -> StepResult {
-    let label = "Register glance-mcp with Claude".to_string();
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => return StepResult { ok: false, label, message: format!("Could not locate the Glance binary: {e}") },
-    };
+/// Absolute paths to the two binaries the adapters register. Both live inside
+/// `Glance.app`: `app_bin` is the running GUI, `mcp_bin` is `glance-mcp` bundled
+/// next to it. Resolved once and shared by every adapter (all clients point at
+/// the same binaries — only *where* they record the paths differs).
+pub struct Binaries {
+    /// glance-mcp — the stdio MCP server clients spawn.
+    pub mcp_bin: String,
+    /// The Glance GUI binary — what the auto-open hook launches.
+    pub app_bin: String,
+}
+
+/// Locate the bundled binaries, refusing if we are running from a quarantined
+/// (App Translocation) copy — paths there are ephemeral and would break the
+/// moment the user moves the app.
+fn resolve_binaries() -> Result<Binaries, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("Could not locate the Glance binary: {e}"))?;
     if exe.to_string_lossy().contains("AppTranslocation") {
-        return StepResult {
-            ok: false,
-            label,
-            message: "Glance is running from a quarantined copy. Move Glance.app to /Applications, reopen it, then try again.".to_string(),
+        return Err("Glance is running from a quarantined copy. Move Glance.app to /Applications, reopen it, then try again.".to_string());
+    }
+    // glance-mcp is bundled next to the GUI binary inside Glance.app.
+    let mcp = exe
+        .parent()
+        .ok_or_else(|| "Could not resolve the app directory.".to_string())?
+        .join("glance-mcp");
+    Ok(Binaries {
+        mcp_bin: mcp.to_string_lossy().to_string(),
+        app_bin: exe.to_string_lossy().to_string(),
+    })
+}
+
+/// One file the driver will write atomically. `contents` is already merged
+/// against whatever was on disk — the adapter's job is to compute it, the
+/// driver's job is to commit it.
+pub struct FileWrite {
+    pub path: PathBuf,
+    pub contents: String,
+    /// chmod 0o755 after writing (hook scripts).
+    pub executable: bool,
+}
+
+/// Outcome of computing one capability for one client.
+pub enum Plan {
+    /// Perform these writes.
+    Write(Vec<FileWrite>),
+    /// Delete these paths (a file or a whole directory). Missing paths are fine.
+    /// Used by uninstall.
+    Delete(Vec<PathBuf>),
+    /// Already satisfied; message for the UI. No change.
+    AlreadyDone(String),
+    /// This client has no such capability — skipped, not a failure.
+    NotSupported,
+}
+
+/// The four things an adapter can install for a client. `Capability::ALL` is
+/// the canonical order; both enumeration (the picker) and execution iterate it,
+/// so the set can never drift between "what we show" and "what we run".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Capability {
+    Mcp,
+    Guidance,
+    Skill,
+    Hook,
+}
+
+impl Capability {
+    pub const ALL: [Capability; 4] = [Capability::Mcp, Capability::Guidance, Capability::Skill, Capability::Hook];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Capability::Mcp => "mcp",
+            Capability::Guidance => "guidance",
+            Capability::Skill => "skill",
+            Capability::Hook => "hook",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Capability::Mcp => "MCP server (glance-mcp)",
+            Capability::Guidance => "Review guidance",
+            Capability::Skill => "Agent skill",
+            Capability::Hook => "Auto-open hook",
+        }
+    }
+}
+
+/// One capability's eligibility for a client, for the picker UI.
+#[derive(Clone, Debug, Serialize)]
+pub struct CapabilityInfo {
+    pub key: String,
+    pub label: String,
+    pub supported: bool,
+}
+
+/// A client the picker can offer, with its detection state and per-capability
+/// eligibility. Produced by [`list_integration_targets`]; no side effects.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientInfo {
+    pub id: String,
+    pub display_name: String,
+    pub present: bool,
+    /// Whether glance-mcp is already registered with this client — drives the
+    /// "set up AI integration" empty-state prompt.
+    pub configured: bool,
+    pub capabilities: Vec<CapabilityInfo>,
+}
+
+/// One AI coding client Glance can integrate with (Claude Code, Cursor, …).
+///
+/// Methods may *read* existing config to compute a merge, but never write — the
+/// driver ([`run_step`]) owns all writes so the "refuse to clobber" and atomic
+/// guarantees live in one audited place. Capabilities a client lacks return
+/// [`Plan::NotSupported`] (the default impls) so adding a new client is just
+/// `mcp` + `is_present`.
+pub trait ClientAdapter {
+    /// Stable id, e.g. "claude", "cursor".
+    fn id(&self) -> &'static str;
+    /// Human name for the setup UI, e.g. "Claude Code".
+    fn display_name(&self) -> &'static str;
+
+    /// Whether this client looks installed — drives which adapters the setup UI
+    /// offers. Usually: its config dir/file exists.
+    fn is_present(&self, home: &Path) -> bool;
+
+    /// Which capabilities this client supports. The single source of truth for
+    /// both the picker (eligibility) and the run loop (what to execute) — an
+    /// unsupported capability is never shown as installable nor run.
+    fn supports(&self, c: Capability) -> bool;
+
+    /// Whether glance-mcp is already registered with this client. Read-only;
+    /// drives the empty-state "set up AI integration" prompt.
+    fn is_configured(&self, home: &Path) -> bool;
+
+    /// Register glance-mcp. The only required capability — it is the core loop.
+    fn mcp(&self, home: &Path, mcp_bin: &str) -> Result<Plan, String>;
+
+    /// Teach the agent the review convention. Default: unsupported.
+    fn guidance(&self, _home: &Path) -> Result<Plan, String> {
+        Ok(Plan::NotSupported)
+    }
+
+    /// Install the agent skill. Default: unsupported (Claude-only today).
+    fn skill(&self, _home: &Path) -> Result<Plan, String> {
+        Ok(Plan::NotSupported)
+    }
+
+    /// Install the auto-open-on-write hook. Default: unsupported (Claude
+    /// PostToolUse only, today).
+    fn open_hook(&self, _home: &Path, _app_bin: &str) -> Result<Plan, String> {
+        Ok(Plan::NotSupported)
+    }
+
+    // --- uninstall: reverse of the four capabilities above. Each defaults to
+    // NotSupported so a client only reverses what it actually installed. The
+    // shared `mdview` CLI is intentionally left in place — it is not a
+    // per-client connector.
+
+    /// De-register glance-mcp. Default: unsupported.
+    fn mcp_uninstall(&self, _home: &Path) -> Result<Plan, String> {
+        Ok(Plan::NotSupported)
+    }
+
+    /// Remove the review guidance. Default: unsupported.
+    fn guidance_uninstall(&self, _home: &Path) -> Result<Plan, String> {
+        Ok(Plan::NotSupported)
+    }
+
+    /// Remove the agent skill (and any files bundled with it). Default: unsupported.
+    fn skill_uninstall(&self, _home: &Path) -> Result<Plan, String> {
+        Ok(Plan::NotSupported)
+    }
+
+    /// Remove the auto-open hook's settings entry. Default: unsupported.
+    fn open_hook_uninstall(&self, _home: &Path) -> Result<Plan, String> {
+        Ok(Plan::NotSupported)
+    }
+}
+
+/// Claude Code — the original integration, now expressed as an adapter. Wraps
+/// the pure merge helpers above unchanged.
+pub struct ClaudeAdapter;
+
+impl ClientAdapter for ClaudeAdapter {
+    fn id(&self) -> &'static str {
+        "claude"
+    }
+    fn display_name(&self) -> &'static str {
+        "Claude Code"
+    }
+
+    fn is_present(&self, home: &Path) -> bool {
+        home.join(".claude.json").exists() || home.join(".claude").is_dir()
+    }
+
+    fn supports(&self, _c: Capability) -> bool {
+        true // Claude Code supports all four capabilities.
+    }
+
+    fn is_configured(&self, home: &Path) -> bool {
+        read_existing(&home.join(".claude.json"))
+            .map(|s| mcp_config_has(&s, "glance"))
+            .unwrap_or(false)
+    }
+
+    fn mcp(&self, home: &Path, mcp_bin: &str) -> Result<Plan, String> {
+        let path = home.join(".claude.json");
+        let merged = merge_mcp_config(&read_existing(&path)?, "glance", mcp_bin)?;
+        Ok(Plan::Write(vec![FileWrite { path, contents: merged, executable: false }]))
+    }
+
+    fn guidance(&self, home: &Path) -> Result<Plan, String> {
+        let path = home.join(".claude").join("CLAUDE.md");
+        match append_guidance(&read_existing(&path)?) {
+            None => Ok(Plan::AlreadyDone("Guidance already present — left unchanged.".to_string())),
+            Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
+        }
+    }
+
+    fn skill(&self, home: &Path) -> Result<Plan, String> {
+        let path = home.join(".claude").join("skills").join("glance").join("SKILL.md");
+        Ok(Plan::Write(vec![FileWrite { path, contents: skill_doc(), executable: false }]))
+    }
+
+    fn open_hook(&self, home: &Path, app_bin: &str) -> Result<Plan, String> {
+        let script_path = home.join(".claude").join("skills").join("glance").join("open-md-hook.sh");
+        let settings_path = home.join(".claude").join("settings.json");
+        let merged = merge_settings_hook(&read_existing(&settings_path)?, script_path.to_string_lossy().as_ref())?;
+        Ok(Plan::Write(vec![
+            FileWrite { path: script_path, contents: hook_script(app_bin), executable: true },
+            FileWrite { path: settings_path, contents: merged, executable: false },
+        ]))
+    }
+
+    fn mcp_uninstall(&self, home: &Path) -> Result<Plan, String> {
+        let path = home.join(".claude.json");
+        match remove_mcp_config(&read_existing(&path)?, "glance", "~/.claude.json")? {
+            None => Ok(Plan::AlreadyDone("glance-mcp was not registered.".to_string())),
+            Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
+        }
+    }
+
+    fn guidance_uninstall(&self, home: &Path) -> Result<Plan, String> {
+        let path = home.join(".claude").join("CLAUDE.md");
+        match strip_guidance(&read_existing(&path)?) {
+            None => Ok(Plan::AlreadyDone("No guidance block to remove.".to_string())),
+            Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
+        }
+    }
+
+    fn skill_uninstall(&self, home: &Path) -> Result<Plan, String> {
+        // The skill dir holds both SKILL.md and open-md-hook.sh — remove it whole.
+        Ok(Plan::Delete(vec![home.join(".claude").join("skills").join("glance")]))
+    }
+
+    fn open_hook_uninstall(&self, home: &Path) -> Result<Plan, String> {
+        // The hook script is deleted with the skill dir above; here we only
+        // withdraw its reference from settings.json.
+        let script_path = home.join(".claude").join("skills").join("glance").join("open-md-hook.sh");
+        let settings_path = home.join(".claude").join("settings.json");
+        match remove_settings_hook(&read_existing(&settings_path)?, script_path.to_string_lossy().as_ref(), "~/.claude/settings.json")? {
+            None => Ok(Plan::AlreadyDone("No auto-open hook entry to remove.".to_string())),
+            Some(next) => Ok(Plan::Write(vec![FileWrite { path: settings_path, contents: next, executable: false }])),
+        }
+    }
+}
+
+/// Cursor — MCP over `~/.cursor/mcp.json` (same `mcpServers` shape as Claude, so
+/// [`merge_mcp_config`] is reused) plus a project-rules doc. No skill/hook
+/// concepts, so those fall through to the [`ClientAdapter`] defaults.
+pub struct CursorAdapter;
+
+impl ClientAdapter for CursorAdapter {
+    fn id(&self) -> &'static str {
+        "cursor"
+    }
+    fn display_name(&self) -> &'static str {
+        "Cursor"
+    }
+
+    fn is_present(&self, home: &Path) -> bool {
+        home.join(".cursor").is_dir()
+    }
+
+    fn supports(&self, c: Capability) -> bool {
+        // Cursor has MCP + project rules, but no agent-skill or hook concept.
+        matches!(c, Capability::Mcp | Capability::Guidance)
+    }
+
+    fn is_configured(&self, home: &Path) -> bool {
+        read_existing(&home.join(".cursor").join("mcp.json"))
+            .map(|s| mcp_config_has(&s, "glance"))
+            .unwrap_or(false)
+    }
+
+    fn mcp(&self, home: &Path, mcp_bin: &str) -> Result<Plan, String> {
+        let path = home.join(".cursor").join("mcp.json");
+        let merged = merge_mcp_config(&read_existing(&path)?, "glance", mcp_bin)?;
+        Ok(Plan::Write(vec![FileWrite { path, contents: merged, executable: false }]))
+    }
+
+    fn guidance(&self, home: &Path) -> Result<Plan, String> {
+        // Cursor reads per-topic rule files from ~/.cursor/rules/.
+        let path = home.join(".cursor").join("rules").join("glance.md");
+        match append_guidance(&read_existing(&path)?) {
+            None => Ok(Plan::AlreadyDone("Guidance already present — left unchanged.".to_string())),
+            Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
+        }
+    }
+
+    fn mcp_uninstall(&self, home: &Path) -> Result<Plan, String> {
+        let path = home.join(".cursor").join("mcp.json");
+        match remove_mcp_config(&read_existing(&path)?, "glance", "~/.cursor/mcp.json")? {
+            None => Ok(Plan::AlreadyDone("glance-mcp was not registered.".to_string())),
+            Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
+        }
+    }
+
+    fn guidance_uninstall(&self, home: &Path) -> Result<Plan, String> {
+        // `guidance()` uses append_guidance (a merge), because ~/.cursor/rules/
+        // files are user-editable and glance.md may accumulate their own content.
+        // So reverse it with the same strip helper, not a blunt whole-file delete
+        // — only remove the file if stripping our block empties it.
+        let path = home.join(".cursor").join("rules").join("glance.md");
+        match strip_guidance(&read_existing(&path)?) {
+            None => Ok(Plan::AlreadyDone("No guidance block to remove.".to_string())),
+            Some(next) if next.trim().is_empty() => Ok(Plan::Delete(vec![path])),
+            Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
+        }
+    }
+}
+
+/// Commit one capability's [`Plan`], turning it into a [`StepResult`]. The only
+/// place in setup that mutates disk — creates parent dirs, writes atomically,
+/// applies the executable bit. Bails on the first write error.
+fn run_step(group: &str, label: &str, plan: Result<Plan, String>) -> StepResult {
+    let label = label.to_string();
+    let group = group.to_string();
+    let fail = |group: &str, label: &str, message: String| StepResult {
+        ok: false,
+        label: label.to_string(),
+        message,
+        group: group.to_string(),
+    };
+    let writes = match plan {
+        Err(e) => return fail(&group, &label, e),
+        Ok(Plan::NotSupported) => {
+            return StepResult { ok: true, label, message: "Not applicable to this client.".to_string(), group }
+        }
+        Ok(Plan::AlreadyDone(m)) => return StepResult { ok: true, label, message: m, group },
+        Ok(Plan::Delete(paths)) => {
+            for p in &paths {
+                let res = if p.is_dir() {
+                    std::fs::remove_dir_all(p)
+                } else {
+                    std::fs::remove_file(p)
+                };
+                match res {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return fail(&group, &label, format!("Could not remove {}: {e}", p.display())),
+                }
+            }
+            let names = paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
+            return StepResult { ok: true, label, message: format!("Removed {names}"), group };
+        }
+        Ok(Plan::Write(w)) => w,
+    };
+    for w in &writes {
+        if let Some(dir) = w.path.parent() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                return fail(&group, &label, format!("Could not create {}: {e}", dir.display()));
+            }
+        }
+        if let Err(e) = atomic_write(&w.path, &w.contents) {
+            return fail(&group, &label, format!("Could not write {}: {e}", w.path.display()));
+        }
+        if w.executable {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(&w.path, std::fs::Permissions::from_mode(0o755)) {
+                return fail(&group, &label, format!("Could not make {} executable: {e}", w.path.display()));
+            }
+        }
+    }
+    let paths = writes.iter().map(|w| w.path.display().to_string()).collect::<Vec<_>>().join(", ");
+    StepResult { ok: true, label, message: format!("Wrote {paths}"), group }
+}
+
+/// Every client Glance knows how to integrate with.
+fn all_adapters() -> Vec<Box<dyn ClientAdapter>> {
+    vec![Box::new(ClaudeAdapter), Box::new(CursorAdapter)]
+}
+
+fn install_plan(adapter: &dyn ClientAdapter, c: Capability, bins: &Binaries, home: &Path) -> Result<Plan, String> {
+    match c {
+        Capability::Mcp => adapter.mcp(home, &bins.mcp_bin),
+        Capability::Guidance => adapter.guidance(home),
+        Capability::Skill => adapter.skill(home),
+        Capability::Hook => adapter.open_hook(home, &bins.app_bin),
+    }
+}
+
+fn uninstall_plan(adapter: &dyn ClientAdapter, c: Capability, home: &Path) -> Result<Plan, String> {
+    match c {
+        Capability::Mcp => adapter.mcp_uninstall(home),
+        Capability::Guidance => adapter.guidance_uninstall(home),
+        Capability::Skill => adapter.skill_uninstall(home),
+        Capability::Hook => adapter.open_hook_uninstall(home),
+    }
+}
+
+/// Install every *supported* capability of one adapter, committing each.
+/// Unsupported capabilities are skipped, so results carry no "Not applicable"
+/// noise. Rows are grouped under the client's display name.
+pub fn setup_adapter(adapter: &dyn ClientAdapter, bins: &Binaries, home: &Path) -> Vec<StepResult> {
+    let name = adapter.display_name();
+    Capability::ALL
+        .into_iter()
+        .filter(|&c| adapter.supports(c))
+        .map(|c| run_step(name, c.label(), install_plan(adapter, c, bins, home)))
+        .collect()
+}
+
+/// Reverse every supported capability of one adapter.
+pub fn remove_adapter(adapter: &dyn ClientAdapter, home: &Path) -> Vec<StepResult> {
+    let name = adapter.display_name();
+    Capability::ALL
+        .into_iter()
+        .filter(|&c| adapter.supports(c))
+        .map(|c| run_step(name, c.label(), uninstall_plan(adapter, c, home)))
+        .collect()
+}
+
+/// Enumerate every client the picker can offer, with detection state and
+/// per-capability eligibility. Pure — no writes, safe to call on every open.
+#[tauri::command]
+pub fn list_integration_targets() -> Vec<ClientInfo> {
+    let home = home();
+    all_adapters()
+        .iter()
+        .map(|a| {
+            let present = home.as_ref().map(|h| a.is_present(h)).unwrap_or(false);
+            let configured = home.as_ref().map(|h| a.is_configured(h)).unwrap_or(false);
+            let capabilities = Capability::ALL
+                .into_iter()
+                .map(|c| CapabilityInfo { key: c.key().to_string(), label: c.label().to_string(), supported: a.supports(c) })
+                .collect();
+            ClientInfo { id: a.id().to_string(), display_name: a.display_name().to_string(), present, configured, capabilities }
+        })
+        .collect()
+}
+
+/// Execute a picker selection. `action` is `"setup"` or `"remove"`; `ids` are
+/// the chosen client ids. Setup installs the shared `mdview` CLI once (filed
+/// under "Shared"), then each selected client; remove reverses each selected
+/// client (leaving `mdview` in place). Unknown ids are ignored.
+#[tauri::command]
+pub fn run_integration(action: String, ids: Vec<String>) -> Vec<StepResult> {
+    let adapters = all_adapters();
+    let selected = |id: &str| adapters.iter().find(|a| a.id() == id);
+
+    if action == "remove" {
+        let home = match home() {
+            Some(h) => h,
+            None => return vec![StepResult { ok: false, label: "Locate home directory".to_string(), message: "Could not determine your home directory ($HOME).".to_string(), group: "Shared".to_string() }],
         };
+        return ids
+            .iter()
+            .filter_map(|id| selected(id))
+            .flat_map(|a| remove_adapter(a.as_ref(), &home))
+            .collect();
     }
-    // The MCP binary is bundled next to the GUI binary inside Glance.app.
-    let mcp = match exe.parent() {
-        Some(dir) => dir.join("glance-mcp"),
-        None => return StepResult { ok: false, label, message: "Could not resolve the app directory.".to_string() },
-    };
-    let mcp_str = mcp.to_string_lossy().to_string();
 
-    let home = match home() {
-        Some(h) => h,
-        None => return StepResult { ok: false, label, message: "Could not determine your home directory ($HOME).".to_string() },
-    };
-    let config_path = home.join(".claude.json");
-    let existing = match read_existing(&config_path) {
-        Ok(s) => s,
-        Err(e) => return StepResult { ok: false, label, message: e },
-    };
-    let merged = match merge_mcp_config(&existing, "glance", &mcp_str) {
-        Ok(m) => m,
-        Err(e) => return StepResult { ok: false, label, message: e },
-    };
-    match atomic_write(&config_path, &merged) {
-        Ok(_) => StepResult { ok: true, label, message: format!("Registered glance-mcp → {mcp_str}") },
-        Err(e) => StepResult { ok: false, label, message: format!("Could not write {}: {e}", config_path.display()) },
-    }
-}
-
-fn write_guidance() -> StepResult {
-    let label = "Add review guidance to ~/.claude/CLAUDE.md".to_string();
-    let home = match home() {
-        Some(h) => h,
-        None => return StepResult { ok: false, label, message: "Could not determine your home directory ($HOME).".to_string() },
-    };
-    let dir = home.join(".claude");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return StepResult { ok: false, label, message: format!("Could not create {}: {e}", dir.display()) };
-    }
-    let path = dir.join("CLAUDE.md");
-    let existing = match read_existing(&path) {
-        Ok(s) => s,
-        Err(e) => return StepResult { ok: false, label, message: e },
-    };
-    match append_guidance(&existing) {
-        None => StepResult { ok: true, label, message: "Guidance already present — left unchanged.".to_string() },
-        Some(next) => match atomic_write(&path, &next) {
-            Ok(_) => StepResult { ok: true, label, message: format!("Appended guidance to {}", path.display()) },
-            Err(e) => StepResult { ok: false, label, message: format!("Could not write {}: {e}", path.display()) },
-        },
-    }
-}
-
-fn install_skill() -> StepResult {
-    let label = "Install Glance agent skill".to_string();
-    let home = match home() {
-        Some(h) => h,
-        None => return StepResult { ok: false, label, message: "Could not determine your home directory ($HOME).".to_string() },
-    };
-    let dir = home.join(".claude").join("skills").join("glance");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return StepResult { ok: false, label, message: format!("Could not create {}: {e}", dir.display()) };
-    }
-    let path = dir.join("SKILL.md");
-    match std::fs::write(&path, skill_doc()) {
-        Ok(_) => StepResult { ok: true, label, message: format!("Installed skill → {}", path.display()) },
-        Err(e) => StepResult { ok: false, label, message: format!("Could not write {}: {e}", path.display()) },
-    }
-}
-
-fn install_open_hook() -> StepResult {
-    let label = "Install auto-open hook".to_string();
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => return StepResult { ok: false, label, message: format!("Could not locate the Glance binary: {e}") },
-    };
-    if exe.to_string_lossy().contains("AppTranslocation") {
-        return StepResult {
-            ok: false,
-            label,
-            message: "Glance is running from a quarantined copy. Move Glance.app to /Applications, reopen it, then try again.".to_string(),
-        };
-    }
-    let app_bin = exe.to_string_lossy().to_string();
-    let home = match home() {
-        Some(h) => h,
-        None => return StepResult { ok: false, label, message: "Could not determine your home directory ($HOME).".to_string() },
-    };
-    let dir = home.join(".claude").join("skills").join("glance");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return StepResult { ok: false, label, message: format!("Could not create {}: {e}", dir.display()) };
-    }
-    let script_path = dir.join("open-md-hook.sh");
-    if let Err(e) = std::fs::write(&script_path, hook_script(&app_bin)) {
-        return StepResult { ok: false, label, message: format!("Could not write {}: {e}", script_path.display()) };
-    }
-    use std::os::unix::fs::PermissionsExt;
-    if let Err(e) = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)) {
-        return StepResult { ok: false, label, message: format!("Could not make {} executable: {e}", script_path.display()) };
-    }
-    let settings_path = home.join(".claude").join("settings.json");
-    let existing = match read_existing(&settings_path) {
-        Ok(s) => s,
-        Err(e) => return StepResult { ok: false, label, message: e },
-    };
-    let merged = match merge_settings_hook(&existing, script_path.to_string_lossy().as_ref()) {
-        Ok(m) => m,
-        Err(e) => return StepResult { ok: false, label, message: e },
-    };
-    match atomic_write(&settings_path, &merged) {
-        Ok(_) => StepResult { ok: true, label, message: format!("Installed auto-open hook → {}", script_path.display()) },
-        Err(e) => StepResult { ok: false, label, message: format!("Could not write {}: {e}", settings_path.display()) },
-    }
-}
-
-pub fn setup_claude_integration() -> Vec<StepResult> {
+    // setup
     let cli = install_cli_tool();
-    vec![
-        StepResult { ok: cli.ok, label: "Install mdview CLI".to_string(), message: cli.message },
-        register_mcp(),
-        write_guidance(),
-        install_skill(),
-        install_open_hook(),
-    ]
+    let mut results = vec![StepResult { ok: cli.ok, label: "Install mdview CLI".to_string(), message: cli.message, group: "Shared".to_string() }];
+    let home = match home() {
+        Some(h) => h,
+        None => {
+            results.push(StepResult { ok: false, label: "Locate home directory".to_string(), message: "Could not determine your home directory ($HOME).".to_string(), group: "Shared".to_string() });
+            return results;
+        }
+    };
+    let bins = match resolve_binaries() {
+        Ok(b) => b,
+        Err(e) => {
+            results.push(StepResult { ok: false, label: "Locate Glance binaries".to_string(), message: e, group: "Shared".to_string() });
+            return results;
+        }
+    };
+    for id in &ids {
+        if let Some(a) = selected(id) {
+            results.extend(setup_adapter(a.as_ref(), &bins, &home));
+        }
+    }
+    results
 }
 
 #[cfg(test)]
@@ -458,6 +908,316 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["matcher"], "Bash");
         assert_eq!(arr[1]["matcher"], "Write");
+    }
+
+    // --- adapter layer ---------------------------------------------------
+
+    fn plan_kind(plan: &Plan) -> &'static str {
+        match plan {
+            Plan::Write(_) => "Write",
+            Plan::Delete(_) => "Delete",
+            Plan::AlreadyDone(_) => "AlreadyDone",
+            Plan::NotSupported => "NotSupported",
+        }
+    }
+
+    fn plan_writes(plan: Plan) -> Vec<FileWrite> {
+        match plan {
+            Plan::Write(w) => w,
+            other => panic!("expected Plan::Write, got {}", plan_kind(&other)),
+        }
+    }
+
+    fn plan_deletes(plan: Plan) -> Vec<PathBuf> {
+        match plan {
+            Plan::Delete(d) => d,
+            other => panic!("expected Plan::Delete, got {}", plan_kind(&other)),
+        }
+    }
+
+    // A throwaway home dir under the OS temp dir, unique per test name.
+    fn tmp_home(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("glance-adapter-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn claude_adapter_mcp_targets_claude_json_and_merges() {
+        let home = tmp_home("claude-mcp");
+        let writes = plan_writes(ClaudeAdapter.mcp(&home, "/Apps/Glance.app/Contents/MacOS/glance-mcp").unwrap());
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].path, home.join(".claude.json"));
+        let v: serde_json::Value = serde_json::from_str(&writes[0].contents).unwrap();
+        assert_eq!(v["mcpServers"]["glance"]["command"], "/Apps/Glance.app/Contents/MacOS/glance-mcp");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn cursor_adapter_mcp_targets_cursor_json_reusing_shape() {
+        let home = tmp_home("cursor-mcp");
+        let writes = plan_writes(CursorAdapter.mcp(&home, "/p/glance-mcp").unwrap());
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].path, home.join(".cursor").join("mcp.json"));
+        let v: serde_json::Value = serde_json::from_str(&writes[0].contents).unwrap();
+        // same mcpServers shape as Claude — merge_mcp_config is shared
+        assert_eq!(v["mcpServers"]["glance"]["command"], "/p/glance-mcp");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn cursor_has_no_skill_or_hook() {
+        let home = tmp_home("cursor-caps");
+        assert!(matches!(CursorAdapter.skill(&home).unwrap(), Plan::NotSupported));
+        assert!(matches!(CursorAdapter.open_hook(&home, "/bin/glance").unwrap(), Plan::NotSupported));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn claude_hook_writes_executable_script_and_settings() {
+        let home = tmp_home("claude-hook");
+        let writes = plan_writes(ClaudeAdapter.open_hook(&home, "/Applications/Glance.app/Contents/MacOS/glance").unwrap());
+        assert_eq!(writes.len(), 2);
+        let script = writes.iter().find(|w| w.executable).expect("an executable script write");
+        assert!(script.path.ends_with("open-md-hook.sh"));
+        assert!(script.contents.contains("/Applications/Glance.app/Contents/MacOS/glance"));
+        let settings = writes.iter().find(|w| w.path.ends_with("settings.json")).expect("a settings write");
+        let v: serde_json::Value = serde_json::from_str(&settings.contents).unwrap();
+        assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], "Write");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn guidance_is_idempotent_once_committed() {
+        let home = tmp_home("claude-guidance");
+        // first run plans a write; commit it, then a second call reports AlreadyDone
+        let writes = plan_writes(ClaudeAdapter.guidance(&home).unwrap());
+        run_step("g", "guidance", Ok(Plan::Write(writes)));
+        assert!(matches!(ClaudeAdapter.guidance(&home).unwrap(), Plan::AlreadyDone(_)));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn is_present_detects_config_dirs() {
+        let home = tmp_home("present");
+        // nothing yet
+        assert!(!ClaudeAdapter.is_present(&home));
+        assert!(!CursorAdapter.is_present(&home));
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        assert!(ClaudeAdapter.is_present(&home));
+        assert!(CursorAdapter.is_present(&home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn run_step_commits_writes_and_creates_parent_dirs() {
+        let home = tmp_home("run-step");
+        let target = home.join("nested").join("deep").join("file.txt");
+        let res = run_step("g", "write", Ok(Plan::Write(vec![FileWrite {
+            path: target.clone(),
+            contents: "hello".to_string(),
+            executable: false,
+        }])));
+        assert!(res.ok);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn run_step_reports_not_supported_and_already_done() {
+        assert!(run_step("g", "x", Ok(Plan::NotSupported)).ok);
+        let done = run_step("g", "x", Ok(Plan::AlreadyDone("kept".to_string())));
+        assert!(done.ok);
+        assert_eq!(done.message, "kept");
+        assert_eq!(done.group, "g");
+        assert!(!run_step("g", "x", Err("boom".to_string())).ok);
+    }
+
+    // --- uninstall --------------------------------------------------------
+
+    #[test]
+    fn remove_mcp_config_drops_only_our_key() {
+        let existing = r#"{"theme":"dark","mcpServers":{"other":{"command":"x"},"glance":{"command":"g"}}}"#;
+        let out = remove_mcp_config(existing, "glance", "cfg").unwrap().expect("a rewrite");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["mcpServers"]["other"]["command"], "x");
+        assert!(v["mcpServers"].get("glance").is_none());
+        // absent → None (nothing to do), and the clobber-guard still holds
+        assert!(remove_mcp_config(r#"{"mcpServers":{}}"#, "glance", "cfg").unwrap().is_none());
+        assert!(remove_mcp_config("", "glance", "cfg").unwrap().is_none());
+        assert!(remove_mcp_config("[1,2,3]", "glance", "cfg").is_err());
+    }
+
+    #[test]
+    fn remove_settings_hook_drops_entry_and_keeps_others() {
+        let existing = r#"{"model":"opus","hooks":{"PostToolUse":[
+            {"matcher":"Bash","hooks":[{"type":"command","command":"/other.sh"}]},
+            {"matcher":"Write","hooks":[{"type":"command","command":"/h/open-md-hook.sh"}]}
+        ]}}"#;
+        let out = remove_settings_hook(existing, "/h/open-md-hook.sh", "cfg").unwrap().expect("a rewrite");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["model"], "opus");
+        let arr = v["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["matcher"], "Bash");
+        // absent command → None
+        assert!(remove_settings_hook(&out, "/h/open-md-hook.sh", "cfg").unwrap().is_none());
+    }
+
+    #[test]
+    fn strip_guidance_round_trips_with_append() {
+        let base = "# My config\n";
+        let with = append_guidance(base).unwrap();
+        assert!(with.contains("mdview <absolute-path>"));
+        let without = strip_guidance(&with).expect("removable");
+        assert!(!without.contains("mdview <absolute-path>"));
+        assert!(without.contains("# My config"));
+        // idempotent: nothing to strip the second time
+        assert!(strip_guidance(&without).is_none());
+    }
+
+    #[test]
+    fn claude_uninstall_reverses_each_capability() {
+        let home = tmp_home("claude-uninstall");
+        // MCP: rewrite dropping glance
+        std::fs::write(home.join(".claude.json"), r#"{"mcpServers":{"glance":{"command":"g"},"keep":{"command":"k"}}}"#).unwrap();
+        let w = plan_writes(ClaudeAdapter.mcp_uninstall(&home).unwrap());
+        let v: serde_json::Value = serde_json::from_str(&w[0].contents).unwrap();
+        assert!(v["mcpServers"].get("glance").is_none());
+        assert_eq!(v["mcpServers"]["keep"]["command"], "k");
+        // Skill: deletes the whole skills/glance dir
+        let del = plan_deletes(ClaudeAdapter.skill_uninstall(&home).unwrap());
+        assert_eq!(del, vec![home.join(".claude").join("skills").join("glance")]);
+        // Nothing installed → AlreadyDone, not an error
+        assert!(matches!(ClaudeAdapter.mcp_uninstall(&tmp_home("empty1")).unwrap(), Plan::AlreadyDone(_)));
+        assert!(matches!(ClaudeAdapter.open_hook_uninstall(&tmp_home("empty2")).unwrap(), Plan::AlreadyDone(_)));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn cursor_guidance_uninstall_preserves_user_content_deletes_when_empty() {
+        let home = tmp_home("cursor-uninstall");
+        assert!(matches!(CursorAdapter.skill_uninstall(&home).unwrap(), Plan::NotSupported));
+        let rules = home.join(".cursor").join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        let path = rules.join("glance.md");
+
+        // File that is ONLY our block → deleting it is right.
+        std::fs::write(&path, append_guidance("").unwrap()).unwrap();
+        let del = plan_deletes(CursorAdapter.guidance_uninstall(&home).unwrap());
+        assert_eq!(del, vec![path.clone()]);
+
+        // File with the user's own rules too → strip our block, KEEP theirs.
+        std::fs::write(&path, append_guidance("# my project rules\n").unwrap()).unwrap();
+        let w = plan_writes(CursorAdapter.guidance_uninstall(&home).unwrap());
+        assert!(w[0].contents.contains("# my project rules"));
+        assert!(!w[0].contents.contains("mdview <absolute-path>"));
+
+        // No file → nothing to do.
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(CursorAdapter.guidance_uninstall(&home).unwrap(), Plan::AlreadyDone(_)));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn install_then_uninstall_leaves_config_clean() {
+        let home = tmp_home("roundtrip");
+        // install MCP + guidance + skill + hook, committing each
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        for r in setup_adapter(&ClaudeAdapter, &bins, &home) {
+            assert!(r.ok, "install step failed: {}", r.message);
+        }
+        assert!(home.join(".claude.json").exists());
+        assert!(home.join(".claude").join("skills").join("glance").join("SKILL.md").exists());
+        // uninstall
+        for r in remove_adapter(&ClaudeAdapter, &home) {
+            assert!(r.ok, "uninstall step failed: {}", r.message);
+        }
+        // glance key gone, skill dir gone, settings entry gone
+        let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
+        assert!(cfg["mcpServers"].get("glance").is_none());
+        assert!(!home.join(".claude").join("skills").join("glance").exists());
+        let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join(".claude").join("settings.json")).unwrap()).unwrap();
+        let arr = settings["hooks"]["PostToolUse"].as_array().unwrap();
+        assert!(arr.is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn run_step_delete_removes_file_and_dir_and_tolerates_missing() {
+        let home = tmp_home("delete");
+        let file = home.join("f.txt");
+        let dir = home.join("d");
+        std::fs::write(&file, "x").unwrap();
+        std::fs::create_dir_all(dir.join("inner")).unwrap();
+        let res = run_step("g", "del", Ok(Plan::Delete(vec![file.clone(), dir.clone(), home.join("missing")])));
+        assert!(res.ok, "{}", res.message);
+        assert!(!file.exists());
+        assert!(!dir.exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // --- capabilities + enumeration ---------------------------------------
+
+    #[test]
+    fn supports_reflects_each_client() {
+        for c in Capability::ALL {
+            assert!(ClaudeAdapter.supports(c), "Claude should support {c:?}");
+        }
+        assert!(CursorAdapter.supports(Capability::Mcp));
+        assert!(CursorAdapter.supports(Capability::Guidance));
+        assert!(!CursorAdapter.supports(Capability::Skill));
+        assert!(!CursorAdapter.supports(Capability::Hook));
+    }
+
+    #[test]
+    fn list_integration_targets_marks_eligibility() {
+        let targets = list_integration_targets();
+        let cursor = targets.iter().find(|c| c.id == "cursor").expect("cursor listed");
+        assert_eq!(cursor.display_name, "Cursor");
+        assert_eq!(cursor.capabilities.len(), 4);
+        let sup = |key: &str| cursor.capabilities.iter().find(|c| c.key == key).unwrap().supported;
+        assert!(sup("mcp"));
+        assert!(sup("guidance"));
+        assert!(!sup("skill"));
+        assert!(!sup("hook"));
+        let claude = targets.iter().find(|c| c.id == "claude").expect("claude listed");
+        assert!(claude.capabilities.iter().all(|c| c.supported));
+    }
+
+    #[test]
+    fn mcp_config_has_detects_registration() {
+        assert!(mcp_config_has(r#"{"mcpServers":{"glance":{"command":"g"}}}"#, "glance"));
+        assert!(!mcp_config_has(r#"{"mcpServers":{"other":{"command":"x"}}}"#, "glance"));
+        assert!(!mcp_config_has("", "glance"));
+        assert!(!mcp_config_has("{garbage", "glance")); // never errors → false
+    }
+
+    #[test]
+    fn is_configured_reflects_registration_and_targets_carry_it() {
+        let home = tmp_home("configured");
+        assert!(!ClaudeAdapter.is_configured(&home)); // nothing yet
+        // register via the adapter's own install plan, then commit
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        run_step("g", "mcp", ClaudeAdapter.mcp(&home, &bins.mcp_bin));
+        assert!(ClaudeAdapter.is_configured(&home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn setup_adapter_skips_unsupported_and_groups_by_client() {
+        let home = tmp_home("cursor-setup-steps");
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        let steps = setup_adapter(&CursorAdapter, &bins, &home);
+        // Cursor supports only mcp + guidance → exactly 2 steps, no "Not applicable" noise.
+        assert_eq!(steps.len(), 2);
+        assert!(steps.iter().all(|s| s.group == "Cursor"));
+        assert!(steps.iter().all(|s| s.ok));
+        assert!(steps.iter().all(|s| s.message != "Not applicable to this client."));
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     use std::io::Write as _;
