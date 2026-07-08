@@ -22,7 +22,7 @@ import {
 } from "./annotation-ui";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
-import { confirmReload, showSetupResult, showAbout, showThemePicker } from "./modal";
+import { confirmReload, showNotice, showSetupResult, showAbout, showThemePicker } from "./modal";
 import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
 } from "./theme";
@@ -333,6 +333,10 @@ export async function start(): Promise<void> {
           const saved = state.docs.find((d) => d.id === doc.id);
           if (saved) void writeReviewed(saved.absPath, saved.reviewedContent);
           render();
+        }).catch((err) => {
+          // Write failed (permissions, read-only volume, disk full). Surface it —
+          // the doc stays dirty since markSaved never ran, so no edits are lost.
+          showNotice(`Couldn't save ${doc.fileName}: ${err}`, false);
         });
       }
     }
