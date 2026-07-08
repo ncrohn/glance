@@ -188,7 +188,9 @@ function renderContent(): void {
     wm.appendChild(el("span", "dot", "."));
     empty.appendChild(wm);
     empty.appendChild(el("div", "tagline", "A quiet place to read your markdown."));
-    const recent = loadRecent();
+    // Cap the empty-state list at the 5 most-recent so it can't push the
+    // wordmark off the top of the window.
+    const recent = loadRecent().slice(0, 5);
     if (recent.length) {
       const wrap = el("div", "recent");
       wrap.appendChild(el("div", "recent-head", "Recent"));
