@@ -43,6 +43,7 @@ md.core.ruler.push("source_lines", (state) => {
   for (const token of state.tokens) {
     if (token.level === 0 && token.map && token.type.endsWith("_open")) {
       token.attrSet("data-sourceline", String(token.map[0] + 1));
+      token.attrSet("data-sourceline-end", String(token.map[1]));
     }
   }
 });

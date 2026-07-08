@@ -6,12 +6,13 @@ describe("renderMarkdown", () => {
     const html = renderMarkdown("# Hi");
     expect(html).toContain("Hi</h1>");
     expect(html).toContain('data-sourceline="1"');
+    expect(html).toContain('data-sourceline-end="1"');
   });
 
   it("stamps source line numbers on block elements", () => {
     const html = renderMarkdown("# Title\n\nsecond para on line 3");
-    expect(html).toMatch(/<h1 data-sourceline="1">/);
-    expect(html).toMatch(/<p data-sourceline="3">/);
+    expect(html).toMatch(/<h1[^>]*data-sourceline="1"/);
+    expect(html).toMatch(/<p[^>]*data-sourceline="3"/);
   });
 
   it("renders GFM tables", () => {
@@ -100,5 +101,14 @@ describe("renderMarkdown changed-line marking — multi-line block boundary", ()
     const html = renderMarkdown(src, new Set([4]));
     expect(/<p[^>]*data-changed[^>]*>gamma<\/p>/.test(html)).toBe(true);
     expect(/<p[^>]*data-changed[^>]*>alpha\nbeta<\/p>/.test(html)).toBe(false);
+  });
+});
+
+describe("renderMarkdown source line ends", () => {
+  it("stamps data-sourceline-end = last source line of each block", () => {
+    // "# T"=1, ""=2, "para"=3, "more"=4  → paragraph spans lines 3..4
+    const html = renderMarkdown("# T\n\npara\nmore");
+    expect(/<h1[^>]*data-sourceline="1"[^>]*data-sourceline-end="1"/.test(html)).toBe(true);
+    expect(/<p[^>]*data-sourceline="3"[^>]*data-sourceline-end="4"/.test(html)).toBe(true);
   });
 });
