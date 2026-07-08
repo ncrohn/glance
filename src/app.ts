@@ -16,7 +16,9 @@ import {
 } from "./ipc";
 import { addAnnotation, removeAnnotation, genId, type Annotation } from "./annotations";
 import { captureSelection } from "./anchor-capture";
-import { renderRail, applyHighlights, mountSelectionToolbar } from "./annotation-ui";
+import {
+  renderRail, applyHighlights, mountSelectionToolbar, assignMarkers, linkAnnotationHovers, pulseBlock,
+} from "./annotation-ui";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
 import { confirmReload, promptText, showSetupResult, showAbout, showThemePicker } from "./modal";
@@ -38,6 +40,7 @@ function saveSession(): void {
 let state: State = emptyState();
 let activeEditor: { destroy(): void } | null = null;
 let teardownToolbar: (() => void) | null = null;
+let teardownHovers: (() => void) | null = null;
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K, cls?: string, text?: string,
@@ -93,12 +96,15 @@ function renderRailFor(): void {
   if (!host) return;
   const doc = getActive(state);
   if (!doc) { host.innerHTML = ""; return; }
-  renderRail(host, doc.annotations, doc.resolutions, {
+  const markers = assignMarkers(doc.annotations, doc.resolutions);
+  renderRail(host, doc.annotations, doc.resolutions, markers, {
     onScrollTo: (a) => {
       const r = doc.resolutions[a.id];
       if (r?.startLine == null) return;
-      const node = document.querySelector(`[data-sourceline="${r.startLine}"]`);
+      const node = document.querySelector(`[data-annotation-ids~="${a.id}"]`)
+        ?? document.querySelector(`[data-sourceline="${r.startLine}"]`);
       node?.scrollIntoView({ behavior: "smooth", block: "center" });
+      pulseBlock(node);
     },
     onRemove: (a) => {
       state = setDocAnnotations(state, doc.absPath, removeAnnotation(doc.annotations, a.id));
@@ -203,7 +209,8 @@ function renderContent(): void {
     view.innerHTML = renderMarkdown(doc.editorContent, changedLines(doc));
     host.appendChild(view);
     void renderMermaidBlocks(view, currentAppearance());
-    applyHighlights(view, doc.resolutions);
+    const markers = assignMarkers(doc.annotations, doc.resolutions);
+    applyHighlights(view, doc.annotations, doc.resolutions, markers);
     teardownToolbar = mountSelectionToolbar(view, () => void startComment(doc.absPath));
   }
 }
@@ -213,6 +220,10 @@ export function render(): void {
   renderActions();
   renderContent();
   renderRailFor();
+  if (teardownHovers) { teardownHovers(); teardownHovers = null; }
+  const renderedView = document.querySelector<HTMLElement>(".rendered");
+  const railEl = document.getElementById("rail");
+  if (renderedView && railEl) teardownHovers = linkAnnotationHovers(renderedView, railEl);
   saveSession();
 }
 
