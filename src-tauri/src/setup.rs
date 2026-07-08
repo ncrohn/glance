@@ -234,140 +234,261 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-fn register_mcp() -> StepResult {
-    let label = "Register glance-mcp with Claude".to_string();
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => return StepResult { ok: false, label, message: format!("Could not locate the Glance binary: {e}") },
-    };
+/// Absolute paths to the two binaries the adapters register. Both live inside
+/// `Glance.app`: `app_bin` is the running GUI, `mcp_bin` is `glance-mcp` bundled
+/// next to it. Resolved once and shared by every adapter (all clients point at
+/// the same binaries — only *where* they record the paths differs).
+pub struct Binaries {
+    /// glance-mcp — the stdio MCP server clients spawn.
+    pub mcp_bin: String,
+    /// The Glance GUI binary — what the auto-open hook launches.
+    pub app_bin: String,
+}
+
+/// Locate the bundled binaries, refusing if we are running from a quarantined
+/// (App Translocation) copy — paths there are ephemeral and would break the
+/// moment the user moves the app.
+fn resolve_binaries() -> Result<Binaries, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("Could not locate the Glance binary: {e}"))?;
     if exe.to_string_lossy().contains("AppTranslocation") {
-        return StepResult {
-            ok: false,
-            label,
-            message: "Glance is running from a quarantined copy. Move Glance.app to /Applications, reopen it, then try again.".to_string(),
-        };
+        return Err("Glance is running from a quarantined copy. Move Glance.app to /Applications, reopen it, then try again.".to_string());
     }
-    // The MCP binary is bundled next to the GUI binary inside Glance.app.
-    let mcp = match exe.parent() {
-        Some(dir) => dir.join("glance-mcp"),
-        None => return StepResult { ok: false, label, message: "Could not resolve the app directory.".to_string() },
-    };
-    let mcp_str = mcp.to_string_lossy().to_string();
+    // glance-mcp is bundled next to the GUI binary inside Glance.app.
+    let mcp = exe
+        .parent()
+        .ok_or_else(|| "Could not resolve the app directory.".to_string())?
+        .join("glance-mcp");
+    Ok(Binaries {
+        mcp_bin: mcp.to_string_lossy().to_string(),
+        app_bin: exe.to_string_lossy().to_string(),
+    })
+}
 
-    let home = match home() {
-        Some(h) => h,
-        None => return StepResult { ok: false, label, message: "Could not determine your home directory ($HOME).".to_string() },
-    };
-    let config_path = home.join(".claude.json");
-    let existing = match read_existing(&config_path) {
-        Ok(s) => s,
-        Err(e) => return StepResult { ok: false, label, message: e },
-    };
-    let merged = match merge_mcp_config(&existing, "glance", &mcp_str) {
-        Ok(m) => m,
-        Err(e) => return StepResult { ok: false, label, message: e },
-    };
-    match atomic_write(&config_path, &merged) {
-        Ok(_) => StepResult { ok: true, label, message: format!("Registered glance-mcp → {mcp_str}") },
-        Err(e) => StepResult { ok: false, label, message: format!("Could not write {}: {e}", config_path.display()) },
+/// One file the driver will write atomically. `contents` is already merged
+/// against whatever was on disk — the adapter's job is to compute it, the
+/// driver's job is to commit it.
+pub struct FileWrite {
+    pub path: PathBuf,
+    pub contents: String,
+    /// chmod 0o755 after writing (hook scripts).
+    pub executable: bool,
+}
+
+/// Outcome of computing one capability for one client.
+pub enum Plan {
+    /// Perform these writes.
+    Write(Vec<FileWrite>),
+    /// Already satisfied; message for the UI. No write.
+    AlreadyDone(String),
+    /// This client has no such capability — skipped, not a failure.
+    NotSupported,
+}
+
+/// One AI coding client Glance can integrate with (Claude Code, Cursor, …).
+///
+/// Methods may *read* existing config to compute a merge, but never write — the
+/// driver ([`run_step`]) owns all writes so the "refuse to clobber" and atomic
+/// guarantees live in one audited place. Capabilities a client lacks return
+/// [`Plan::NotSupported`] (the default impls) so adding a new client is just
+/// `mcp` + `is_present`.
+pub trait ClientAdapter {
+    /// Stable id, e.g. "claude", "cursor".
+    fn id(&self) -> &'static str;
+    /// Human name for the setup UI, e.g. "Claude Code".
+    fn display_name(&self) -> &'static str;
+
+    /// Whether this client looks installed — drives which adapters the setup UI
+    /// offers. Usually: its config dir/file exists.
+    fn is_present(&self, home: &Path) -> bool;
+
+    /// Register glance-mcp. The only required capability — it is the core loop.
+    fn mcp(&self, home: &Path, mcp_bin: &str) -> Result<Plan, String>;
+
+    /// Teach the agent the review convention. Default: unsupported.
+    fn guidance(&self, _home: &Path) -> Result<Plan, String> {
+        Ok(Plan::NotSupported)
+    }
+
+    /// Install the agent skill. Default: unsupported (Claude-only today).
+    fn skill(&self, _home: &Path) -> Result<Plan, String> {
+        Ok(Plan::NotSupported)
+    }
+
+    /// Install the auto-open-on-write hook. Default: unsupported (Claude
+    /// PostToolUse only, today).
+    fn open_hook(&self, _home: &Path, _app_bin: &str) -> Result<Plan, String> {
+        Ok(Plan::NotSupported)
     }
 }
 
-fn write_guidance() -> StepResult {
-    let label = "Add review guidance to ~/.claude/CLAUDE.md".to_string();
-    let home = match home() {
-        Some(h) => h,
-        None => return StepResult { ok: false, label, message: "Could not determine your home directory ($HOME).".to_string() },
-    };
-    let dir = home.join(".claude");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return StepResult { ok: false, label, message: format!("Could not create {}: {e}", dir.display()) };
+/// Claude Code — the original integration, now expressed as an adapter. Wraps
+/// the pure merge helpers above unchanged.
+pub struct ClaudeAdapter;
+
+impl ClientAdapter for ClaudeAdapter {
+    fn id(&self) -> &'static str {
+        "claude"
     }
-    let path = dir.join("CLAUDE.md");
-    let existing = match read_existing(&path) {
-        Ok(s) => s,
-        Err(e) => return StepResult { ok: false, label, message: e },
-    };
-    match append_guidance(&existing) {
-        None => StepResult { ok: true, label, message: "Guidance already present — left unchanged.".to_string() },
-        Some(next) => match atomic_write(&path, &next) {
-            Ok(_) => StepResult { ok: true, label, message: format!("Appended guidance to {}", path.display()) },
-            Err(e) => StepResult { ok: false, label, message: format!("Could not write {}: {e}", path.display()) },
-        },
+    fn display_name(&self) -> &'static str {
+        "Claude Code"
+    }
+
+    fn is_present(&self, home: &Path) -> bool {
+        home.join(".claude.json").exists() || home.join(".claude").is_dir()
+    }
+
+    fn mcp(&self, home: &Path, mcp_bin: &str) -> Result<Plan, String> {
+        let path = home.join(".claude.json");
+        let merged = merge_mcp_config(&read_existing(&path)?, "glance", mcp_bin)?;
+        Ok(Plan::Write(vec![FileWrite { path, contents: merged, executable: false }]))
+    }
+
+    fn guidance(&self, home: &Path) -> Result<Plan, String> {
+        let path = home.join(".claude").join("CLAUDE.md");
+        match append_guidance(&read_existing(&path)?) {
+            None => Ok(Plan::AlreadyDone("Guidance already present — left unchanged.".to_string())),
+            Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
+        }
+    }
+
+    fn skill(&self, home: &Path) -> Result<Plan, String> {
+        let path = home.join(".claude").join("skills").join("glance").join("SKILL.md");
+        Ok(Plan::Write(vec![FileWrite { path, contents: skill_doc(), executable: false }]))
+    }
+
+    fn open_hook(&self, home: &Path, app_bin: &str) -> Result<Plan, String> {
+        let script_path = home.join(".claude").join("skills").join("glance").join("open-md-hook.sh");
+        let settings_path = home.join(".claude").join("settings.json");
+        let merged = merge_settings_hook(&read_existing(&settings_path)?, script_path.to_string_lossy().as_ref())?;
+        Ok(Plan::Write(vec![
+            FileWrite { path: script_path, contents: hook_script(app_bin), executable: true },
+            FileWrite { path: settings_path, contents: merged, executable: false },
+        ]))
     }
 }
 
-fn install_skill() -> StepResult {
-    let label = "Install Glance agent skill".to_string();
-    let home = match home() {
-        Some(h) => h,
-        None => return StepResult { ok: false, label, message: "Could not determine your home directory ($HOME).".to_string() },
-    };
-    let dir = home.join(".claude").join("skills").join("glance");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return StepResult { ok: false, label, message: format!("Could not create {}: {e}", dir.display()) };
+/// Cursor — MCP over `~/.cursor/mcp.json` (same `mcpServers` shape as Claude, so
+/// [`merge_mcp_config`] is reused) plus a project-rules doc. No skill/hook
+/// concepts, so those fall through to the [`ClientAdapter`] defaults.
+pub struct CursorAdapter;
+
+impl ClientAdapter for CursorAdapter {
+    fn id(&self) -> &'static str {
+        "cursor"
     }
-    let path = dir.join("SKILL.md");
-    match std::fs::write(&path, skill_doc()) {
-        Ok(_) => StepResult { ok: true, label, message: format!("Installed skill → {}", path.display()) },
-        Err(e) => StepResult { ok: false, label, message: format!("Could not write {}: {e}", path.display()) },
+    fn display_name(&self) -> &'static str {
+        "Cursor"
+    }
+
+    fn is_present(&self, home: &Path) -> bool {
+        home.join(".cursor").is_dir()
+    }
+
+    fn mcp(&self, home: &Path, mcp_bin: &str) -> Result<Plan, String> {
+        let path = home.join(".cursor").join("mcp.json");
+        let merged = merge_mcp_config(&read_existing(&path)?, "glance", mcp_bin)?;
+        Ok(Plan::Write(vec![FileWrite { path, contents: merged, executable: false }]))
+    }
+
+    fn guidance(&self, home: &Path) -> Result<Plan, String> {
+        // Cursor reads per-topic rule files from ~/.cursor/rules/.
+        let path = home.join(".cursor").join("rules").join("glance.md");
+        match append_guidance(&read_existing(&path)?) {
+            None => Ok(Plan::AlreadyDone("Guidance already present — left unchanged.".to_string())),
+            Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
+        }
     }
 }
 
-fn install_open_hook() -> StepResult {
-    let label = "Install auto-open hook".to_string();
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => return StepResult { ok: false, label, message: format!("Could not locate the Glance binary: {e}") },
-    };
-    if exe.to_string_lossy().contains("AppTranslocation") {
-        return StepResult {
-            ok: false,
-            label,
-            message: "Glance is running from a quarantined copy. Move Glance.app to /Applications, reopen it, then try again.".to_string(),
-        };
-    }
-    let app_bin = exe.to_string_lossy().to_string();
-    let home = match home() {
-        Some(h) => h,
-        None => return StepResult { ok: false, label, message: "Could not determine your home directory ($HOME).".to_string() },
-    };
-    let dir = home.join(".claude").join("skills").join("glance");
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return StepResult { ok: false, label, message: format!("Could not create {}: {e}", dir.display()) };
-    }
-    let script_path = dir.join("open-md-hook.sh");
-    if let Err(e) = std::fs::write(&script_path, hook_script(&app_bin)) {
-        return StepResult { ok: false, label, message: format!("Could not write {}: {e}", script_path.display()) };
-    }
-    use std::os::unix::fs::PermissionsExt;
-    if let Err(e) = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)) {
-        return StepResult { ok: false, label, message: format!("Could not make {} executable: {e}", script_path.display()) };
-    }
-    let settings_path = home.join(".claude").join("settings.json");
-    let existing = match read_existing(&settings_path) {
-        Ok(s) => s,
+/// Commit one capability's [`Plan`], turning it into a [`StepResult`]. The only
+/// place in setup that mutates disk — creates parent dirs, writes atomically,
+/// applies the executable bit. Bails on the first write error.
+fn run_step(label: &str, plan: Result<Plan, String>) -> StepResult {
+    let label = label.to_string();
+    let writes = match plan {
         Err(e) => return StepResult { ok: false, label, message: e },
+        Ok(Plan::NotSupported) => {
+            return StepResult { ok: true, label, message: "Not applicable to this client.".to_string() }
+        }
+        Ok(Plan::AlreadyDone(m)) => return StepResult { ok: true, label, message: m },
+        Ok(Plan::Write(w)) => w,
     };
-    let merged = match merge_settings_hook(&existing, script_path.to_string_lossy().as_ref()) {
-        Ok(m) => m,
-        Err(e) => return StepResult { ok: false, label, message: e },
-    };
-    match atomic_write(&settings_path, &merged) {
-        Ok(_) => StepResult { ok: true, label, message: format!("Installed auto-open hook → {}", script_path.display()) },
-        Err(e) => StepResult { ok: false, label, message: format!("Could not write {}: {e}", settings_path.display()) },
+    for w in &writes {
+        if let Some(dir) = w.path.parent() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                return StepResult { ok: false, label, message: format!("Could not create {}: {e}", dir.display()) };
+            }
+        }
+        if let Err(e) = atomic_write(&w.path, &w.contents) {
+            return StepResult { ok: false, label, message: format!("Could not write {}: {e}", w.path.display()) };
+        }
+        if w.executable {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(&w.path, std::fs::Permissions::from_mode(0o755)) {
+                return StepResult { ok: false, label, message: format!("Could not make {} executable: {e}", w.path.display()) };
+            }
+        }
     }
+    let paths = writes.iter().map(|w| w.path.display().to_string()).collect::<Vec<_>>().join(", ");
+    StepResult { ok: true, label, message: format!("Wrote {paths}") }
 }
 
-pub fn setup_claude_integration() -> Vec<StepResult> {
-    let cli = install_cli_tool();
+/// Every client Glance knows how to integrate with.
+fn all_adapters() -> Vec<Box<dyn ClientAdapter>> {
+    vec![Box::new(ClaudeAdapter), Box::new(CursorAdapter)]
+}
+
+/// Run every capability of one adapter, committing each. `mdview` is
+/// client-agnostic, so callers install it once ([`setup_all_present`]).
+pub fn setup_adapter(adapter: &dyn ClientAdapter, bins: &Binaries, home: &Path) -> Vec<StepResult> {
+    let name = adapter.display_name();
     vec![
-        StepResult { ok: cli.ok, label: "Install mdview CLI".to_string(), message: cli.message },
-        register_mcp(),
-        write_guidance(),
-        install_skill(),
-        install_open_hook(),
+        run_step(&format!("Register glance-mcp with {name}"), adapter.mcp(home, &bins.mcp_bin)),
+        run_step(&format!("Add review guidance for {name}"), adapter.guidance(home)),
+        run_step(&format!("Install agent skill for {name}"), adapter.skill(home)),
+        run_step(&format!("Install auto-open hook for {name}"), adapter.open_hook(home, &bins.app_bin)),
     ]
+}
+
+/// The "Set up AI Integration…" action: install the shared `mdview` CLI once,
+/// then run every client that looks installed. If no known client is present we
+/// still set up Claude Code so a fresh machine gets a working default.
+pub fn setup_all_present() -> Vec<StepResult> {
+    let cli = install_cli_tool();
+    let mut results = vec![StepResult {
+        ok: cli.ok,
+        label: "Install mdview CLI".to_string(),
+        message: cli.message,
+    }];
+
+    let home = match home() {
+        Some(h) => h,
+        None => {
+            results.push(StepResult { ok: false, label: "Locate home directory".to_string(), message: "Could not determine your home directory ($HOME).".to_string() });
+            return results;
+        }
+    };
+    let bins = match resolve_binaries() {
+        Ok(b) => b,
+        Err(e) => {
+            results.push(StepResult { ok: false, label: "Locate Glance binaries".to_string(), message: e });
+            return results;
+        }
+    };
+
+    let adapters = all_adapters();
+    let mut present: Vec<&Box<dyn ClientAdapter>> = adapters.iter().filter(|a| a.is_present(&home)).collect();
+    // Fresh machine with no known client → default to Claude Code.
+    if present.is_empty() {
+        if let Some(claude) = adapters.iter().find(|a| a.id() == "claude") {
+            present.push(claude);
+        }
+    }
+    for adapter in present {
+        results.extend(setup_adapter(adapter.as_ref(), &bins, &home));
+    }
+    results
 }
 
 #[cfg(test)]
@@ -458,6 +579,118 @@ mod tests {
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["matcher"], "Bash");
         assert_eq!(arr[1]["matcher"], "Write");
+    }
+
+    // --- adapter layer ---------------------------------------------------
+
+    fn plan_writes(plan: Plan) -> Vec<FileWrite> {
+        match plan {
+            Plan::Write(w) => w,
+            other => panic!("expected Plan::Write, got {}", match other {
+                Plan::AlreadyDone(_) => "AlreadyDone",
+                Plan::NotSupported => "NotSupported",
+                Plan::Write(_) => unreachable!(),
+            }),
+        }
+    }
+
+    // A throwaway home dir under the OS temp dir, unique per test name.
+    fn tmp_home(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("glance-adapter-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn claude_adapter_mcp_targets_claude_json_and_merges() {
+        let home = tmp_home("claude-mcp");
+        let writes = plan_writes(ClaudeAdapter.mcp(&home, "/Apps/Glance.app/Contents/MacOS/glance-mcp").unwrap());
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].path, home.join(".claude.json"));
+        let v: serde_json::Value = serde_json::from_str(&writes[0].contents).unwrap();
+        assert_eq!(v["mcpServers"]["glance"]["command"], "/Apps/Glance.app/Contents/MacOS/glance-mcp");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn cursor_adapter_mcp_targets_cursor_json_reusing_shape() {
+        let home = tmp_home("cursor-mcp");
+        let writes = plan_writes(CursorAdapter.mcp(&home, "/p/glance-mcp").unwrap());
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].path, home.join(".cursor").join("mcp.json"));
+        let v: serde_json::Value = serde_json::from_str(&writes[0].contents).unwrap();
+        // same mcpServers shape as Claude — merge_mcp_config is shared
+        assert_eq!(v["mcpServers"]["glance"]["command"], "/p/glance-mcp");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn cursor_has_no_skill_or_hook() {
+        let home = tmp_home("cursor-caps");
+        assert!(matches!(CursorAdapter.skill(&home).unwrap(), Plan::NotSupported));
+        assert!(matches!(CursorAdapter.open_hook(&home, "/bin/glance").unwrap(), Plan::NotSupported));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn claude_hook_writes_executable_script_and_settings() {
+        let home = tmp_home("claude-hook");
+        let writes = plan_writes(ClaudeAdapter.open_hook(&home, "/Applications/Glance.app/Contents/MacOS/glance").unwrap());
+        assert_eq!(writes.len(), 2);
+        let script = writes.iter().find(|w| w.executable).expect("an executable script write");
+        assert!(script.path.ends_with("open-md-hook.sh"));
+        assert!(script.contents.contains("/Applications/Glance.app/Contents/MacOS/glance"));
+        let settings = writes.iter().find(|w| w.path.ends_with("settings.json")).expect("a settings write");
+        let v: serde_json::Value = serde_json::from_str(&settings.contents).unwrap();
+        assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], "Write");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn guidance_is_idempotent_once_committed() {
+        let home = tmp_home("claude-guidance");
+        // first run plans a write; commit it, then a second call reports AlreadyDone
+        let writes = plan_writes(ClaudeAdapter.guidance(&home).unwrap());
+        run_step("guidance", Ok(Plan::Write(writes)));
+        assert!(matches!(ClaudeAdapter.guidance(&home).unwrap(), Plan::AlreadyDone(_)));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn is_present_detects_config_dirs() {
+        let home = tmp_home("present");
+        // nothing yet
+        assert!(!ClaudeAdapter.is_present(&home));
+        assert!(!CursorAdapter.is_present(&home));
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        assert!(ClaudeAdapter.is_present(&home));
+        assert!(CursorAdapter.is_present(&home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn run_step_commits_writes_and_creates_parent_dirs() {
+        let home = tmp_home("run-step");
+        let target = home.join("nested").join("deep").join("file.txt");
+        let res = run_step("write", Ok(Plan::Write(vec![FileWrite {
+            path: target.clone(),
+            contents: "hello".to_string(),
+            executable: false,
+        }])));
+        assert!(res.ok);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn run_step_reports_not_supported_and_already_done() {
+        assert!(run_step("x", Ok(Plan::NotSupported)).ok);
+        let done = run_step("x", Ok(Plan::AlreadyDone("kept".to_string())));
+        assert!(done.ok);
+        assert_eq!(done.message, "kept");
+        assert!(!run_step("x", Err("boom".to_string())).ok);
     }
 
     use std::io::Write as _;

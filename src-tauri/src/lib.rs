@@ -109,7 +109,7 @@ pub fn run() {
                     let _ = app.emit("menu-save", ());
                 }
                 "setup_integration" => {
-                    let results = setup::setup_claude_integration();
+                    let results = setup::setup_all_present();
                     let _ = app.emit("setup-result", results);
                 }
                 "about_glance" => {
