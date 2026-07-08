@@ -88,3 +88,11 @@ export function onShowAbout(cb: () => void): Promise<UnlistenFn> {
 export function onShowTheme(cb: () => void): Promise<UnlistenFn> {
   return listen("show-theme", () => cb());
 }
+
+export function readReviewed(path: string): Promise<string | null> {
+  return invoke<string | null>("read_reviewed", { path });
+}
+
+export function writeReviewed(path: string, content: string): Promise<void> {
+  return invoke<void>("write_reviewed", { path, content });
+}

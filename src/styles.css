@@ -816,3 +816,34 @@ body {
 .note-line { font: 600 11px/1 var(--font-mono); color: var(--accent); }
 .note-text { flex: 1; font-size: 13px; }
 .note-del { color: var(--faint); }
+
+/* Blocks changed on disk since the doc was last marked reviewed. */
+.rendered [data-changed] {
+  position: relative;
+  background: var(--accent-tint);
+  box-shadow: inset 3px 0 0 var(--accent-line);
+  border-radius: 3px;
+}
+
+/* Tab badge: a doc changed on disk since it was last reviewed. */
+.tab .change-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: 0 0 auto;
+  margin-left: 2px;
+}
+
+/* "Mark reviewed" action in the titlebar. */
+.review-btn {
+  margin-left: 10px;
+  padding: 3px 10px;
+  font-size: 12px;
+  border: 1px solid var(--accent-line);
+  border-radius: 6px;
+  background: var(--accent-tint);
+  color: var(--accent);
+  cursor: pointer;
+}
+.review-btn:hover { background: var(--accent); color: var(--bg); }

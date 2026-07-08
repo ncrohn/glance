@@ -3,14 +3,16 @@ import {
   State, emptyState, openDoc, closeDoc, setActive, getActive,
   toggleViewMode, updateEditorContent, markSaved, applyDiskChange, markRemoved,
   setDocAnnotations, setDocResolutions,
+  markReviewed, setReviewedBaseline,
 } from "./store";
-import { isDirty, basename } from "./document";
+import { isDirty, basename, changedLines, hasUnreviewedChanges } from "./document";
 import { renderMarkdown } from "./renderer";
 import { renderMermaidBlocks } from "./mermaid";
 import {
   readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs,
   readAnnotations, writeAnnotations, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onSetupResult, onShowAbout, onShowTheme, appVersion,
+  readReviewed, writeReviewed,
 } from "./ipc";
 import { addAnnotation, removeAnnotation, genId, type Annotation } from "./annotations";
 import { captureSelection } from "./anchor-capture";
@@ -113,7 +115,9 @@ function renderTabBar(): void {
     const tab = el("div", "tab");
     if (d.id === state.activeId) tab.classList.add("active");
     if (isDirty(d)) tab.classList.add("dirty");
+    if (hasUnreviewedChanges(d)) tab.classList.add("has-changes");
     tab.appendChild(el("span", "dot"));
+    if (hasUnreviewedChanges(d)) tab.appendChild(el("span", "change-dot"));
     const label = el("span", "label", d.fileName);
     label.onclick = () => { state = setActive(state, d.id); render(); };
     tab.appendChild(label);
@@ -138,6 +142,15 @@ function renderActions(): void {
   seg.appendChild(read);
   seg.appendChild(edit);
   host.appendChild(seg);
+  if (hasUnreviewedChanges(doc)) {
+    const review = el("button", "review-btn", "Mark reviewed");
+    review.onclick = () => {
+      state = markReviewed(state, doc.id);
+      void writeReviewed(doc.absPath, doc.diskContent);
+      render();
+    };
+    host.appendChild(review);
+  }
 }
 
 function renderContent(): void {
@@ -186,7 +199,7 @@ function renderContent(): void {
     }, currentAppearance() === "dark");
   } else {
     const view = el("div", "rendered");
-    view.innerHTML = renderMarkdown(doc.editorContent);
+    view.innerHTML = renderMarkdown(doc.editorContent, changedLines(doc));
     host.appendChild(view);
     void renderMermaidBlocks(view, currentAppearance());
     applyHighlights(view, doc.resolutions);
@@ -214,6 +227,12 @@ export async function openPath(absPath: string): Promise<void> {
   if (already) { state = setActive(state, absPath); render(); return; }
   const contents = await readFile(absPath);
   state = openDoc(state, absPath, contents);
+  try {
+    const baseline = await readReviewed(absPath);
+    if (baseline != null) state = setReviewedBaseline(state, absPath, baseline);
+  } catch (err) {
+    console.warn("readReviewed failed for", absPath, err);
+  }
   try {
     await watchFile(absPath);
   } catch (err) {
