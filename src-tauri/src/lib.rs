@@ -1,5 +1,6 @@
 pub mod anchor;
 pub mod annotations;
+pub mod reviewed;
 mod cli;
 mod cli_install;
 mod commands;
@@ -49,6 +50,8 @@ pub fn run() {
             annotations::write_annotations,
             annotations::resolve_anchors,
             annotations::ensure_annotation_store,
+            reviewed::read_reviewed,
+            reviewed::write_reviewed,
             take_launch_args,
         ])
         .on_menu_event(|app, event| {
