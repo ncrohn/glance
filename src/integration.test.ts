@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { groupSteps, capabilitySummary, isSelectable } from "./integration";
+import { groupSteps, capabilitySummary, isSelectable, needsSetup } from "./integration";
 import type { SetupStep, ClientInfo } from "./ipc";
 
 const step = (group: string, ok = true): SetupStep => ({ ok, group, label: "l", message: "m" });
@@ -8,6 +8,7 @@ const client = (over: Partial<ClientInfo>): ClientInfo => ({
   id: "cursor",
   displayName: "Cursor",
   present: true,
+  configured: false,
   capabilities: [
     { key: "mcp", label: "MCP server (glance-mcp)", supported: true },
     { key: "guidance", label: "Review guidance", supported: true },
@@ -54,5 +55,23 @@ describe("isSelectable", () => {
     expect(isSelectable(client({ present: true }), "setup")).toBe(true);
     expect(isSelectable(client({ present: false }), "setup")).toBe(false);
     expect(isSelectable(client({ present: false }), "remove")).toBe(false);
+  });
+});
+
+describe("needsSetup", () => {
+  it("prompts when a detected client exists but none are configured", () => {
+    expect(needsSetup([client({ present: true, configured: false })])).toBe(true);
+  });
+
+  it("stays quiet once any detected client is configured", () => {
+    expect(needsSetup([
+      client({ id: "claude", present: true, configured: true }),
+      client({ id: "cursor", present: true, configured: false }),
+    ])).toBe(false);
+  });
+
+  it("stays quiet when no client is even detected", () => {
+    expect(needsSetup([client({ present: false, configured: false })])).toBe(false);
+    expect(needsSetup([])).toBe(false);
   });
 });

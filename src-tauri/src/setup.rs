@@ -307,6 +307,16 @@ pub fn strip_guidance(existing: &str) -> Option<String> {
     Some(if trimmed.is_empty() { String::new() } else { format!("{trimmed}\n") })
 }
 
+/// Whether `mcpServers.<name>` is present in a config string. Read-only probe
+/// for "is Glance already wired in" — any parse/shape problem is treated as
+/// "not present" (false), never an error, since this only drives a UI hint.
+pub fn mcp_config_has(existing: &str, name: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(existing)
+        .ok()
+        .and_then(|v| v.get("mcpServers")?.get(name).map(|_| true))
+        .unwrap_or(false)
+}
+
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
@@ -414,6 +424,9 @@ pub struct ClientInfo {
     pub id: String,
     pub display_name: String,
     pub present: bool,
+    /// Whether glance-mcp is already registered with this client — drives the
+    /// "set up AI integration" empty-state prompt.
+    pub configured: bool,
     pub capabilities: Vec<CapabilityInfo>,
 }
 
@@ -438,6 +451,10 @@ pub trait ClientAdapter {
     /// both the picker (eligibility) and the run loop (what to execute) — an
     /// unsupported capability is never shown as installable nor run.
     fn supports(&self, c: Capability) -> bool;
+
+    /// Whether glance-mcp is already registered with this client. Read-only;
+    /// drives the empty-state "set up AI integration" prompt.
+    fn is_configured(&self, home: &Path) -> bool;
 
     /// Register glance-mcp. The only required capability — it is the core loop.
     fn mcp(&self, home: &Path, mcp_bin: &str) -> Result<Plan, String>;
@@ -502,6 +519,12 @@ impl ClientAdapter for ClaudeAdapter {
 
     fn supports(&self, _c: Capability) -> bool {
         true // Claude Code supports all four capabilities.
+    }
+
+    fn is_configured(&self, home: &Path) -> bool {
+        read_existing(&home.join(".claude.json"))
+            .map(|s| mcp_config_has(&s, "glance"))
+            .unwrap_or(false)
     }
 
     fn mcp(&self, home: &Path, mcp_bin: &str) -> Result<Plan, String> {
@@ -586,6 +609,12 @@ impl ClientAdapter for CursorAdapter {
     fn supports(&self, c: Capability) -> bool {
         // Cursor has MCP + project rules, but no agent-skill or hook concept.
         matches!(c, Capability::Mcp | Capability::Guidance)
+    }
+
+    fn is_configured(&self, home: &Path) -> bool {
+        read_existing(&home.join(".cursor").join("mcp.json"))
+            .map(|s| mcp_config_has(&s, "glance"))
+            .unwrap_or(false)
     }
 
     fn mcp(&self, home: &Path, mcp_bin: &str) -> Result<Plan, String> {
@@ -735,11 +764,12 @@ pub fn list_integration_targets() -> Vec<ClientInfo> {
         .iter()
         .map(|a| {
             let present = home.as_ref().map(|h| a.is_present(h)).unwrap_or(false);
+            let configured = home.as_ref().map(|h| a.is_configured(h)).unwrap_or(false);
             let capabilities = Capability::ALL
                 .into_iter()
                 .map(|c| CapabilityInfo { key: c.key().to_string(), label: c.label().to_string(), supported: a.supports(c) })
                 .collect();
-            ClientInfo { id: a.id().to_string(), display_name: a.display_name().to_string(), present, capabilities }
+            ClientInfo { id: a.id().to_string(), display_name: a.display_name().to_string(), present, configured, capabilities }
         })
         .collect()
 }
@@ -1156,6 +1186,25 @@ mod tests {
         assert!(!sup("hook"));
         let claude = targets.iter().find(|c| c.id == "claude").expect("claude listed");
         assert!(claude.capabilities.iter().all(|c| c.supported));
+    }
+
+    #[test]
+    fn mcp_config_has_detects_registration() {
+        assert!(mcp_config_has(r#"{"mcpServers":{"glance":{"command":"g"}}}"#, "glance"));
+        assert!(!mcp_config_has(r#"{"mcpServers":{"other":{"command":"x"}}}"#, "glance"));
+        assert!(!mcp_config_has("", "glance"));
+        assert!(!mcp_config_has("{garbage", "glance")); // never errors → false
+    }
+
+    #[test]
+    fn is_configured_reflects_registration_and_targets_carry_it() {
+        let home = tmp_home("configured");
+        assert!(!ClaudeAdapter.is_configured(&home)); // nothing yet
+        // register via the adapter's own install plan, then commit
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        run_step("g", "mcp", ClaudeAdapter.mcp(&home, &bins.mcp_bin));
+        assert!(ClaudeAdapter.is_configured(&home));
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

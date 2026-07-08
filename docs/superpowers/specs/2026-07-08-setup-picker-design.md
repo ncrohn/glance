@@ -141,6 +141,18 @@ only side-effectful glue.
   (supported list + unsupported note). The DOM modal itself stays thin and
   untested, like the other modals.
 
+## Addendum — empty-state "set up" prompt
+
+When Glance isn't wired into any detected client yet, the empty/welcome screen
+shows a subtle call-to-action card (title + one-line sub + "Set up" button) that
+opens the picker. Detection: `ClientInfo` gains `configured` (glance-mcp already
+registered — `ClientAdapter::is_configured`, backed by the pure `mcp_config_has`
+probe that never errors). The pure `needsSetup(clients)` helper returns true when
+a detected client exists but none are configured; once any detected client is
+configured the prompt disappears. `app.ts` fetches targets at startup and after
+any setup/remove run, re-rendering so the prompt reflects current state. Chosen
+placement: empty-state only (calm, on-brand) — not a persistent banner.
+
 ## Out of scope (YAGNI)
 
 - Per-capability checkboxes within a client.

@@ -41,3 +41,11 @@ export function capabilitySummary(client: ClientInfo): { supported: string[]; un
 export function isSelectable(client: ClientInfo, _action: IntegrationAction): boolean {
   return client.present;
 }
+
+/** Whether to show the empty-state "set up AI integration" prompt: the user has
+ *  a detected client but hasn't wired Glance into any of them yet. Once any
+ *  detected client is configured, the prompt goes away. */
+export function needsSetup(clients: ClientInfo[]): boolean {
+  const present = clients.filter((c) => c.present);
+  return present.length > 0 && present.every((c) => !c.configured);
+}

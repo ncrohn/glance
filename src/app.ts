@@ -28,6 +28,8 @@ import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
 } from "./theme";
 import { openPaths, pushRecent } from "./session";
+import { needsSetup } from "./integration";
+import type { ClientInfo, IntegrationAction } from "./ipc";
 
 const LS_OPEN = "glance.openPaths";
 const LS_RECENT = "glance.recent";
@@ -47,6 +49,27 @@ let state: State = emptyState();
 let activeEditor: { destroy(): void } | null = null;
 let teardownToolbar: (() => void) | null = null;
 let teardownHovers: (() => void) | null = null;
+
+// Integration targets, fetched at startup + after any setup/remove run, so the
+// empty-state "set up AI integration" prompt reflects current config.
+let integrationClients: ClientInfo[] = [];
+
+async function refreshIntegration(): Promise<void> {
+  try { integrationClients = await listIntegrationTargets(); } catch { integrationClients = []; }
+}
+
+// Open the picker, run the selection, show grouped results, then refresh so the
+// empty-state prompt updates. Shared by the native menu and the empty-state CTA.
+async function openIntegrationPicker(action: IntegrationAction): Promise<void> {
+  const clients = await listIntegrationTargets();
+  integrationClients = clients;
+  showIntegrationPicker(action, clients, async (ids) => {
+    const steps = await runIntegration(action, ids);
+    showSetupResult({ action, steps });
+    await refreshIntegration();
+    render();
+  });
+}
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K, cls?: string, text?: string,
@@ -211,6 +234,19 @@ function renderContent(): void {
       'Open files with <kbd>mdview &lt;file&gt;</kbd> &nbsp;·&nbsp; ' +
       'toggle source <kbd>⌘E</kbd> &nbsp;·&nbsp; save <kbd>⌘S</kbd>';
     empty.appendChild(hint);
+
+    // Prompt to wire Glance into a detected coding client, until they do.
+    if (needsSetup(integrationClients)) {
+      const cta = el("div", "setup-cta");
+      const body = el("div", "setup-cta-text");
+      body.appendChild(el("div", "setup-cta-title", "Set up AI integration"));
+      body.appendChild(el("div", "setup-cta-sub", "Review your docs with Claude Code or Cursor — comments flow back as edits."));
+      const btn = el("button", "setup-cta-btn", "Set up");
+      btn.onclick = () => { void openIntegrationPicker("setup"); };
+      cta.append(body, btn);
+      empty.appendChild(cta);
+    }
+
     host.appendChild(empty);
     return;
   }
@@ -313,13 +349,7 @@ export async function start(): Promise<void> {
 
   await onOpenFile((absPath) => { void openPath(absPath); });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
-  await onShowIntegrationPicker(async (action) => {
-    const clients = await listIntegrationTargets();
-    showIntegrationPicker(action, clients, async (ids) => {
-      const steps = await runIntegration(action, ids);
-      showSetupResult({ action, steps });
-    });
-  });
+  await onShowIntegrationPicker((action) => { void openIntegrationPicker(action); });
   await onShowAbout(async () => { showAbout(await appVersion()); });
   await onShowTheme(() => {
     showThemePicker(loadThemePref(), {
@@ -365,5 +395,6 @@ export async function start(): Promise<void> {
   for (const p of toRestore) {
     try { await openPath(p); } catch { /* file gone; skip */ }
   }
+  await refreshIntegration();
   render();
 }

@@ -637,6 +637,25 @@ body {
   border-radius: 5px; padding: 1px 5px; color: var(--ink-soft);
 }
 
+/* Empty-state prompt to wire up AI integration (shown until configured) */
+.setup-cta {
+  margin-top: 2.4em; width: 100%; max-width: 480px;
+  display: flex; align-items: center; gap: 16px;
+  text-align: left;
+  padding: 14px 16px; border-radius: 12px;
+  border: 1px solid var(--border); background: var(--surface);
+}
+.setup-cta-text { min-width: 0; flex: 1; }
+.setup-cta-title { font-family: var(--font-ui); font-size: 0.92rem; font-weight: 600; color: var(--ink); }
+.setup-cta-sub { margin-top: 2px; font-family: var(--font-ui); font-size: 0.78rem; line-height: 1.45; color: var(--muted); }
+.setup-cta-btn {
+  flex: none; cursor: pointer;
+  font-family: var(--font-ui); font-size: 0.82rem; font-weight: 600;
+  color: #fff; background: var(--accent);
+  border: none; border-radius: 8px; padding: 7px 15px;
+}
+.setup-cta-btn:hover { filter: brightness(1.06); }
+
 /* ---- Modal / notice --------------------------------------------------- */
 .modal {
   position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;

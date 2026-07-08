@@ -75,6 +75,8 @@ export interface ClientInfo {
   id: string;
   displayName: string;
   present: boolean;
+  /** glance-mcp already registered with this client. */
+  configured: boolean;
   capabilities: CapabilityInfo[];
 }
 
