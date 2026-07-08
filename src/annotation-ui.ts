@@ -1,5 +1,60 @@
 import type { Annotation, Resolution } from "./annotations";
 
+export interface Marker {
+  number: number;
+  color: string;
+}
+
+// Fixed curated palette; number disambiguates when colors recycle. Tuned live.
+export const MARKER_PALETTE = [
+  "#c9822b", // amber
+  "#2f9e8f", // teal
+  "#7c5cbf", // violet
+  "#c0567e", // rose
+  "#4f9d52", // green
+  "#3d7fbf", // blue
+];
+
+// Per-annotation number + color for open, anchored annotations, ordered by
+// document position. The rail and the highlights both consume this map.
+export function assignMarkers(
+  annotations: Annotation[],
+  resolutions: Record<string, Resolution>,
+): Map<string, Marker> {
+  const eligible = annotations.filter(
+    (a) => a.status === "open" && resolutions[a.id]?.startLine != null,
+  );
+  eligible.sort((x, y) => {
+    const lx = resolutions[x.id]!.startLine!;
+    const ly = resolutions[y.id]!.startLine!;
+    if (lx !== ly) return lx - ly;
+    if (x.createdAt !== y.createdAt) return x.createdAt < y.createdAt ? -1 : 1;
+    return x.id < y.id ? -1 : 1;
+  });
+  const map = new Map<string, Marker>();
+  eligible.forEach((a, i) => {
+    map.set(a.id, { number: i + 1, color: MARKER_PALETTE[i % MARKER_PALETTE.length] });
+  });
+  return map;
+}
+
+// ids of open annotations whose resolved range intersects [blockStart, blockEnd].
+export function annotationsForBlock(
+  blockStart: number,
+  blockEnd: number,
+  annotations: Annotation[],
+  resolutions: Record<string, Resolution>,
+): string[] {
+  const ids: string[] = [];
+  for (const a of annotations) {
+    if (a.status !== "open") continue;
+    const r = resolutions[a.id];
+    if (!r || r.startLine == null || r.endLine == null) continue;
+    if (blockStart <= r.endLine && r.startLine <= blockEnd) ids.push(a.id);
+  }
+  return ids;
+}
+
 export interface Grouped {
   open: Annotation[];
   resolved: Annotation[];
