@@ -24,6 +24,9 @@ export function showCommentComposer(opts: {
 
   const card = document.createElement("div");
   card.className = "comment-composer";
+  // Clicking the card chrome (not the textarea/buttons) must not drop the text
+  // selection in the view behind it.
+  card.onmousedown = (e) => { if (e.target === card) e.preventDefault(); };
 
   const head = document.createElement("div");
   head.className = "composer-head";
