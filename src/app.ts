@@ -296,7 +296,7 @@ export async function start(): Promise<void> {
       if (doc) {
         void writeFile(doc.absPath, doc.editorContent).then(() => {
           state = markSaved(state, doc.id);
-          const saved = getActive(state);
+          const saved = state.docs.find((d) => d.id === doc.id);
           if (saved) void writeReviewed(saved.absPath, saved.reviewedContent);
           render();
         });
