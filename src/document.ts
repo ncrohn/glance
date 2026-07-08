@@ -1,3 +1,5 @@
+import { diffLines } from "./diff";
+
 export type ViewMode = "rendered" | "source";
 
 export interface Doc {
@@ -6,6 +8,7 @@ export interface Doc {
   fileName: string;
   diskContent: string;
   editorContent: string;
+  reviewedContent: string;
   viewMode: ViewMode;
   existsOnDisk: boolean;
   annotations: import("./annotations").Annotation[];
@@ -24,6 +27,7 @@ export function createDoc(absPath: string, diskContent: string): Doc {
     fileName: basename(absPath),
     diskContent,
     editorContent: diskContent,
+    reviewedContent: diskContent,
     viewMode: "rendered",
     existsOnDisk: true,
     annotations: [],
@@ -33,4 +37,16 @@ export function createDoc(absPath: string, diskContent: string): Doc {
 
 export function isDirty(doc: Doc): boolean {
   return doc.editorContent !== doc.diskContent;
+}
+
+// Lines changed on screen since the last reviewed baseline (1-indexed).
+export function changedLines(doc: Doc): Set<number> {
+  return diffLines(doc.reviewedContent, doc.editorContent);
+}
+
+// Whether the on-disk content has moved past what the user last reviewed.
+// Compares against diskContent (not editorContent) so unsaved typing does not
+// light the tab badge / show the "Mark reviewed" button.
+export function hasUnreviewedChanges(doc: Doc): boolean {
+  return doc.reviewedContent !== doc.diskContent;
 }

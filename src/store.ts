@@ -53,6 +53,14 @@ export function markSaved(s: State, id: string): State {
   return mapDoc(s, id, (d) => ({ ...d, diskContent: d.editorContent, existsOnDisk: true }));
 }
 
+export function markReviewed(s: State, id: string): State {
+  return mapDoc(s, id, (d) => ({ ...d, reviewedContent: d.diskContent }));
+}
+
+export function setReviewedBaseline(s: State, id: string, content: string): State {
+  return mapDoc(s, id, (d) => ({ ...d, reviewedContent: content }));
+}
+
 export function markRemoved(s: State, absPath: string): State {
   return { ...s, docs: s.docs.map((d) => d.absPath === absPath ? { ...d, existsOnDisk: false } : d) };
 }

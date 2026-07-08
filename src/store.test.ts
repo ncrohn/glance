@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   emptyState, openDoc, closeDoc, setActive, updateEditorContent,
   toggleViewMode, markSaved, applyDiskChange, markRemoved, getActive,
+  markReviewed, setReviewedBaseline,
 } from "./store";
 import { isDirty } from "./document";
 
@@ -78,5 +79,28 @@ describe("store", () => {
     const b = s.docs.find((d) => d.absPath === "/b.md")!;
     expect(a.existsOnDisk).toBe(false);
     expect(b.existsOnDisk).toBe(true);
+  });
+});
+
+describe("review baseline reducers", () => {
+  it("markReviewed advances reviewedContent to diskContent", () => {
+    let s = openDoc(emptyState(), "/x.md", "v1");
+    s = applyDiskChange(s, "/x.md", "v2");
+    expect(s.docs[0].reviewedContent).toBe("v1"); // applyDiskChange leaves it
+    s = markReviewed(s, "/x.md");
+    expect(s.docs[0].reviewedContent).toBe("v2");
+  });
+
+  it("applyDiskChange does not touch reviewedContent", () => {
+    let s = openDoc(emptyState(), "/x.md", "v1");
+    s = applyDiskChange(s, "/x.md", "v2");
+    expect(s.docs[0].reviewedContent).toBe("v1");
+    expect(s.docs[0].diskContent).toBe("v2");
+  });
+
+  it("setReviewedBaseline overrides the baseline (persisted-load path)", () => {
+    let s = openDoc(emptyState(), "/x.md", "v2");
+    s = setReviewedBaseline(s, "/x.md", "v1");
+    expect(s.docs[0].reviewedContent).toBe("v1");
   });
 });
