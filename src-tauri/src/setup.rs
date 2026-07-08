@@ -1,6 +1,28 @@
 use crate::cli_install::install_cli_tool;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Read a config file we are about to rewrite. A missing file is fine (empty
+/// string → treated as a fresh config). Any *other* read error (e.g. a
+/// permissions failure) is returned as an error so callers refuse to overwrite:
+/// defaulting to "" here would let a merge silently replace an unread file with
+/// a minimal one, destroying the user's real config.
+fn read_existing(path: &Path) -> Result<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(s),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("Could not read {}: {e}", path.display())),
+    }
+}
+
+/// Write `contents` to `path` atomically (temp file in the same dir + rename),
+/// so a crash / disk-full / force-quit mid-write can't leave the user's global
+/// config truncated or corrupt.
+fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct StepResult {
@@ -86,13 +108,12 @@ pub fn append_guidance(existing: &str) -> Option<String> {
 }
 
 /// Merge a `mcpServers.<name>` entry into an existing `~/.claude.json` string,
-/// preserving every other key. Tolerates empty/invalid input by starting fresh.
-pub fn merge_mcp_config(existing: &str, name: &str, command: &str) -> String {
-    let mut root: serde_json::Value =
-        serde_json::from_str(existing).unwrap_or_else(|_| serde_json::json!({}));
-    if !root.is_object() {
-        root = serde_json::json!({});
-    }
+/// preserving every other key. An empty input starts fresh, but non-empty input
+/// that isn't a JSON object is an error rather than being silently discarded —
+/// this file holds the user's entire Claude Code state (auth, projects), so
+/// clobbering it on a transient parse failure would be catastrophic.
+pub fn merge_mcp_config(existing: &str, name: &str, command: &str) -> Result<String, String> {
+    let mut root = parse_config_object(existing, "~/.claude.json")?;
     let obj = root.as_object_mut().unwrap();
     let servers = obj
         .entry("mcpServers")
@@ -104,7 +125,23 @@ pub fn merge_mcp_config(existing: &str, name: &str, command: &str) -> String {
         name.to_string(),
         serde_json::json!({ "command": command, "args": [] }),
     );
-    serde_json::to_string_pretty(&root).unwrap()
+    serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
+}
+
+/// Parse a config string into a JSON object. Empty/whitespace → a fresh `{}`.
+/// Non-empty content that fails to parse, or parses to a non-object, is an error
+/// — callers must not overwrite the file in that case.
+fn parse_config_object(existing: &str, name: &str) -> Result<serde_json::Value, String> {
+    if existing.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    let root: serde_json::Value = serde_json::from_str(existing).map_err(|e| {
+        format!("{name} is not valid JSON ({e}); refusing to overwrite it. Fix or remove the file, then retry.")
+    })?;
+    if !root.is_object() {
+        return Err(format!("{name} is not a JSON object; refusing to overwrite it."));
+    }
+    Ok(root)
 }
 
 /// The PostToolUse hook script. `app_bin` (absolute path to the Glance GUI
@@ -160,12 +197,8 @@ exit 0
 /// Add a PostToolUse/Write hook running `command` to a settings.json string,
 /// preserving everything else. Idempotent: no-op if `command` already appears
 /// under any PostToolUse entry. Tolerates empty/invalid input.
-pub fn merge_settings_hook(existing: &str, command: &str) -> String {
-    let mut root: serde_json::Value =
-        serde_json::from_str(existing).unwrap_or_else(|_| serde_json::json!({}));
-    if !root.is_object() {
-        root = serde_json::json!({});
-    }
+pub fn merge_settings_hook(existing: &str, command: &str) -> Result<String, String> {
+    let mut root = parse_config_object(existing, "~/.claude/settings.json")?;
     let obj = root.as_object_mut().unwrap();
     let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
     if !hooks.is_object() {
@@ -194,7 +227,7 @@ pub fn merge_settings_hook(existing: &str, command: &str) -> String {
             "hooks": [ { "type": "command", "command": command } ]
         }));
     }
-    serde_json::to_string_pretty(&root).unwrap()
+    serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
 }
 
 fn home() -> Option<PathBuf> {
@@ -226,9 +259,15 @@ fn register_mcp() -> StepResult {
         None => return StepResult { ok: false, label, message: "Could not determine your home directory ($HOME).".to_string() },
     };
     let config_path = home.join(".claude.json");
-    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let merged = merge_mcp_config(&existing, "glance", &mcp_str);
-    match std::fs::write(&config_path, merged) {
+    let existing = match read_existing(&config_path) {
+        Ok(s) => s,
+        Err(e) => return StepResult { ok: false, label, message: e },
+    };
+    let merged = match merge_mcp_config(&existing, "glance", &mcp_str) {
+        Ok(m) => m,
+        Err(e) => return StepResult { ok: false, label, message: e },
+    };
+    match atomic_write(&config_path, &merged) {
         Ok(_) => StepResult { ok: true, label, message: format!("Registered glance-mcp → {mcp_str}") },
         Err(e) => StepResult { ok: false, label, message: format!("Could not write {}: {e}", config_path.display()) },
     }
@@ -245,10 +284,13 @@ fn write_guidance() -> StepResult {
         return StepResult { ok: false, label, message: format!("Could not create {}: {e}", dir.display()) };
     }
     let path = dir.join("CLAUDE.md");
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let existing = match read_existing(&path) {
+        Ok(s) => s,
+        Err(e) => return StepResult { ok: false, label, message: e },
+    };
     match append_guidance(&existing) {
         None => StepResult { ok: true, label, message: "Guidance already present — left unchanged.".to_string() },
-        Some(next) => match std::fs::write(&path, next) {
+        Some(next) => match atomic_write(&path, &next) {
             Ok(_) => StepResult { ok: true, label, message: format!("Appended guidance to {}", path.display()) },
             Err(e) => StepResult { ok: false, label, message: format!("Could not write {}: {e}", path.display()) },
         },
@@ -303,9 +345,15 @@ fn install_open_hook() -> StepResult {
         return StepResult { ok: false, label, message: format!("Could not make {} executable: {e}", script_path.display()) };
     }
     let settings_path = home.join(".claude").join("settings.json");
-    let existing = std::fs::read_to_string(&settings_path).unwrap_or_default();
-    let merged = merge_settings_hook(&existing, script_path.to_string_lossy().as_ref());
-    match std::fs::write(&settings_path, merged) {
+    let existing = match read_existing(&settings_path) {
+        Ok(s) => s,
+        Err(e) => return StepResult { ok: false, label, message: e },
+    };
+    let merged = match merge_settings_hook(&existing, script_path.to_string_lossy().as_ref()) {
+        Ok(m) => m,
+        Err(e) => return StepResult { ok: false, label, message: e },
+    };
+    match atomic_write(&settings_path, &merged) {
         Ok(_) => StepResult { ok: true, label, message: format!("Installed auto-open hook → {}", script_path.display()) },
         Err(e) => StepResult { ok: false, label, message: format!("Could not write {}: {e}", settings_path.display()) },
     }
@@ -336,7 +384,7 @@ mod tests {
 
     #[test]
     fn merge_into_empty_creates_server() {
-        let out = merge_mcp_config("", "glance", "/Apps/Glance.app/Contents/MacOS/glance-mcp");
+        let out = merge_mcp_config("", "glance", "/Apps/Glance.app/Contents/MacOS/glance-mcp").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["mcpServers"]["glance"]["command"], "/Apps/Glance.app/Contents/MacOS/glance-mcp");
     }
@@ -344,11 +392,21 @@ mod tests {
     #[test]
     fn merge_preserves_other_keys_and_servers() {
         let existing = r#"{"theme":"dark","mcpServers":{"other":{"command":"x"}}}"#;
-        let out = merge_mcp_config(existing, "glance", "/p/glance-mcp");
+        let out = merge_mcp_config(existing, "glance", "/p/glance-mcp").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["theme"], "dark");
         assert_eq!(v["mcpServers"]["other"]["command"], "x");
         assert_eq!(v["mcpServers"]["glance"]["command"], "/p/glance-mcp");
+    }
+
+    #[test]
+    fn merge_refuses_to_clobber_invalid_json() {
+        // A corrupt or mid-write ~/.claude.json must NOT be silently replaced.
+        assert!(merge_mcp_config("{not valid json", "glance", "/p/glance-mcp").is_err());
+        assert!(merge_mcp_config("[1,2,3]", "glance", "/p/glance-mcp").is_err()); // valid JSON, wrong shape
+        assert!(merge_settings_hook("garbage{", "/h/open-md-hook.sh").is_err());
+        // whitespace-only is treated as a fresh (empty) config, not an error
+        assert!(merge_mcp_config("   \n", "glance", "/p/glance-mcp").is_ok());
     }
 
     #[test]
@@ -380,7 +438,7 @@ mod tests {
 
     #[test]
     fn merge_settings_hook_creates_entry_in_empty() {
-        let out = merge_settings_hook("", "/h/open-md-hook.sh");
+        let out = merge_settings_hook("", "/h/open-md-hook.sh").unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let entry = &v["hooks"]["PostToolUse"][0];
         assert_eq!(entry["matcher"], "Write");
@@ -391,8 +449,8 @@ mod tests {
     #[test]
     fn merge_settings_hook_preserves_others_and_is_idempotent() {
         let existing = r#"{"model":"opus","hooks":{"PostToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/other.sh"}]}]}}"#;
-        let once = merge_settings_hook(existing, "/h/open-md-hook.sh");
-        let twice = merge_settings_hook(&once, "/h/open-md-hook.sh");
+        let once = merge_settings_hook(existing, "/h/open-md-hook.sh").unwrap();
+        let twice = merge_settings_hook(&once, "/h/open-md-hook.sh").unwrap();
         let v: serde_json::Value = serde_json::from_str(&twice).unwrap();
         assert_eq!(v["model"], "opus");
         let arr = v["hooks"]["PostToolUse"].as_array().unwrap();
@@ -403,7 +461,6 @@ mod tests {
     }
 
     use std::io::Write as _;
-    use std::path::PathBuf;
 
     fn python3_available() -> bool {
         std::process::Command::new("python3")
@@ -415,7 +472,7 @@ mod tests {
 
     // Run the hook with the given stdin JSON; return true if the stub binary
     // fired (marker file created) within a short window.
-    fn run_hook(dir: &PathBuf, stub: &PathBuf, marker: &PathBuf, stdin_json: &str) -> bool {
+    fn run_hook(dir: &Path, stub: &Path, marker: &Path, stdin_json: &str) -> bool {
         let script = dir.join("open-md-hook.sh");
         std::fs::write(&script, hook_script(&stub.to_string_lossy())).unwrap();
         {
