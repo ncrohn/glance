@@ -16,12 +16,13 @@ import {
 } from "./ipc";
 import { addAnnotation, removeAnnotation, genId, type Annotation } from "./annotations";
 import { captureSelection } from "./anchor-capture";
+import { showCommentComposer } from "./composer";
 import {
   renderRail, applyHighlights, mountSelectionToolbar, assignMarkers, linkAnnotationHovers, pulseBlock,
 } from "./annotation-ui";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
-import { confirmReload, promptText, showSetupResult, showAbout, showThemePicker } from "./modal";
+import { confirmReload, showSetupResult, showAbout, showThemePicker } from "./modal";
 import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, type ThemePref,
 } from "./theme";
@@ -74,21 +75,30 @@ async function persistAnnotations(absPath: string): Promise<void> {
   await refreshResolutions(absPath);
 }
 
-async function startComment(absPath: string): Promise<void> {
+function startComment(absPath: string): void {
   const doc = state.docs.find((d) => d.absPath === absPath);
   if (!doc) return;
   const cap = captureSelection(doc.editorContent);
   if (!cap) return;
-  const note = await promptText(`Comment on "${cap.quote.slice(0, 40)}…"`, "Your note…");
-  if (!note) return;
-  const annotation: Annotation = {
-    id: genId(), quote: cap.quote, prefix: cap.prefix, suffix: cap.suffix,
-    lineHint: cap.lineHint, note, status: "open", author: "user",
-    createdAt: new Date().toISOString(),
-  };
-  state = setDocAnnotations(state, absPath, addAnnotation(doc.annotations, annotation));
-  await persistAnnotations(absPath);
-  render();
+  const sel = window.getSelection();
+  const rect = sel && !sel.isCollapsed
+    ? sel.getRangeAt(0).getBoundingClientRect()
+    : ({ top: 120, bottom: 140, left: 120 } as DOMRect);
+  showCommentComposer({
+    quote: cap.quote,
+    anchor: { top: rect.top, bottom: rect.bottom, left: rect.left },
+    onSubmit: (note) => {
+      const annotation: Annotation = {
+        id: genId(), quote: cap.quote, prefix: cap.prefix, suffix: cap.suffix,
+        lineHint: cap.lineHint, note, status: "open", author: "user",
+        createdAt: new Date().toISOString(),
+      };
+      state = setDocAnnotations(state, absPath, addAnnotation(doc.annotations, annotation));
+      void persistAnnotations(absPath);
+      render();
+    },
+    onCancel: () => {},
+  });
 }
 
 function renderRailFor(): void {
@@ -211,7 +221,7 @@ function renderContent(): void {
     void renderMermaidBlocks(view, currentAppearance());
     const markers = assignMarkers(doc.annotations, doc.resolutions);
     applyHighlights(view, doc.annotations, doc.resolutions, markers);
-    teardownToolbar = mountSelectionToolbar(view, () => void startComment(doc.absPath));
+    teardownToolbar = mountSelectionToolbar(view, () => startComment(doc.absPath));
   }
 }
 
