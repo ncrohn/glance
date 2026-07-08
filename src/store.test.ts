@@ -46,6 +46,15 @@ describe("store", () => {
     expect(getActive(s)!.diskContent).toBe("A!");
   });
 
+  it("markSaved also advances the reviewed baseline (own edits need no highlight)", () => {
+    let s = openDoc(emptyState(), "/a.md", "A");
+    s = updateEditorContent(s, "/a.md", "A!");
+    s = markSaved(s, "/a.md");
+    const d = getActive(s)!;
+    expect(d.reviewedContent).toBe("A!");
+    expect(d.diskContent).toBe("A!");
+  });
+
   it("toggleViewMode flips rendered/source", () => {
     let s = openDoc(emptyState(), "/a.md", "A");
     expect(getActive(s)!.viewMode).toBe("rendered");

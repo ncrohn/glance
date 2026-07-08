@@ -146,7 +146,8 @@ function renderActions(): void {
     const review = el("button", "review-btn", "Mark reviewed");
     review.onclick = () => {
       state = markReviewed(state, doc.id);
-      void writeReviewed(doc.absPath, doc.diskContent);
+      const reviewed = getActive(state);
+      if (reviewed) void writeReviewed(reviewed.absPath, reviewed.reviewedContent);
       render();
     };
     host.appendChild(review);
@@ -295,6 +296,8 @@ export async function start(): Promise<void> {
       if (doc) {
         void writeFile(doc.absPath, doc.editorContent).then(() => {
           state = markSaved(state, doc.id);
+          const saved = getActive(state);
+          if (saved) void writeReviewed(saved.absPath, saved.reviewedContent);
           render();
         });
       }

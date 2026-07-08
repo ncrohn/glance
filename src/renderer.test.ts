@@ -75,3 +75,30 @@ describe("renderMarkdown changed-line marking", () => {
     expect(/<h1[^>]*data-changed[^>]*>/.test(html)).toBe(true);
   });
 });
+
+describe("renderMarkdown changed-line marking — multi-line block boundary", () => {
+  // Two paragraphs; the first spans two source lines (1-2), the second is a
+  // single line (4). This pins the boundary the review plan flagged risky:
+  // a multi-line block must be marked when EITHER its first or its last
+  // source line is in the changed set, not just an interior line.
+  const src = "alpha\nbeta\n\ngamma";
+  // lines: 1='alpha', 2='beta' (both part of paragraph 1), 3='', 4='gamma' (paragraph 2)
+
+  it("marks the multi-line block when only its FIRST source line changed", () => {
+    const html = renderMarkdown(src, new Set([1]));
+    expect(/<p[^>]*data-changed[^>]*>alpha\nbeta<\/p>/.test(html)).toBe(true);
+    expect(/<p[^>]*data-changed[^>]*>gamma<\/p>/.test(html)).toBe(false);
+  });
+
+  it("marks the multi-line block when only its LAST source line changed", () => {
+    const html = renderMarkdown(src, new Set([2]));
+    expect(/<p[^>]*data-changed[^>]*>alpha\nbeta<\/p>/.test(html)).toBe(true);
+    expect(/<p[^>]*data-changed[^>]*>gamma<\/p>/.test(html)).toBe(false);
+  });
+
+  it("control: a change on the other paragraph's line marks only that block", () => {
+    const html = renderMarkdown(src, new Set([4]));
+    expect(/<p[^>]*data-changed[^>]*>gamma<\/p>/.test(html)).toBe(true);
+    expect(/<p[^>]*data-changed[^>]*>alpha\nbeta<\/p>/.test(html)).toBe(false);
+  });
+});

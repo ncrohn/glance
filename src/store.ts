@@ -50,7 +50,15 @@ export function toggleViewMode(s: State, id: string): State {
 }
 
 export function markSaved(s: State, id: string): State {
-  return mapDoc(s, id, (d) => ({ ...d, diskContent: d.editorContent, existsOnDisk: true }));
+  // Saving your own edits counts as having reviewed them: advance the
+  // reviewed baseline too, so a save never leaves a tab dot / highlight for
+  // changes the user just made themselves.
+  return mapDoc(s, id, (d) => ({
+    ...d,
+    diskContent: d.editorContent,
+    reviewedContent: d.editorContent,
+    existsOnDisk: true,
+  }));
 }
 
 export function markReviewed(s: State, id: string): State {

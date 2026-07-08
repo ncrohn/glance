@@ -39,6 +39,13 @@ export function isDirty(doc: Doc): boolean {
   return doc.editorContent !== doc.diskContent;
 }
 
+// changedLines vs. hasUnreviewedChanges intentionally diff against different
+// baselines: changedLines compares editorContent (matches what's actually
+// rendered on screen, including unsaved edits), while hasUnreviewedChanges
+// compares diskContent (so unsaved typing doesn't light the tab badge). On a
+// dirty tab the two can transiently disagree; they converge once the doc is
+// saved, since markSaved advances reviewedContent along with diskContent.
+
 // Lines changed on screen since the last reviewed baseline (1-indexed).
 export function changedLines(doc: Doc): Set<number> {
   return diffLines(doc.reviewedContent, doc.editorContent);
