@@ -312,7 +312,7 @@ export async function start(): Promise<void> {
 
   await onOpenFile((absPath) => { void openPath(absPath); });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
-  await onSetupResult((steps) => { showSetupResult(steps); });
+  await onSetupResult((result) => { showSetupResult(result); });
   await onShowAbout(async () => { showAbout(await appVersion()); });
   await onShowTheme(() => {
     showThemePicker(loadThemePref(), {

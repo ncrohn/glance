@@ -543,8 +543,16 @@ impl ClientAdapter for CursorAdapter {
     }
 
     fn guidance_uninstall(&self, home: &Path) -> Result<Plan, String> {
-        // Our guidance lives in a dedicated file, so removal is a plain delete.
-        Ok(Plan::Delete(vec![home.join(".cursor").join("rules").join("glance.md")]))
+        // `guidance()` uses append_guidance (a merge), because ~/.cursor/rules/
+        // files are user-editable and glance.md may accumulate their own content.
+        // So reverse it with the same strip helper, not a blunt whole-file delete
+        // — only remove the file if stripping our block empties it.
+        let path = home.join(".cursor").join("rules").join("glance.md");
+        match strip_guidance(&read_existing(&path)?) {
+            None => Ok(Plan::AlreadyDone("No guidance block to remove.".to_string())),
+            Some(next) if next.trim().is_empty() => Ok(Plan::Delete(vec![path])),
+            Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
+        }
     }
 }
 
@@ -962,11 +970,27 @@ mod tests {
     }
 
     #[test]
-    fn cursor_uninstall_deletes_rules_and_drops_mcp_key() {
+    fn cursor_guidance_uninstall_preserves_user_content_deletes_when_empty() {
         let home = tmp_home("cursor-uninstall");
         assert!(matches!(CursorAdapter.skill_uninstall(&home).unwrap(), Plan::NotSupported));
+        let rules = home.join(".cursor").join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        let path = rules.join("glance.md");
+
+        // File that is ONLY our block → deleting it is right.
+        std::fs::write(&path, append_guidance("").unwrap()).unwrap();
         let del = plan_deletes(CursorAdapter.guidance_uninstall(&home).unwrap());
-        assert_eq!(del, vec![home.join(".cursor").join("rules").join("glance.md")]);
+        assert_eq!(del, vec![path.clone()]);
+
+        // File with the user's own rules too → strip our block, KEEP theirs.
+        std::fs::write(&path, append_guidance("# my project rules\n").unwrap()).unwrap();
+        let w = plan_writes(CursorAdapter.guidance_uninstall(&home).unwrap());
+        assert!(w[0].contents.contains("# my project rules"));
+        assert!(!w[0].contents.contains("mdview <absolute-path>"));
+
+        // No file → nothing to do.
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(CursorAdapter.guidance_uninstall(&home).unwrap(), Plan::AlreadyDone(_)));
         let _ = std::fs::remove_dir_all(&home);
     }
 

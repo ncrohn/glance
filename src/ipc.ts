@@ -53,6 +53,13 @@ export interface SetupStep {
   message: string;
 }
 
+/** Result of a Set up / Remove AI Integration run. `action` distinguishes the
+ *  two so the UI can title the modal correctly (both use the same event). */
+export interface SetupResult {
+  action: "setup" | "remove";
+  steps: SetupStep[];
+}
+
 export function readAnnotations(path: string): Promise<AnnotationStore> {
   return invoke<AnnotationStore>("read_annotations", { path });
 }
@@ -84,8 +91,8 @@ export function onAnnotationsChanged(cb: (docPath: string) => void): Promise<Unl
   return listen<string>("annotations-changed", (e) => cb(e.payload));
 }
 
-export function onSetupResult(cb: (steps: SetupStep[]) => void): Promise<UnlistenFn> {
-  return listen<SetupStep[]>("setup-result", (e) => cb(e.payload));
+export function onSetupResult(cb: (result: SetupResult) => void): Promise<UnlistenFn> {
+  return listen<SetupResult>("setup-result", (e) => cb(e.payload));
 }
 
 export function onShowAbout(cb: () => void): Promise<UnlistenFn> {

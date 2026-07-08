@@ -110,11 +110,11 @@ pub fn run() {
                 }
                 "setup_integration" => {
                     let results = setup::setup_all_present();
-                    let _ = app.emit("setup-result", results);
+                    let _ = app.emit("setup-result", serde_json::json!({ "action": "setup", "steps": results }));
                 }
                 "remove_integration" => {
                     let results = setup::remove_all_present();
-                    let _ = app.emit("setup-result", results);
+                    let _ = app.emit("setup-result", serde_json::json!({ "action": "remove", "steps": results }));
                 }
                 "about_glance" => {
                     let _ = app.emit("show-about", ());

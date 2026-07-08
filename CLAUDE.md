@@ -42,7 +42,7 @@ Pure-reducer pattern. `app.ts` holds a single `State` and fully re-renders the D
 
 ### Backend (`src-tauri/src/`)
 
-- `lib.rs` — `run()`: registers the `tauri-plugin-single-instance` handler, builds the native macOS menu (incl. "Set up Claude Integration…"), and seeds first-launch CLI args.
+- `lib.rs` — `run()`: registers the `tauri-plugin-single-instance` handler, builds the native macOS menu (incl. "Set up AI Integration…" / "Remove AI Integration…"), and seeds first-launch CLI args.
 - `commands.rs` — `read_file` / `write_file`.
 - `watcher.rs` — `notify`-based per-path file watching; emits `file-changed` (Modify/Create) and `file-removed` (Remove).
 - `cli.rs` — `md_paths_from_argv` (drops flags), `to_abs`/`normalize` (resolve relative paths against cwd). Pure, with the Rust tests.

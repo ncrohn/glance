@@ -1,4 +1,4 @@
-import type { SetupStep } from "./ipc";
+import type { SetupResult } from "./ipc";
 import { openExternal } from "./ipc";
 import { AUTO, THEMES, type ThemePref } from "./theme";
 import appIcon from "./assets/app-icon.png";
@@ -121,12 +121,16 @@ export function showNotice(message: string, ok = true): void {
   okBtn.focus();
 }
 
-// Setup runs several steps; show each as its own row (status glyph + label +
-// detail) rather than one collapsed paragraph.
-export function showSetupResult(steps: SetupStep[]): void {
+// Setup/removal runs several steps; show each as its own row (status glyph +
+// label + detail) rather than one collapsed paragraph.
+export function showSetupResult(result: SetupResult): void {
+  const { action, steps } = result;
   const ok = steps.every((s) => s.ok);
+  const title = action === "remove"
+    ? (ok ? "AI integration removed" : "Removal finished with issues")
+    : (ok ? "AI integration ready" : "Setup finished with issues");
   const m = openModal({
-    title: ok ? "Claude integration ready" : "Setup finished with issues",
+    title,
     tone: ok ? "default" : "error",
     onEscape: () => m.close(),
   });
