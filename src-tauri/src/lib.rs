@@ -112,6 +112,10 @@ pub fn run() {
                     let results = setup::setup_all_present();
                     let _ = app.emit("setup-result", results);
                 }
+                "remove_integration" => {
+                    let results = setup::remove_all_present();
+                    let _ = app.emit("setup-result", results);
+                }
                 "about_glance" => {
                     let _ = app.emit("show-about", ());
                 }
@@ -134,7 +138,14 @@ pub fn run() {
             let install_cli_item = MenuItem::with_id(
                 handle,
                 "setup_integration",
-                "Set up Claude Integration…",
+                "Set up AI Integration…",
+                true,
+                None::<&str>,
+            )?;
+            let remove_cli_item = MenuItem::with_id(
+                handle,
+                "remove_integration",
+                "Remove AI Integration…",
                 true,
                 None::<&str>,
             )?;
@@ -146,6 +157,7 @@ pub fn run() {
                     &about_item,
                     &PredefinedMenuItem::separator(handle)?,
                     &install_cli_item,
+                    &remove_cli_item,
                     &PredefinedMenuItem::separator(handle)?,
                     &PredefinedMenuItem::hide(handle, None)?,
                     &PredefinedMenuItem::quit(handle, None)?,
