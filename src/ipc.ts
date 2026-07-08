@@ -57,8 +57,15 @@ export function readAnnotations(path: string): Promise<AnnotationStore> {
   return invoke<AnnotationStore>("read_annotations", { path });
 }
 
-export function writeAnnotations(store: AnnotationStore): Promise<void> {
-  return invoke<void>("write_annotations", { store });
+// Granular, server-side-locked mutations. These replace a whole-store write so a
+// concurrent resolve from glance-mcp can't be clobbered (the Rust side does the
+// read-modify-write under a cross-process file lock).
+export function addStoredAnnotation(docPath: string, annotation: Annotation): Promise<void> {
+  return invoke<void>("add_annotation", { docPath, annotation });
+}
+
+export function removeStoredAnnotation(docPath: string, id: string): Promise<void> {
+  return invoke<void>("remove_annotation", { docPath, id });
 }
 
 export function resolveAnchors(text: string, annotations: Annotation[]): Promise<Resolution[]> {

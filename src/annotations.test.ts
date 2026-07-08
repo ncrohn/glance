@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  addAnnotation, resolveAnnotation, removeAnnotation, setAnnotations,
+  addAnnotation, resolveAnnotation, removeAnnotation,
   type Annotation,
 } from "./annotations";
 
@@ -31,9 +31,5 @@ describe("annotation reducers", () => {
   it("removeAnnotation drops by id", () => {
     const a = [ann("a"), ann("b")];
     expect(removeAnnotation(a, "a").map((x) => x.id)).toEqual(["b"]);
-  });
-
-  it("setAnnotations replaces the list", () => {
-    expect(setAnnotations([ann("a")], [ann("z")]).map((x) => x.id)).toEqual(["z"]);
   });
 });

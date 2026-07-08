@@ -9,11 +9,16 @@ pub fn to_abs(path: &str, cwd: &Path) -> String {
 fn normalize(p: &Path) -> String {
     use std::path::Component::*;
     let mut out: Vec<std::ffi::OsString> = Vec::new();
+    let root = std::path::Component::RootDir.as_os_str();
     for comp in p.components() {
         match comp {
             CurDir => {}
             ParentDir => {
-                out.pop();
+                // Never pop past the filesystem root: `..` at or above root is a
+                // no-op (so e.g. `/a/../../x` clamps to `/x`, not a relative `x`).
+                if out.last().map(|c| c.as_os_str()) != Some(root) {
+                    out.pop();
+                }
             }
             other => out.push(other.as_os_str().to_os_string()),
         }
@@ -51,6 +56,12 @@ mod tests {
     #[test]
     fn dot_and_dotdot_collapse() {
         assert_eq!(to_abs("./a/../b/c.md", Path::new("/root")), "/root/b/c.md");
+    }
+
+    #[test]
+    fn dotdot_past_root_clamps_to_root() {
+        // Excess `..` must not strip the root and yield a relative path.
+        assert_eq!(to_abs("../../../notes.md", Path::new("/Users/nick")), "/notes.md");
     }
 
     #[test]

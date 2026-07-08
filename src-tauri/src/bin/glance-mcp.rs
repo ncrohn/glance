@@ -2,7 +2,7 @@
 // anchored annotations on a markdown file. v1: read + resolve only.
 
 use glance_lib::anchor::{resolve_anchor, Annotation};
-use glance_lib::annotations::{read_store, write_store, AnnotationStore};
+use glance_lib::annotations::{mutate_store, read_store, AnnotationStore};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -222,9 +222,9 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
         }
         "resolve_annotation" => {
             let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing 'id'")?;
-            let mut store = read_store(path);
-            if apply_resolve(&mut store, id) {
-                write_store(&store)?;
+            // Read-modify-write under the shared cross-process lock so a
+            // concurrent add/remove from the GUI isn't clobbered.
+            if mutate_store(path, |store| apply_resolve(store, id))? {
                 Ok(text_result(json!({ "ok": true, "id": id })))
             } else {
                 Err(format!("no annotation '{id}'"))

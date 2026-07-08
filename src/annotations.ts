@@ -45,7 +45,3 @@ export function resolveAnnotation(list: Annotation[], id: string): Annotation[] 
 export function removeAnnotation(list: Annotation[], id: string): Annotation[] {
   return list.filter((a) => a.id !== id);
 }
-
-export function setAnnotations(_list: Annotation[], next: Annotation[]): Annotation[] {
-  return next;
-}

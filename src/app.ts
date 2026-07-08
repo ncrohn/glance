@@ -10,7 +10,7 @@ import { renderMarkdown } from "./renderer";
 import { renderMermaidBlocks } from "./mermaid";
 import {
   readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs,
-  readAnnotations, writeAnnotations, resolveAnchors, ensureAnnotationStore,
+  readAnnotations, addStoredAnnotation, removeStoredAnnotation, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onSetupResult, onShowAbout, onShowTheme, appVersion,
   readReviewed, writeReviewed,
 } from "./ipc";
@@ -24,12 +24,16 @@ import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
 import { confirmReload, showSetupResult, showAbout, showThemePicker } from "./modal";
 import {
-  applyTheme, loadThemePref, saveThemePref, currentAppearance, type ThemePref,
+  applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
 } from "./theme";
 import { openPaths, pushRecent } from "./session";
 
 const LS_OPEN = "glance.openPaths";
 const LS_RECENT = "glance.recent";
+
+// absPath → annotation store path, so closeTab can release the store's file
+// watcher (keyed by store path, not doc path) instead of leaking it until exit.
+const annotationStorePaths = new Map<string, string>();
 
 function loadRecent(): string[] {
   try { return JSON.parse(localStorage.getItem(LS_RECENT) || "[]"); } catch { return []; }
@@ -68,13 +72,6 @@ async function refreshResolutions(absPath: string): Promise<void> {
   state = setDocResolutions(state, absPath, map);
 }
 
-async function persistAnnotations(absPath: string): Promise<void> {
-  const doc = state.docs.find((d) => d.absPath === absPath);
-  if (!doc) return;
-  await writeAnnotations({ docPath: absPath, annotations: doc.annotations });
-  await refreshResolutions(absPath);
-}
-
 function startComment(absPath: string): void {
   const doc = state.docs.find((d) => d.absPath === absPath);
   if (!doc) return;
@@ -93,9 +90,14 @@ function startComment(absPath: string): void {
         lineHint: cap.lineHint, note, status: "open", author: "user",
         createdAt: new Date().toISOString(),
       };
-      state = setDocAnnotations(state, absPath, addAnnotation(doc.annotations, annotation));
-      void persistAnnotations(absPath);
+      // Optimistically add to the local list for instant feedback (re-read from
+      // current state, not the list captured when the composer opened). The
+      // server-side add is locked and merges against disk, and loadAnnotations
+      // then reconciles local state with the merged truth.
+      const cur = state.docs.find((d) => d.absPath === absPath)?.annotations ?? doc.annotations;
+      state = setDocAnnotations(state, absPath, addAnnotation(cur, annotation));
       render();
+      void addStoredAnnotation(absPath, annotation).then(() => loadAnnotations(absPath));
     },
     onCancel: () => {},
   });
@@ -117,9 +119,12 @@ function renderRailFor(): void {
       pulseBlock(node);
     },
     onRemove: (a) => {
-      state = setDocAnnotations(state, doc.absPath, removeAnnotation(doc.annotations, a.id));
-      void persistAnnotations(doc.absPath);
+      // Optimistic local remove (fresh from state), then the locked server-side
+      // remove, then reconcile with the merged on-disk truth.
+      const cur = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? doc.annotations;
+      state = setDocAnnotations(state, doc.absPath, removeAnnotation(cur, a.id));
       render();
+      void removeStoredAnnotation(doc.absPath, a.id).then(() => loadAnnotations(doc.absPath));
     },
   });
 }
@@ -218,7 +223,7 @@ function renderContent(): void {
     const view = el("div", "rendered");
     view.innerHTML = renderMarkdown(doc.editorContent, changedLines(doc));
     host.appendChild(view);
-    void renderMermaidBlocks(view, currentAppearance());
+    void renderMermaidBlocks(view, currentThemeId(), currentAppearance());
     const markers = assignMarkers(doc.annotations, doc.resolutions);
     applyHighlights(view, doc.annotations, doc.resolutions, markers);
     teardownToolbar = mountSelectionToolbar(view, () => startComment(doc.absPath));
@@ -239,7 +244,11 @@ export function render(): void {
 
 function closeTab(id: string): void {
   const doc = state.docs.find((d) => d.id === id);
-  if (doc) void unwatchFile(doc.absPath);
+  if (doc) {
+    void unwatchFile(doc.absPath);
+    const storePath = annotationStorePaths.get(doc.absPath);
+    if (storePath) { void unwatchFile(storePath); annotationStorePaths.delete(doc.absPath); }
+  }
   state = closeDoc(state, id);
   render();
 }
@@ -264,6 +273,7 @@ export async function openPath(absPath: string): Promise<void> {
   localStorage.setItem(LS_RECENT, JSON.stringify(recent));
   try {
     const storePath = await ensureAnnotationStore(absPath);
+    annotationStorePaths.set(absPath, storePath);
     await watchAnnotations(storePath, absPath);
   } catch (err) {
     console.warn("annotation store watch failed for", absPath, err);
@@ -297,7 +307,10 @@ export async function start(): Promise<void> {
   await onFileChanged(async (e) => {
     const doc = state.docs.find((d) => d.absPath === e.path);
     if (!doc) return;
-    if (doc.editorContent === e.contents) return; // our own save echo — no-op
+    // Our own save echo — no-op. Guard on existsOnDisk so a file that was
+    // deleted and then recreated with content identical to the editor still
+    // clears the "(deleted)" state instead of being swallowed as an echo.
+    if (doc.existsOnDisk && doc.editorContent === e.contents) return;
     if (decideReload(doc) === "auto-reload") {
       state = applyDiskChange(state, doc.id, e.contents);
       render();

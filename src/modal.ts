@@ -223,6 +223,10 @@ export function showThemePicker(
   const done = button("Done", true);
   done.onclick = () => { opts.onCommit(selected); m.close(); };
   m.footer.append(cancel, done);
+  // WKWebView doesn't auto-focus buttons on click, so focus one now — otherwise
+  // no element inside the overlay holds focus and Escape (which fires via the
+  // overlay's keydown handler) never reaches onEscape/revertAndClose.
+  done.focus();
 }
 
 // About box — app icon, wordmark, version, and attribution. Centered layout,

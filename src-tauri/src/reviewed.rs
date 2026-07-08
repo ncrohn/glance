@@ -36,8 +36,10 @@ pub fn write_reviewed(path: String, content: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn store_path_is_under_glance_reviewed() {
         std::env::set_var("HOME", "/tmp/glance-test-reviewed");
         let p = store_path_for("/x/y.md").unwrap();
@@ -47,12 +49,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn read_missing_baseline_returns_none() {
         std::env::set_var("HOME", "/tmp/glance-test-reviewed-missing");
         assert!(read_baseline("/no/such/file.md").is_none());
     }
 
     #[test]
+    #[serial]
     fn write_then_read_round_trips() {
         std::env::set_var("HOME", "/tmp/glance-test-reviewed-rt");
         let doc = "/a/b/round-trip.md";
