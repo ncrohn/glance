@@ -11,7 +11,7 @@ import { renderMermaidBlocks } from "./mermaid";
 import {
   readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs,
   readAnnotations, addStoredAnnotation, removeStoredAnnotation, resolveAnchors, ensureAnnotationStore,
-  watchAnnotations, onAnnotationsChanged, onSetupResult, onShowAbout, onShowTheme, appVersion,
+  watchAnnotations, onAnnotationsChanged, onSetupResult, onShowAbout, onShowTheme, onCloseActiveTab, onMenuSave, appVersion,
   readReviewed, writeReviewed,
 } from "./ipc";
 import { addAnnotation, removeAnnotation, genId, type Annotation } from "./annotations";
@@ -253,6 +253,21 @@ function closeTab(id: string): void {
   render();
 }
 
+// Save the active doc to disk. Shared by the File▸Save menu item (⌘S). On
+// failure the doc stays dirty (markSaved never runs) and the error is surfaced.
+function saveActive(): void {
+  const doc = getActive(state);
+  if (!doc) return;
+  void writeFile(doc.absPath, doc.editorContent).then(() => {
+    state = markSaved(state, doc.id);
+    const saved = state.docs.find((d) => d.id === doc.id);
+    if (saved) void writeReviewed(saved.absPath, saved.reviewedContent);
+    render();
+  }).catch((err) => {
+    showNotice(`Couldn't save ${doc.fileName}: ${err}`, false);
+  });
+}
+
 export async function openPath(absPath: string): Promise<void> {
   const already = state.docs.find((d) => d.absPath === absPath);
   if (already) { state = setActive(state, absPath); render(); return; }
@@ -303,6 +318,8 @@ export async function start(): Promise<void> {
       onCommit: changeTheme,
     });
   });
+  await onCloseActiveTab(() => { const d = getActive(state); if (d) closeTab(d.id); });
+  await onMenuSave(() => saveActive());
   await onAnnotationsChanged((docPath) => { void loadAnnotations(docPath); });
   await onFileChanged(async (e) => {
     const doc = state.docs.find((d) => d.absPath === e.path);
@@ -324,22 +341,6 @@ export async function start(): Promise<void> {
     }
   });
   window.addEventListener("keydown", (e) => {
-    if (e.metaKey && (e.key === "s" || e.key === "S")) {
-      e.preventDefault();
-      const doc = getActive(state);
-      if (doc) {
-        void writeFile(doc.absPath, doc.editorContent).then(() => {
-          state = markSaved(state, doc.id);
-          const saved = state.docs.find((d) => d.id === doc.id);
-          if (saved) void writeReviewed(saved.absPath, saved.reviewedContent);
-          render();
-        }).catch((err) => {
-          // Write failed (permissions, read-only volume, disk full). Surface it —
-          // the doc stays dirty since markSaved never ran, so no edits are lost.
-          showNotice(`Couldn't save ${doc.fileName}: ${err}`, false);
-        });
-      }
-    }
     if (e.metaKey && (e.key === "e" || e.key === "E")) {
       e.preventDefault();
       const doc = getActive(state);

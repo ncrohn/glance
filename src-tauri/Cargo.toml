@@ -36,6 +36,7 @@ serial_test = "3"
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 notify = "6"

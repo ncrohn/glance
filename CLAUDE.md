@@ -62,5 +62,5 @@ Pure-reducer pattern. `app.ts` holds a single `State` and fully re-renders the D
 
 ## Conventions
 
-- ⌘E (toggle source/rendered) and ⌘S (save) are handled as in-window keydown listeners in `app.ts`, not menu items. Save is explicit — there is no autosave.
+- ⌘E (toggle source/rendered) is an in-window keydown listener in `app.ts`. The native **File** menu (`lib.rs`) owns New… (⌘N), Open… (⌘O), Save (⌘S), and Close Tab (⌘W): each menu item emits an event that `app.ts` handles via `ipc.ts` listeners. New…/Open… pop a native dialog (`tauri-plugin-dialog`) in the Rust menu handler and both reuse the existing `open-file` flow (New… creates the empty file first); Save emits `menu-save`, Close Tab emits `close-active-tab`. Save is explicit — there is no autosave.
 - Keep IPC wrappers in `ipc.ts` and logic modules pure so they stay unit-testable; the reducer style (new state, no mutation) is load-bearing for the full-rerender model.

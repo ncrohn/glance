@@ -96,6 +96,14 @@ export function onShowTheme(cb: () => void): Promise<UnlistenFn> {
   return listen("show-theme", () => cb());
 }
 
+export function onCloseActiveTab(cb: () => void): Promise<UnlistenFn> {
+  return listen("close-active-tab", () => cb());
+}
+
+export function onMenuSave(cb: () => void): Promise<UnlistenFn> {
+  return listen("menu-save", () => cb());
+}
+
 export function readReviewed(path: string): Promise<string | null> {
   return invoke<string | null>("read_reviewed", { path });
 }
