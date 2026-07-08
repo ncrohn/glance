@@ -47,6 +47,26 @@ md.core.ruler.push("source_lines", (state) => {
   }
 });
 
-export function renderMarkdown(src: string): string {
-  return md.render(src);
+// Mark top-level blocks whose source lines intersect the changed-line set
+// (passed in via env). token.map is [start,end) 0-indexed; the block covers
+// 1-indexed lines start+1 .. end inclusive.
+md.core.ruler.push("changed_lines", (state) => {
+  const changed = state.env?.changedLines as Set<number> | undefined;
+  if (!changed || changed.size === 0) return;
+  for (const token of state.tokens) {
+    if (token.level === 0 && token.map && token.type.endsWith("_open")) {
+      const start = token.map[0] + 1;
+      const end = token.map[1];
+      for (let ln = start; ln <= end; ln++) {
+        if (changed.has(ln)) {
+          token.attrSet("data-changed", "true");
+          break;
+        }
+      }
+    }
+  }
+});
+
+export function renderMarkdown(src: string, changedLines?: Set<number>): string {
+  return md.render(src, { changedLines });
 }

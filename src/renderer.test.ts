@@ -49,3 +49,29 @@ describe("renderMarkdown", () => {
     expect(html).toContain("&lt;script&gt;");
   });
 });
+
+describe("renderMarkdown changed-line marking", () => {
+  const src = "# Title\n\nfirst para\n\nsecond para";
+  // lines: 1='# Title', 2='', 3='first para', 4='', 5='second para'
+
+  it("adds no data-changed when the set is empty or absent", () => {
+    expect(renderMarkdown(src)).not.toContain("data-changed");
+    expect(renderMarkdown(src, new Set())).not.toContain("data-changed");
+  });
+
+  it("marks only the block containing a changed line", () => {
+    const html = renderMarkdown(src, new Set([5]));
+    expect(html).toContain("data-changed");
+    // the marked block is the second paragraph
+    const secondMarked = /<p[^>]*data-changed[^>]*>second para<\/p>/.test(html);
+    expect(secondMarked).toBe(true);
+    // the first paragraph is not marked
+    const firstMarked = /<p[^>]*data-changed[^>]*>first para<\/p>/.test(html);
+    expect(firstMarked).toBe(false);
+  });
+
+  it("marks the heading when its source line changed", () => {
+    const html = renderMarkdown(src, new Set([1]));
+    expect(/<h1[^>]*data-changed[^>]*>/.test(html)).toBe(true);
+  });
+});
