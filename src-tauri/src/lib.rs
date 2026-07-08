@@ -67,6 +67,8 @@ pub fn run() {
             annotations::ensure_annotation_store,
             reviewed::read_reviewed,
             reviewed::write_reviewed,
+            setup::list_integration_targets,
+            setup::run_integration,
             take_launch_args,
         ])
         .on_menu_event(|app, event| {
@@ -109,12 +111,10 @@ pub fn run() {
                     let _ = app.emit("menu-save", ());
                 }
                 "setup_integration" => {
-                    let results = setup::setup_all_present();
-                    let _ = app.emit("setup-result", serde_json::json!({ "action": "setup", "steps": results }));
+                    let _ = app.emit("show-integration-picker", "setup");
                 }
                 "remove_integration" => {
-                    let results = setup::remove_all_present();
-                    let _ = app.emit("setup-result", serde_json::json!({ "action": "remove", "steps": results }));
+                    let _ = app.emit("show-integration-picker", "remove");
                 }
                 "about_glance" => {
                     let _ = app.emit("show-about", ());

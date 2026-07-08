@@ -11,7 +11,8 @@ import { renderMermaidBlocks } from "./mermaid";
 import {
   readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs,
   readAnnotations, addStoredAnnotation, removeStoredAnnotation, resolveAnchors, ensureAnnotationStore,
-  watchAnnotations, onAnnotationsChanged, onSetupResult, onShowAbout, onShowTheme, onCloseActiveTab, onMenuSave, appVersion,
+  watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
+  onShowAbout, onShowTheme, onCloseActiveTab, onMenuSave, appVersion,
   readReviewed, writeReviewed,
 } from "./ipc";
 import { addAnnotation, removeAnnotation, genId, type Annotation } from "./annotations";
@@ -22,7 +23,7 @@ import {
 } from "./annotation-ui";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
-import { confirmReload, showNotice, showSetupResult, showAbout, showThemePicker } from "./modal";
+import { confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker } from "./modal";
 import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
 } from "./theme";
@@ -312,7 +313,13 @@ export async function start(): Promise<void> {
 
   await onOpenFile((absPath) => { void openPath(absPath); });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
-  await onSetupResult((result) => { showSetupResult(result); });
+  await onShowIntegrationPicker(async (action) => {
+    const clients = await listIntegrationTargets();
+    showIntegrationPicker(action, clients, async (ids) => {
+      const steps = await runIntegration(action, ids);
+      showSetupResult({ action, steps });
+    });
+  });
   await onShowAbout(async () => { showAbout(await appVersion()); });
   await onShowTheme(() => {
     showThemePicker(loadThemePref(), {

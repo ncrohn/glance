@@ -51,13 +51,41 @@ export interface SetupStep {
   ok: boolean;
   label: string;
   message: string;
+  /** Section the result modal files this row under ("Shared" or a client name). */
+  group: string;
 }
 
+export type IntegrationAction = "setup" | "remove";
+
 /** Result of a Set up / Remove AI Integration run. `action` distinguishes the
- *  two so the UI can title the modal correctly (both use the same event). */
+ *  two so the UI can title the modal correctly. */
 export interface SetupResult {
-  action: "setup" | "remove";
+  action: IntegrationAction;
   steps: SetupStep[];
+}
+
+export interface CapabilityInfo {
+  key: string;
+  label: string;
+  supported: boolean;
+}
+
+/** A client the picker can offer, with detection + per-capability eligibility. */
+export interface ClientInfo {
+  id: string;
+  displayName: string;
+  present: boolean;
+  capabilities: CapabilityInfo[];
+}
+
+/** Enumerate integration targets for the picker (no side effects). */
+export function listIntegrationTargets(): Promise<ClientInfo[]> {
+  return invoke<ClientInfo[]>("list_integration_targets");
+}
+
+/** Run the picker's selection: install/remove the chosen clients. */
+export function runIntegration(action: IntegrationAction, ids: string[]): Promise<SetupStep[]> {
+  return invoke<SetupStep[]>("run_integration", { action, ids });
 }
 
 export function readAnnotations(path: string): Promise<AnnotationStore> {
@@ -91,8 +119,8 @@ export function onAnnotationsChanged(cb: (docPath: string) => void): Promise<Unl
   return listen<string>("annotations-changed", (e) => cb(e.payload));
 }
 
-export function onSetupResult(cb: (result: SetupResult) => void): Promise<UnlistenFn> {
-  return listen<SetupResult>("setup-result", (e) => cb(e.payload));
+export function onShowIntegrationPicker(cb: (action: IntegrationAction) => void): Promise<UnlistenFn> {
+  return listen<IntegrationAction>("show-integration-picker", (e) => cb(e.payload));
 }
 
 export function onShowAbout(cb: () => void): Promise<UnlistenFn> {

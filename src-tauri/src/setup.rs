@@ -29,6 +29,9 @@ pub struct StepResult {
     pub ok: bool,
     pub label: String,
     pub message: String,
+    /// Which section the result modal files this row under: `"Shared"` for the
+    /// mdview CLI, otherwise the client's display name.
+    pub group: String,
 }
 
 const GUIDANCE_MARKER: &str = "<!-- glance-integration -->";
@@ -362,6 +365,58 @@ pub enum Plan {
     NotSupported,
 }
 
+/// The four things an adapter can install for a client. `Capability::ALL` is
+/// the canonical order; both enumeration (the picker) and execution iterate it,
+/// so the set can never drift between "what we show" and "what we run".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Capability {
+    Mcp,
+    Guidance,
+    Skill,
+    Hook,
+}
+
+impl Capability {
+    pub const ALL: [Capability; 4] = [Capability::Mcp, Capability::Guidance, Capability::Skill, Capability::Hook];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Capability::Mcp => "mcp",
+            Capability::Guidance => "guidance",
+            Capability::Skill => "skill",
+            Capability::Hook => "hook",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Capability::Mcp => "MCP server (glance-mcp)",
+            Capability::Guidance => "Review guidance",
+            Capability::Skill => "Agent skill",
+            Capability::Hook => "Auto-open hook",
+        }
+    }
+}
+
+/// One capability's eligibility for a client, for the picker UI.
+#[derive(Clone, Debug, Serialize)]
+pub struct CapabilityInfo {
+    pub key: String,
+    pub label: String,
+    pub supported: bool,
+}
+
+/// A client the picker can offer, with its detection state and per-capability
+/// eligibility. Produced by [`list_integration_targets`]; no side effects.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientInfo {
+    pub id: String,
+    pub display_name: String,
+    pub present: bool,
+    pub capabilities: Vec<CapabilityInfo>,
+}
+
 /// One AI coding client Glance can integrate with (Claude Code, Cursor, …).
 ///
 /// Methods may *read* existing config to compute a merge, but never write — the
@@ -378,6 +433,11 @@ pub trait ClientAdapter {
     /// Whether this client looks installed — drives which adapters the setup UI
     /// offers. Usually: its config dir/file exists.
     fn is_present(&self, home: &Path) -> bool;
+
+    /// Which capabilities this client supports. The single source of truth for
+    /// both the picker (eligibility) and the run loop (what to execute) — an
+    /// unsupported capability is never shown as installable nor run.
+    fn supports(&self, c: Capability) -> bool;
 
     /// Register glance-mcp. The only required capability — it is the core loop.
     fn mcp(&self, home: &Path, mcp_bin: &str) -> Result<Plan, String>;
@@ -438,6 +498,10 @@ impl ClientAdapter for ClaudeAdapter {
 
     fn is_present(&self, home: &Path) -> bool {
         home.join(".claude.json").exists() || home.join(".claude").is_dir()
+    }
+
+    fn supports(&self, _c: Capability) -> bool {
+        true // Claude Code supports all four capabilities.
     }
 
     fn mcp(&self, home: &Path, mcp_bin: &str) -> Result<Plan, String> {
@@ -519,6 +583,11 @@ impl ClientAdapter for CursorAdapter {
         home.join(".cursor").is_dir()
     }
 
+    fn supports(&self, c: Capability) -> bool {
+        // Cursor has MCP + project rules, but no agent-skill or hook concept.
+        matches!(c, Capability::Mcp | Capability::Guidance)
+    }
+
     fn mcp(&self, home: &Path, mcp_bin: &str) -> Result<Plan, String> {
         let path = home.join(".cursor").join("mcp.json");
         let merged = merge_mcp_config(&read_existing(&path)?, "glance", mcp_bin)?;
@@ -559,14 +628,21 @@ impl ClientAdapter for CursorAdapter {
 /// Commit one capability's [`Plan`], turning it into a [`StepResult`]. The only
 /// place in setup that mutates disk — creates parent dirs, writes atomically,
 /// applies the executable bit. Bails on the first write error.
-fn run_step(label: &str, plan: Result<Plan, String>) -> StepResult {
+fn run_step(group: &str, label: &str, plan: Result<Plan, String>) -> StepResult {
     let label = label.to_string();
+    let group = group.to_string();
+    let fail = |group: &str, label: &str, message: String| StepResult {
+        ok: false,
+        label: label.to_string(),
+        message,
+        group: group.to_string(),
+    };
     let writes = match plan {
-        Err(e) => return StepResult { ok: false, label, message: e },
+        Err(e) => return fail(&group, &label, e),
         Ok(Plan::NotSupported) => {
-            return StepResult { ok: true, label, message: "Not applicable to this client.".to_string() }
+            return StepResult { ok: true, label, message: "Not applicable to this client.".to_string(), group }
         }
-        Ok(Plan::AlreadyDone(m)) => return StepResult { ok: true, label, message: m },
+        Ok(Plan::AlreadyDone(m)) => return StepResult { ok: true, label, message: m, group },
         Ok(Plan::Delete(paths)) => {
             for p in &paths {
                 let res = if p.is_dir() {
@@ -577,32 +653,32 @@ fn run_step(label: &str, plan: Result<Plan, String>) -> StepResult {
                 match res {
                     Ok(_) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return StepResult { ok: false, label, message: format!("Could not remove {}: {e}", p.display()) },
+                    Err(e) => return fail(&group, &label, format!("Could not remove {}: {e}", p.display())),
                 }
             }
             let names = paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
-            return StepResult { ok: true, label, message: format!("Removed {names}") };
+            return StepResult { ok: true, label, message: format!("Removed {names}"), group };
         }
         Ok(Plan::Write(w)) => w,
     };
     for w in &writes {
         if let Some(dir) = w.path.parent() {
             if let Err(e) = std::fs::create_dir_all(dir) {
-                return StepResult { ok: false, label, message: format!("Could not create {}: {e}", dir.display()) };
+                return fail(&group, &label, format!("Could not create {}: {e}", dir.display()));
             }
         }
         if let Err(e) = atomic_write(&w.path, &w.contents) {
-            return StepResult { ok: false, label, message: format!("Could not write {}: {e}", w.path.display()) };
+            return fail(&group, &label, format!("Could not write {}: {e}", w.path.display()));
         }
         if w.executable {
             use std::os::unix::fs::PermissionsExt;
             if let Err(e) = std::fs::set_permissions(&w.path, std::fs::Permissions::from_mode(0o755)) {
-                return StepResult { ok: false, label, message: format!("Could not make {} executable: {e}", w.path.display()) };
+                return fail(&group, &label, format!("Could not make {} executable: {e}", w.path.display()));
             }
         }
     }
     let paths = writes.iter().map(|w| w.path.display().to_string()).collect::<Vec<_>>().join(", ");
-    StepResult { ok: true, label, message: format!("Wrote {paths}") }
+    StepResult { ok: true, label, message: format!("Wrote {paths}"), group }
 }
 
 /// Every client Glance knows how to integrate with.
@@ -610,85 +686,106 @@ fn all_adapters() -> Vec<Box<dyn ClientAdapter>> {
     vec![Box::new(ClaudeAdapter), Box::new(CursorAdapter)]
 }
 
-/// Run every capability of one adapter, committing each. `mdview` is
-/// client-agnostic, so callers install it once ([`setup_all_present`]).
-pub fn setup_adapter(adapter: &dyn ClientAdapter, bins: &Binaries, home: &Path) -> Vec<StepResult> {
-    let name = adapter.display_name();
-    vec![
-        run_step(&format!("Register glance-mcp with {name}"), adapter.mcp(home, &bins.mcp_bin)),
-        run_step(&format!("Add review guidance for {name}"), adapter.guidance(home)),
-        run_step(&format!("Install agent skill for {name}"), adapter.skill(home)),
-        run_step(&format!("Install auto-open hook for {name}"), adapter.open_hook(home, &bins.app_bin)),
-    ]
+fn install_plan(adapter: &dyn ClientAdapter, c: Capability, bins: &Binaries, home: &Path) -> Result<Plan, String> {
+    match c {
+        Capability::Mcp => adapter.mcp(home, &bins.mcp_bin),
+        Capability::Guidance => adapter.guidance(home),
+        Capability::Skill => adapter.skill(home),
+        Capability::Hook => adapter.open_hook(home, &bins.app_bin),
+    }
 }
 
-/// The "Set up AI Integration…" action: install the shared `mdview` CLI once,
-/// then run every client that looks installed. If no known client is present we
-/// still set up Claude Code so a fresh machine gets a working default.
-pub fn setup_all_present() -> Vec<StepResult> {
-    let cli = install_cli_tool();
-    let mut results = vec![StepResult {
-        ok: cli.ok,
-        label: "Install mdview CLI".to_string(),
-        message: cli.message,
-    }];
+fn uninstall_plan(adapter: &dyn ClientAdapter, c: Capability, home: &Path) -> Result<Plan, String> {
+    match c {
+        Capability::Mcp => adapter.mcp_uninstall(home),
+        Capability::Guidance => adapter.guidance_uninstall(home),
+        Capability::Skill => adapter.skill_uninstall(home),
+        Capability::Hook => adapter.open_hook_uninstall(home),
+    }
+}
 
+/// Install every *supported* capability of one adapter, committing each.
+/// Unsupported capabilities are skipped, so results carry no "Not applicable"
+/// noise. Rows are grouped under the client's display name.
+pub fn setup_adapter(adapter: &dyn ClientAdapter, bins: &Binaries, home: &Path) -> Vec<StepResult> {
+    let name = adapter.display_name();
+    Capability::ALL
+        .into_iter()
+        .filter(|&c| adapter.supports(c))
+        .map(|c| run_step(name, c.label(), install_plan(adapter, c, bins, home)))
+        .collect()
+}
+
+/// Reverse every supported capability of one adapter.
+pub fn remove_adapter(adapter: &dyn ClientAdapter, home: &Path) -> Vec<StepResult> {
+    let name = adapter.display_name();
+    Capability::ALL
+        .into_iter()
+        .filter(|&c| adapter.supports(c))
+        .map(|c| run_step(name, c.label(), uninstall_plan(adapter, c, home)))
+        .collect()
+}
+
+/// Enumerate every client the picker can offer, with detection state and
+/// per-capability eligibility. Pure — no writes, safe to call on every open.
+#[tauri::command]
+pub fn list_integration_targets() -> Vec<ClientInfo> {
+    let home = home();
+    all_adapters()
+        .iter()
+        .map(|a| {
+            let present = home.as_ref().map(|h| a.is_present(h)).unwrap_or(false);
+            let capabilities = Capability::ALL
+                .into_iter()
+                .map(|c| CapabilityInfo { key: c.key().to_string(), label: c.label().to_string(), supported: a.supports(c) })
+                .collect();
+            ClientInfo { id: a.id().to_string(), display_name: a.display_name().to_string(), present, capabilities }
+        })
+        .collect()
+}
+
+/// Execute a picker selection. `action` is `"setup"` or `"remove"`; `ids` are
+/// the chosen client ids. Setup installs the shared `mdview` CLI once (filed
+/// under "Shared"), then each selected client; remove reverses each selected
+/// client (leaving `mdview` in place). Unknown ids are ignored.
+#[tauri::command]
+pub fn run_integration(action: String, ids: Vec<String>) -> Vec<StepResult> {
+    let adapters = all_adapters();
+    let selected = |id: &str| adapters.iter().find(|a| a.id() == id);
+
+    if action == "remove" {
+        let home = match home() {
+            Some(h) => h,
+            None => return vec![StepResult { ok: false, label: "Locate home directory".to_string(), message: "Could not determine your home directory ($HOME).".to_string(), group: "Shared".to_string() }],
+        };
+        return ids
+            .iter()
+            .filter_map(|id| selected(id))
+            .flat_map(|a| remove_adapter(a.as_ref(), &home))
+            .collect();
+    }
+
+    // setup
+    let cli = install_cli_tool();
+    let mut results = vec![StepResult { ok: cli.ok, label: "Install mdview CLI".to_string(), message: cli.message, group: "Shared".to_string() }];
     let home = match home() {
         Some(h) => h,
         None => {
-            results.push(StepResult { ok: false, label: "Locate home directory".to_string(), message: "Could not determine your home directory ($HOME).".to_string() });
+            results.push(StepResult { ok: false, label: "Locate home directory".to_string(), message: "Could not determine your home directory ($HOME).".to_string(), group: "Shared".to_string() });
             return results;
         }
     };
     let bins = match resolve_binaries() {
         Ok(b) => b,
         Err(e) => {
-            results.push(StepResult { ok: false, label: "Locate Glance binaries".to_string(), message: e });
+            results.push(StepResult { ok: false, label: "Locate Glance binaries".to_string(), message: e, group: "Shared".to_string() });
             return results;
         }
     };
-
-    let adapters = all_adapters();
-    let mut present: Vec<&Box<dyn ClientAdapter>> = adapters.iter().filter(|a| a.is_present(&home)).collect();
-    // Fresh machine with no known client → default to Claude Code.
-    if present.is_empty() {
-        if let Some(claude) = adapters.iter().find(|a| a.id() == "claude") {
-            present.push(claude);
+    for id in &ids {
+        if let Some(a) = selected(id) {
+            results.extend(setup_adapter(a.as_ref(), &bins, &home));
         }
-    }
-    for adapter in present {
-        results.extend(setup_adapter(adapter.as_ref(), &bins, &home));
-    }
-    results
-}
-
-/// Reverse every capability of one adapter.
-pub fn remove_adapter(adapter: &dyn ClientAdapter, home: &Path) -> Vec<StepResult> {
-    let name = adapter.display_name();
-    vec![
-        run_step(&format!("De-register glance-mcp from {name}"), adapter.mcp_uninstall(home)),
-        run_step(&format!("Remove review guidance for {name}"), adapter.guidance_uninstall(home)),
-        run_step(&format!("Remove agent skill for {name}"), adapter.skill_uninstall(home)),
-        run_step(&format!("Remove auto-open hook for {name}"), adapter.open_hook_uninstall(home)),
-    ]
-}
-
-/// The "Remove AI Integration…" action: reverse the per-client connectors for
-/// every client that looks installed. The shared `mdview` CLI is left in place
-/// — it is a convenience, not a connector, and removing it is a separate concern.
-pub fn remove_all_present() -> Vec<StepResult> {
-    let home = match home() {
-        Some(h) => h,
-        None => return vec![StepResult { ok: false, label: "Locate home directory".to_string(), message: "Could not determine your home directory ($HOME).".to_string() }],
-    };
-    let adapters = all_adapters();
-    let present: Vec<&Box<dyn ClientAdapter>> = adapters.iter().filter(|a| a.is_present(&home)).collect();
-    if present.is_empty() {
-        return vec![StepResult { ok: true, label: "Remove AI Integration".to_string(), message: "No integrated clients found — nothing to remove.".to_string() }];
-    }
-    let mut results = Vec::new();
-    for adapter in present {
-        results.extend(remove_adapter(adapter.as_ref(), &home));
     }
     results
 }
@@ -866,7 +963,7 @@ mod tests {
         let home = tmp_home("claude-guidance");
         // first run plans a write; commit it, then a second call reports AlreadyDone
         let writes = plan_writes(ClaudeAdapter.guidance(&home).unwrap());
-        run_step("guidance", Ok(Plan::Write(writes)));
+        run_step("g", "guidance", Ok(Plan::Write(writes)));
         assert!(matches!(ClaudeAdapter.guidance(&home).unwrap(), Plan::AlreadyDone(_)));
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -888,7 +985,7 @@ mod tests {
     fn run_step_commits_writes_and_creates_parent_dirs() {
         let home = tmp_home("run-step");
         let target = home.join("nested").join("deep").join("file.txt");
-        let res = run_step("write", Ok(Plan::Write(vec![FileWrite {
+        let res = run_step("g", "write", Ok(Plan::Write(vec![FileWrite {
             path: target.clone(),
             contents: "hello".to_string(),
             executable: false,
@@ -900,11 +997,12 @@ mod tests {
 
     #[test]
     fn run_step_reports_not_supported_and_already_done() {
-        assert!(run_step("x", Ok(Plan::NotSupported)).ok);
-        let done = run_step("x", Ok(Plan::AlreadyDone("kept".to_string())));
+        assert!(run_step("g", "x", Ok(Plan::NotSupported)).ok);
+        let done = run_step("g", "x", Ok(Plan::AlreadyDone("kept".to_string())));
         assert!(done.ok);
         assert_eq!(done.message, "kept");
-        assert!(!run_step("x", Err("boom".to_string())).ok);
+        assert_eq!(done.group, "g");
+        assert!(!run_step("g", "x", Err("boom".to_string())).ok);
     }
 
     // --- uninstall --------------------------------------------------------
@@ -1025,10 +1123,51 @@ mod tests {
         let dir = home.join("d");
         std::fs::write(&file, "x").unwrap();
         std::fs::create_dir_all(dir.join("inner")).unwrap();
-        let res = run_step("del", Ok(Plan::Delete(vec![file.clone(), dir.clone(), home.join("missing")])));
+        let res = run_step("g", "del", Ok(Plan::Delete(vec![file.clone(), dir.clone(), home.join("missing")])));
         assert!(res.ok, "{}", res.message);
         assert!(!file.exists());
         assert!(!dir.exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // --- capabilities + enumeration ---------------------------------------
+
+    #[test]
+    fn supports_reflects_each_client() {
+        for c in Capability::ALL {
+            assert!(ClaudeAdapter.supports(c), "Claude should support {c:?}");
+        }
+        assert!(CursorAdapter.supports(Capability::Mcp));
+        assert!(CursorAdapter.supports(Capability::Guidance));
+        assert!(!CursorAdapter.supports(Capability::Skill));
+        assert!(!CursorAdapter.supports(Capability::Hook));
+    }
+
+    #[test]
+    fn list_integration_targets_marks_eligibility() {
+        let targets = list_integration_targets();
+        let cursor = targets.iter().find(|c| c.id == "cursor").expect("cursor listed");
+        assert_eq!(cursor.display_name, "Cursor");
+        assert_eq!(cursor.capabilities.len(), 4);
+        let sup = |key: &str| cursor.capabilities.iter().find(|c| c.key == key).unwrap().supported;
+        assert!(sup("mcp"));
+        assert!(sup("guidance"));
+        assert!(!sup("skill"));
+        assert!(!sup("hook"));
+        let claude = targets.iter().find(|c| c.id == "claude").expect("claude listed");
+        assert!(claude.capabilities.iter().all(|c| c.supported));
+    }
+
+    #[test]
+    fn setup_adapter_skips_unsupported_and_groups_by_client() {
+        let home = tmp_home("cursor-setup-steps");
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        let steps = setup_adapter(&CursorAdapter, &bins, &home);
+        // Cursor supports only mcp + guidance → exactly 2 steps, no "Not applicable" noise.
+        assert_eq!(steps.len(), 2);
+        assert!(steps.iter().all(|s| s.group == "Cursor"));
+        assert!(steps.iter().all(|s| s.ok));
+        assert!(steps.iter().all(|s| s.message != "Not applicable to this client."));
         let _ = std::fs::remove_dir_all(&home);
     }
 

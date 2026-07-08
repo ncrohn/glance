@@ -1,5 +1,6 @@
-import type { SetupResult } from "./ipc";
+import type { SetupResult, ClientInfo, IntegrationAction } from "./ipc";
 import { openExternal } from "./ipc";
+import { groupSteps, capabilitySummary, isSelectable } from "./integration";
 import { AUTO, THEMES, type ThemePref } from "./theme";
 import appIcon from "./assets/app-icon.png";
 
@@ -135,35 +136,140 @@ export function showSetupResult(result: SetupResult): void {
     onEscape: () => m.close(),
   });
 
-  const list = document.createElement("ul");
-  list.className = "setup-steps";
-  for (const s of steps) {
-    const row = document.createElement("li");
-    row.className = s.ok ? "setup-step ok" : "setup-step fail";
+  // One section per client (plus "Shared" for mdview), each with its own rows.
+  for (const group of groupSteps(steps)) {
+    const header = document.createElement("div");
+    header.className = "setup-group";
+    header.textContent = group.name;
+    m.body.appendChild(header);
 
-    const glyph = document.createElement("span");
-    glyph.className = "setup-glyph";
-    glyph.textContent = s.ok ? "✓" : "✗";
+    const list = document.createElement("ul");
+    list.className = "setup-steps";
+    for (const s of group.steps) {
+      const row = document.createElement("li");
+      row.className = s.ok ? "setup-step ok" : "setup-step fail";
 
-    const text = document.createElement("div");
-    text.className = "setup-text";
-    const label = document.createElement("div");
-    label.className = "setup-label";
-    label.textContent = s.label;
-    const detail = document.createElement("div");
-    detail.className = "setup-detail";
-    detail.textContent = s.message;
-    text.append(label, detail);
+      const glyph = document.createElement("span");
+      glyph.className = "setup-glyph";
+      glyph.textContent = s.ok ? "✓" : "✗";
 
-    row.append(glyph, text);
-    list.appendChild(row);
+      const text = document.createElement("div");
+      text.className = "setup-text";
+      const label = document.createElement("div");
+      label.className = "setup-label";
+      label.textContent = s.label;
+      const detail = document.createElement("div");
+      detail.className = "setup-detail";
+      detail.textContent = s.message;
+      text.append(label, detail);
+
+      row.append(glyph, text);
+      list.appendChild(row);
+    }
+    m.body.appendChild(list);
   }
-  m.body.appendChild(list);
 
   const okBtn = button("OK", true);
   okBtn.onclick = m.close;
   m.footer.appendChild(okBtn);
   okBtn.focus();
+}
+
+// Pre-run picker: choose which clients to set up / remove. One checkbox per
+// client — detected clients enabled + pre-checked, clients we support but that
+// aren't installed shown disabled/greyed. Resolves the chosen ids via onConfirm
+// (empty/cancel → no run).
+export function showIntegrationPicker(
+  action: IntegrationAction,
+  clients: ClientInfo[],
+  onConfirm: (ids: string[]) => void,
+): void {
+  const isRemove = action === "remove";
+  const m = openModal({
+    title: isRemove ? "Remove AI Integration" : "Set up AI Integration",
+    onEscape: () => m.close(),
+  });
+
+  const selected = new Set<string>();
+  const list = document.createElement("ul");
+  list.className = "integration-clients";
+
+  // Primary button lives here so row toggles can enable/disable it.
+  const go = button(isRemove ? "Remove" : "Install", true);
+
+  const refreshGo = () => {
+    go.disabled = selected.size === 0;
+  };
+
+  for (const client of clients) {
+    const selectable = isSelectable(client, action);
+    const { supported, unsupported } = capabilitySummary(client);
+    // Nothing to remove for a client with no supported capabilities.
+    if (isRemove && supported.length === 0) continue;
+
+    const row = document.createElement("li");
+    row.className = selectable ? "integration-client" : "integration-client disabled";
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "integration-check";
+    cb.disabled = !selectable;
+    cb.checked = selectable; // detected → pre-checked
+    if (selectable) selected.add(client.id);
+
+    const text = document.createElement("div");
+    text.className = "integration-text";
+
+    const name = document.createElement("div");
+    name.className = "integration-name";
+    name.textContent = client.displayName;
+    const badge = document.createElement("span");
+    badge.className = "integration-badge";
+    badge.textContent = selectable ? "detected" : "not detected";
+    name.appendChild(badge);
+
+    const sub = document.createElement("div");
+    sub.className = "integration-caps";
+    sub.textContent = isRemove
+      ? `removes: ${supported.join(" · ")}`
+      : supported.join(" · ");
+    text.append(name, sub);
+
+    // Setup: note capabilities this client can't take.
+    if (!isRemove && unsupported.length > 0) {
+      const note = document.createElement("div");
+      note.className = "integration-caps-note";
+      note.textContent = `${unsupported.join(", ")} — not supported`;
+      text.appendChild(note);
+    }
+
+    cb.onchange = () => {
+      if (cb.checked) selected.add(client.id);
+      else selected.delete(client.id);
+      refreshGo();
+    };
+
+    row.append(cb, text);
+    // Clicking the row toggles the checkbox (except when disabled).
+    if (selectable) {
+      row.onclick = (e) => {
+        if (e.target !== cb) { cb.checked = !cb.checked; cb.onchange!(new Event("change")); }
+      };
+    }
+    list.appendChild(row);
+  }
+  m.body.appendChild(list);
+
+  const cancel = button("Cancel");
+  cancel.onclick = m.close;
+  go.onclick = () => {
+    const ids = [...selected];
+    m.close();
+    if (ids.length > 0) onConfirm(ids);
+  };
+  refreshGo();
+  m.footer.append(cancel, go);
+  go.focus();
 }
 
 // Theme picker — a radio-style list of Auto + every built-in theme. Selecting a
