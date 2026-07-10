@@ -30,7 +30,7 @@ Glance is a prebuilt, notarized macOS `.app`. Homebrew ships GUI apps as **casks
 - Main repo remote: `git@github.com:ncrohn/glance.git` → tap must be repo `ncrohn/homebrew-glance`.
 - `src-tauri/tauri.sign.conf.json` holds only the signing **identity string** + Team ID `Z8DA4B78K9` — public info, no private key. Safe to open-source. No secrets in the repo.
 - Release DMG name: `Glance_<version>_aarch64.dmg` (Tauri output on Apple Silicon).
-- Current version: `0.5.1`. App identifier: `fun.sibi.glance`. Annotations stored at `~/.glance/`.
+- Current version: `0.5.1`. App identifier: `com.escapementlabs.glance` (changed from `fun.sibi.glance` — the project belongs to Escapement Labs, not sibi). Annotations stored at `~/.glance/`.
 - No `minimumSystemVersion` set → Tauri default (macOS 10.13+). Cask leaves macOS unconstrained; only `arch: :arm64` is required.
 
 ## Workstreams
@@ -58,7 +58,7 @@ Glance is a prebuilt, notarized macOS `.app`. Homebrew ships GUI apps as **casks
   - `depends_on arch: :arm64`.
   - `app "Glance.app"`.
   - `livecheck { url :url; strategy :github_latest }` for future version bumps.
-  - `zap trash: ["~/.glance", "~/Library/Caches/fun.sibi.glance", "~/Library/Application Support/fun.sibi.glance"]`.
+  - `zap trash: ["~/.glance", "~/Library/Caches/com.escapementlabs.glance", "~/Library/Application Support/com.escapementlabs.glance"]`.
     - **Deliberately does not touch `~/.claude`** — AI integration is removed via the app menu (**Remove AI Integration…**), not by a cask uninstall.
 - Tap README with the `brew install --cask ncrohn/glance/glance` one-liner.
 - Verify: `brew install --cask ncrohn/glance/glance` locally, then `brew uninstall --cask glance`.
