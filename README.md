@@ -18,7 +18,15 @@ A lightweight macOS markdown viewer and editor. Defaults to formatted view. Desi
 
 ## Install
 
-### On any Mac (recommended)
+### Homebrew (recommended)
+
+```bash
+brew install --cask ncrohn/glance/glance
+```
+
+Apple Silicon only. Installs the notarized `Glance.app` into `/Applications`. Then open Glance and run **Glance ▸ Set up AI Integration…** to wire up the `mdview` CLI and Claude/Cursor integration.
+
+### Manual (.dmg or build)
 
 1. Get `Glance.app` (build it once with `scripts/install.sh` below, or open the generated `Glance_<version>_aarch64.dmg`) and drag it to `/Applications`.
 2. Open Glance.
@@ -130,3 +138,7 @@ pnpm exec tsc --noEmit  # TypeScript type check
 ```
 
 Tests: 5 frontend suites (22 tests) + 4 Rust CLI tests.
+
+## License
+
+[MIT](LICENSE) © 2026 Nicholas Crohn
