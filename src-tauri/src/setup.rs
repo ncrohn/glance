@@ -191,7 +191,15 @@ print(ap)
 PY
 )
 TARGET=$(python3 -c "$_GLANCE_PY")
-[ -n "$TARGET" ] && "__APP_BIN__" "$TARGET" >/dev/null 2>&1 &
+# Launch detached. This MUST be a single backgrounded command inside `if`, not
+# `[ … ] && app &`: backgrounding an AND-list runs it in a subshell that keeps
+# the hook's inherited stdout/stderr open for the app's whole lifetime, so Claude
+# Code (which reads the hook's stdout to EOF) hangs until the user quits Glance.
+# A lone `app … & ` reparents to launchd immediately; </dev/null also severs
+# stdin so the GUI never holds the caller's terminal.
+if [ -n "$TARGET" ]; then
+  "__APP_BIN__" "$TARGET" >/dev/null 2>&1 </dev/null &
+fi
 exit 0
 "#;
     TEMPLATE.replace("__APP_BIN__", app_bin)
@@ -1257,6 +1265,65 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         false
+    }
+
+    // Regression: the hook must release the caller's stdout pipe and return
+    // *immediately*, even though the app it launches keeps running. Claude Code
+    // runs the hook with its stdout on a pipe and reads to EOF before letting the
+    // agent continue; if the hook keeps that pipe open for the app's lifetime,
+    // the agent hangs until the user quits Glance. (The earlier `A && B &` form
+    // did exactly that — the backgrounded AND-list ran in a subshell that held
+    // the inherited pipe until the app exited.)
+    #[test]
+    fn hook_releases_stdout_pipe_before_app_exits() {
+        if !python3_available() {
+            eprintln!("skipping hook_releases_stdout_pipe_before_app_exits: python3 not available");
+            return;
+        }
+        use std::io::Read;
+        use std::sync::mpsc;
+        let base = std::env::temp_dir().join(format!("glance-hook-block-{}", std::process::id()));
+        let proj = base.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        // A stub "app" that stays alive well past our assert window. If the hook
+        // holds our stdout pipe for the app's lifetime, read_to_end below won't
+        // see EOF until this sleep ends.
+        let stub = base.join("stub.sh");
+        std::fs::write(&stub, "#!/bin/sh\nsleep 10\n").unwrap();
+        let script = base.join("open-md-hook.sh");
+        std::fs::write(&script, hook_script(&stub.to_string_lossy())).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let cwd = proj.to_string_lossy().to_string();
+        let md = proj.join("notes.md").to_string_lossy().to_string();
+        let json = format!(r#"{{"tool_name":"Write","cwd":"{cwd}","tool_input":{{"file_path":"{md}"}}}}"#);
+
+        let mut child = std::process::Command::new("sh")
+            .arg(&script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped()) // a real pipe, like Claude Code's hook runner
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(json.as_bytes()).unwrap();
+        let mut out = child.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = out.read_to_end(&mut buf); // returns only when every writer of the pipe is gone
+            let _ = tx.send(());
+        });
+        // Generous 3s margin (app sleeps 10s) so this can't flake under load.
+        let released = rx.recv_timeout(std::time::Duration::from_secs(3)).is_ok();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&base);
+        assert!(
+            released,
+            "hook held the stdout pipe until the launched app exited — it must detach the app and return immediately"
+        );
     }
 
     #[test]
