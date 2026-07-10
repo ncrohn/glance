@@ -26,16 +26,11 @@ brew install --cask ncrohn/glance/glance
 
 Apple Silicon only. Installs the notarized `Glance.app` into `/Applications`. Then open Glance and run **Glance ▸ Set up AI Integration…** to wire up the `mdview` CLI and Claude/Cursor integration.
 
-### Manual (.dmg or build)
+### Manual (.dmg)
 
-1. Get `Glance.app` (build it once with `scripts/install.sh` below, or open the generated `Glance_<version>_aarch64.dmg`) and drag it to `/Applications`.
-2. Open Glance.
-3. Menu **Glance ▸ Set up AI Integration…**. This installs a tiny `~/.local/bin/mdview` wrapper, registers the `glance-mcp` server into `~/.claude.json`, appends review guidance to `~/.claude/CLAUDE.md`, installs the `glance` agent skill, and registers an auto-open hook — all in one click. (Cursor is also configured if detected.)
-4. Ensure `~/.local/bin` is on your shell `PATH`.
+Prefer not to use Homebrew? Download `Glance_<version>_aarch64.dmg` from the [latest release](https://github.com/ncrohn/glance/releases/latest), open it, and drag `Glance.app` to `/Applications`. Then open Glance and run **Glance ▸ Set up AI Integration…**. Apple Silicon only.
 
-The `mdview` wrapper is a two-line script that launches the binary inside `Glance.app` **detached**, so the command returns immediately even on a cold start (otherwise the first invocation would become the GUI process and block your terminal). It targets the installed binary, so it does not depend on this source checkout.
-
-### From source (development machine)
+### From source (development)
 
 **Requirements:** Rust toolchain (stable), pnpm.
 
@@ -45,26 +40,7 @@ bash scripts/install.sh
 
 Builds Glance in release mode, copies `Glance.app` to `/Applications`, and installs the `mdview` wrapper into `~/.local/bin` (same as the **Set up AI Integration…** menu item).
 
-### Signed distribution (for sharing the DMG)
-
-`scripts/install.sh` produces a working app for **your** machine, but an unsigned/Development-signed build is blocked by Gatekeeper on other Macs. To build a DMG anyone can open, sign with a **Developer ID Application** certificate and notarize it. The DMG's volume icon is taken automatically from the app icon (`src-tauri/icons/icon.icns`).
-
-One-time setup (requires Apple Developer Program membership):
-
-1. Install a **Developer ID Application** certificate into your login keychain (Xcode ▸ Settings ▸ Accounts ▸ Manage Certificates ▸ **+**).
-2. Store notarization credentials as a keychain profile:
-   ```bash
-   xcrun notarytool store-credentials "glance-notary" \
-     --key AuthKey_XXXX.p8 --key-id KEY_ID --issuer ISSUER_UUID
-   ```
-
-Then build a distributable DMG:
-
-```bash
-bash scripts/release.sh        # build → sign → notarize → staple → verify
-```
-
-Signing lives in a separate overlay, `src-tauri/tauri.sign.conf.json` (`bundle.macOS.signingIdentity` + `entitlements.plist`), layered only by `release.sh` — so `install.sh`'s unsigned dev build never needs the certificate. The hardened runtime that notarization requires is applied automatically.
+> Building a signed + notarized DMG for distribution — and cutting a release — is documented in [`RELEASING.md`](RELEASING.md).
 
 ## Usage
 
