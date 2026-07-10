@@ -26,7 +26,7 @@ brew install --cask ncrohn/glance/glance
 
 Apple Silicon only. Installs the notarized `Glance.app` into `/Applications`. Then open Glance and run **Glance ▸ Set up AI Integration…** to wire up the `mdview` CLI and Claude/Cursor integration.
 
-### On any Mac (recommended)
+### Manual (.dmg or build)
 
 1. Get `Glance.app` (build it once with `scripts/install.sh` below, or open the generated `Glance_<version>_aarch64.dmg`) and drag it to `/Applications`.
 2. Open Glance.
