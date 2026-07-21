@@ -475,6 +475,52 @@ body {
   text-indent: 0;
 }
 
+/* YAML frontmatter, rendered as a compact metadata card instead of leaking
+   through as a setext heading. display:contents on the rows lets their
+   key/value cells align across the card's two-column grid. */
+.rendered .frontmatter-card {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  align-items: baseline;
+  gap: 0.35em 1.1em;
+  margin: 0 0 1.9em;
+  padding: 0.9em 1.15em;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  font-family: var(--font-ui);
+  font-size: 0.85rem;
+}
+.rendered .frontmatter-row { display: contents; }
+.rendered .frontmatter-key {
+  color: var(--faint);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.rendered .frontmatter-value { color: var(--ink-soft); }
+.rendered .frontmatter-chips { display: flex; flex-wrap: wrap; gap: 0.4em; }
+.rendered .frontmatter-chip {
+  background: var(--accent-tint);
+  color: var(--accent);
+  border-radius: 999px;
+  padding: 0.08em 0.65em;
+  font-size: 0.92em;
+  line-height: 1.5;
+}
+
+/* Leading `**Label:** value` metadata paragraph. pre-line turns the source's
+   soft line breaks into stacked rows so each label sits on its own line. */
+.rendered p.doc-meta {
+  white-space: pre-line;
+  color: var(--ink-soft);
+  font-size: 0.94em;
+  margin: 0 0 1.7em;
+  padding-left: 0.9em;
+  border-left: 2px solid var(--accent-line);
+}
+.rendered p.doc-meta strong { color: var(--accent); font-weight: 600; }
+
 .rendered hr {
   border: none; height: 1px; margin: 2.4em auto; width: 60%;
   background: linear-gradient(90deg, transparent, var(--border), transparent);

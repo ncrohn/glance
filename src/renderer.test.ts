@@ -51,6 +51,54 @@ describe("renderMarkdown", () => {
   });
 });
 
+describe("renderMarkdown frontmatter", () => {
+  const src =
+    "---\ntype: meeting\npeople: [Nicole K]\n---\n# Title\n\nbody on line 7";
+
+  it("renders a frontmatter card instead of leaking the fence as a heading", () => {
+    const html = renderMarkdown(src);
+    expect(html).toContain("frontmatter-card");
+    expect(html).toContain("meeting");
+    // the closing --- must NOT have become a setext heading
+    expect(html).not.toMatch(/<h[12][^>]*>type: meeting/);
+  });
+
+  it("renders list-valued frontmatter as chips", () => {
+    const html = renderMarkdown(src);
+    expect(html).toContain("frontmatter-chip");
+    expect(html).toContain("Nicole K");
+  });
+
+  it("keeps body source lines aligned to the original file", () => {
+    // '# Title' is on source line 5; the card must not shift its data-sourceline
+    const html = renderMarkdown(src);
+    expect(html).toMatch(/<h1[^>]*data-sourceline="5"/);
+    expect(html).toMatch(/<p[^>]*data-sourceline="7"/);
+  });
+
+  it("still marks changed body lines correctly under a frontmatter offset", () => {
+    const html = renderMarkdown(src, new Set([7]));
+    expect(/<p[^>]*data-changed[^>]*>body on line 7<\/p>/.test(html)).toBe(true);
+  });
+});
+
+describe("renderMarkdown leading meta paragraph", () => {
+  it("tags a leading **Label:** paragraph before the first H2 as doc-meta", () => {
+    const html = renderMarkdown("# T\n\n**Date:** today\n**Role:** dev\n");
+    expect(/<p[^>]*class="[^"]*doc-meta/.test(html)).toBe(true);
+  });
+
+  it("does not tag an ordinary body paragraph", () => {
+    const html = renderMarkdown("# T\n\nJust prose here.\n");
+    expect(html).not.toContain("doc-meta");
+  });
+
+  it("does not tag a **Label:** paragraph that appears after an H2", () => {
+    const html = renderMarkdown("# T\n\n## Section\n\n**Ask Nicole:** later\n");
+    expect(html).not.toContain("doc-meta");
+  });
+});
+
 describe("renderMarkdown changed-line marking", () => {
   const src = "# Title\n\nfirst para\n\nsecond para";
   // lines: 1='# Title', 2='', 3='first para', 4='', 5='second para'
