@@ -521,6 +521,71 @@ body {
 }
 .rendered p.doc-meta strong { color: var(--accent); font-weight: 600; }
 
+/* Optional expand affordance on code + table blocks. Each block is wrapped in
+   .block-expand-wrap (by block-expand.ts); the wrapper — not the inner scroll
+   container — is what widens and what the button anchors to, so the button
+   never scrolls with wide content. Clicking toggles .expanded, breaking the
+   block out to fill the content pane (--pane-w, published by app.ts). Symmetric
+   side margins re-center the wider block over the reading column so it grows
+   evenly toward both pane edges without introducing horizontal page scroll, and
+   the width/margin change is transitioned for a smooth grow. */
+.rendered .block-expand-wrap {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 1.4em 0;
+  transition:
+    width 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+    margin-left 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+    margin-right 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.rendered .block-expand-wrap > pre,
+.rendered .block-expand-wrap > .table-scroll {
+  margin: 0; /* the wrapper owns the block's outer spacing now */
+}
+.rendered .block-expand-wrap.expanded {
+  width: calc(var(--pane-w, 100%) - 6rem);
+  margin-left: calc((100% - (var(--pane-w, 100%) - 6rem)) / 2);
+  margin-right: calc((100% - (var(--pane-w, 100%) - 6rem)) / 2);
+}
+
+/* Button overlays the block's top-right corner. It's anchored to the wrapper
+   (not the inner scroll container), so it stays pinned there and does not scroll
+   away with wide code/table content. */
+.rendered .block-expand-btn {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 0.14s ease,
+    color 0.14s ease,
+    border-color 0.14s ease;
+}
+.rendered .block-expand-wrap:hover > .block-expand-btn,
+.rendered .block-expand-btn:focus-visible,
+.rendered .block-expand-btn[aria-expanded="true"] {
+  opacity: 1;
+}
+.rendered .block-expand-btn:hover,
+.rendered .block-expand-btn:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
+
 .rendered hr {
   border: none; height: 1px; margin: 2.4em auto; width: 60%;
   background: linear-gradient(90deg, transparent, var(--border), transparent);

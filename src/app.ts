@@ -8,6 +8,7 @@ import {
 import { isDirty, basename, changedLines, hasUnreviewedChanges } from "./document";
 import { renderMarkdown } from "./renderer";
 import { renderMermaidBlocks } from "./mermaid";
+import { mountBlockExpanders } from "./block-expand";
 import {
   readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs,
   readAnnotations, addStoredAnnotation, removeStoredAnnotation, resolveAnchors, ensureAnnotationStore,
@@ -263,6 +264,7 @@ function renderContent(): void {
     view.innerHTML = renderMarkdown(doc.editorContent, changedLines(doc));
     host.appendChild(view);
     void renderMermaidBlocks(view, currentThemeId(), currentAppearance());
+    mountBlockExpanders(view);
     const markers = assignMarkers(doc.annotations, doc.resolutions);
     applyHighlights(view, doc.annotations, doc.resolutions, markers);
     teardownToolbar = mountSelectionToolbar(view, () => startComment(doc.absPath));
@@ -341,11 +343,25 @@ function changeTheme(pref: ThemePref): void {
   render(); // remount editor so its dark flag matches the new appearance
 }
 
+// Publish the content pane's inner width as --pane-w so an expanded code/table
+// block can break out to fill it (see block-expand.ts + styles.css). Tracks the
+// pane, not the window, so it stays correct when the annotation rail (a sibling
+// of #content) opens and shrinks the pane.
+function trackPaneWidth(): void {
+  const content = document.getElementById("content");
+  if (!content) return;
+  const publish = () =>
+    document.documentElement.style.setProperty("--pane-w", `${content.clientWidth}px`);
+  publish();
+  new ResizeObserver(publish).observe(content);
+}
+
 export async function start(): Promise<void> {
   // Adopt the persisted theme (and wire the OS-follow listener for Auto). The
   // inline bootstrap in index.html already set data-theme to avoid a flash;
   // this re-applies it and, for Auto, keeps it in sync with the OS.
   applyTheme(loadThemePref(), render);
+  trackPaneWidth();
 
   await onOpenFile((absPath) => { void openPath(absPath); });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
