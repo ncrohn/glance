@@ -2,6 +2,8 @@
 
 A lightweight macOS markdown viewer and editor. Defaults to formatted view. Designed as a companion to terminal-based workflows — Claude Code can open any markdown file it creates with `mdview <path>` for immediate review.
 
+![Glance rendering a markdown document — YAML frontmatter as a metadata card, editorial typography, warm paper theme](docs/screenshot.png)
+
 ## Features
 
 - **Tabbed single window** — every `mdview <file>` call opens in the same window; duplicate paths are deduped.

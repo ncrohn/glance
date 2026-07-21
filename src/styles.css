@@ -461,8 +461,188 @@ body {
 .rendered li { margin: 0.3em 0; }
 .rendered li::marker { color: var(--accent); }
 .rendered ul.contains-task-list { list-style: none; padding-left: 0.2em; }
-.rendered .task-list-item { display: flex; align-items: baseline; gap: 0.55em; }
-.rendered .task-list-item input { accent-color: var(--accent); transform: translateY(1px); }
+/* Hanging indent, NOT flex: flex would promote every inline child (each
+   <strong>/<code>/text run) to its own flex item and crush them into columns.
+   Normal inline flow keeps the item on one wrapping line; the negative
+   text-indent lets the checkbox sit in the outdent and wrapped lines align
+   under the text. */
+.rendered .task-list-item { list-style: none; padding-left: 1.55em; text-indent: -1.55em; }
+.rendered .task-list-item .task-list-item-checkbox {
+  accent-color: var(--accent);
+  width: 1em; height: 1em;
+  margin-right: 0.5em;
+  vertical-align: -0.1em;
+  text-indent: 0;
+}
+
+/* YAML frontmatter, rendered as a compact metadata card instead of leaking
+   through as a setext heading. display:contents on the rows lets their
+   key/value cells align across the card's two-column grid. */
+.rendered .frontmatter-card {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  align-items: baseline;
+  gap: 0.35em 1.1em;
+  margin: 0 0 1.9em;
+  padding: 0.9em 1.15em;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+  font-family: var(--font-ui);
+  font-size: 0.85rem;
+}
+.rendered .frontmatter-row { display: contents; }
+.rendered .frontmatter-key {
+  color: var(--faint);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.rendered .frontmatter-value { color: var(--ink-soft); }
+.rendered .frontmatter-chips { display: flex; flex-wrap: wrap; gap: 0.4em; }
+.rendered .frontmatter-chip {
+  background: var(--accent-tint);
+  color: var(--accent);
+  border-radius: 999px;
+  padding: 0.08em 0.65em;
+  font-size: 0.92em;
+  line-height: 1.5;
+}
+
+/* Leading `**Label:** value` metadata paragraph. pre-line turns the source's
+   soft line breaks into stacked rows so each label sits on its own line. */
+.rendered p.doc-meta {
+  white-space: pre-line;
+  color: var(--ink-soft);
+  font-size: 0.94em;
+  margin: 0 0 1.7em;
+  padding-left: 0.9em;
+  border-left: 2px solid var(--accent-line);
+}
+.rendered p.doc-meta strong { color: var(--accent); font-weight: 600; }
+
+/* Optional expand affordance on code + table blocks. Each block is wrapped in
+   .block-expand-wrap (by block-expand.ts); the wrapper — not the inner scroll
+   container — is what widens and what the button anchors to, so the button
+   never scrolls with wide content. Clicking toggles .expanded, breaking the
+   block out to fill the content pane (--pane-w, published by app.ts). Symmetric
+   side margins re-center the wider block over the reading column so it grows
+   evenly toward both pane edges without introducing horizontal page scroll, and
+   the width/margin change is transitioned for a smooth grow. */
+.rendered .block-expand-wrap {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 1.4em 0;
+  transition:
+    width 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+    margin-left 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+    margin-right 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.rendered .block-expand-wrap > pre,
+.rendered .block-expand-wrap > .table-scroll,
+.rendered .block-expand-wrap > .mermaid-diagram {
+  margin: 0; /* the wrapper owns the block's outer spacing now */
+}
+/* A wider container lets mermaid's max-width:100% SVG scale up when expanded. */
+.rendered .block-expand-wrap.expanded > .mermaid-diagram { justify-content: center; }
+.rendered .block-expand-wrap.expanded {
+  width: calc(var(--pane-w, 100%) - 6rem);
+  margin-left: calc((100% - (var(--pane-w, 100%) - 6rem)) / 2);
+  margin-right: calc((100% - (var(--pane-w, 100%) - 6rem)) / 2);
+}
+
+/* Button overlays the block's top-right corner. It's anchored to the wrapper
+   (not the inner scroll container), so it stays pinned there and does not scroll
+   away with wide code/table content. */
+.rendered .block-expand-btn {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 0.14s ease,
+    color 0.14s ease,
+    border-color 0.14s ease;
+}
+.rendered .block-expand-wrap:hover > .block-expand-btn,
+.rendered .block-expand-btn:focus-visible,
+.rendered .block-expand-btn[aria-expanded="true"] {
+  opacity: 1;
+}
+.rendered .block-expand-btn:hover,
+.rendered .block-expand-btn:focus-visible {
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
+/* On mermaid diagrams the zoom button sits left of the expand button. */
+.rendered .block-zoom-btn { right: 39px; }
+
+/* Full-window mermaid pan/zoom viewer (mermaid-zoom.ts). */
+.mermaid-zoom-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  overflow: hidden;
+  cursor: grab;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+.mermaid-zoom-overlay.dragging { cursor: grabbing; }
+.mermaid-zoom-stage {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.mermaid-zoom-stage svg { display: block; }
+.mermaid-zoom-close {
+  position: fixed;
+  top: 16px;
+  right: 18px;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-soft);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+.mermaid-zoom-close:hover { color: var(--accent); border-color: var(--accent-line); }
+.mermaid-zoom-hint {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  font-family: var(--font-ui);
+  font-size: 0.78rem;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  pointer-events: none;
+}
 
 .rendered hr {
   border: none; height: 1px; margin: 2.4em auto; width: 60%;
