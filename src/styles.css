@@ -311,9 +311,9 @@ body {
   -webkit-app-region: no-drag;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   height: 30px;
-  padding: 0 8px 0 12px;
+  padding: 0 7px 0 13px;
   max-width: 230px;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -324,21 +324,31 @@ body {
   white-space: nowrap;
   cursor: default;
   position: relative;
-  transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+  transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
 }
-.tab:hover { background: color-mix(in srgb, var(--raised) 55%, transparent); color: var(--ink-soft); }
+/* Every child inherits no-drag so an inner span can't re-enter the titlebar's
+   window-drag region and swallow a click (a classic Tauri flaky-click source). */
+.tab > * { -webkit-app-region: no-drag; }
+.tab:hover { background: color-mix(in srgb, var(--raised) 60%, transparent); color: var(--ink-soft); }
 .tab.active {
   background: var(--surface);
   border-color: var(--border);
   color: var(--ink);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.10);
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.10),
+    inset 0 1px 0 color-mix(in srgb, var(--raised) 55%, transparent);
 }
 .tab.active .label { color: var(--accent); }
 
 .tab .label { overflow: hidden; text-overflow: ellipsis; }
+
+/* Dirty indicator: a small dot in the left gutter, positioned out of the flex
+   flow so a clean tab keeps a tight left edge (no permanent empty slot). */
 .tab .dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--accent); flex: 0 0 auto;
+  position: absolute;
+  left: 5px; top: 50%; transform: translateY(-50%);
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent);
   opacity: 0; transition: opacity 0.14s ease;
 }
 .tab.dirty .dot { opacity: 1; }
@@ -347,12 +357,58 @@ body {
 .tab .close {
   -webkit-app-region: no-drag;
   display: grid; place-items: center;
-  width: 17px; height: 17px; border-radius: 5px;
+  width: 18px; height: 18px; border-radius: 6px;
   color: var(--faint); font-size: 15px; line-height: 1;
   opacity: 0; transition: opacity 0.14s ease, background 0.14s ease, color 0.14s ease;
 }
-.tab:hover .close, .tab.active .close { opacity: 1; }
-.tab .close:hover { background: var(--accent-tint); color: var(--accent); }
+.tab:hover .close, .tab.active .close { opacity: 0.72; }
+.tab .close:hover { opacity: 1; background: var(--accent-tint); color: var(--accent); }
+
+/* ---- Tab hover preview -------------------------------------------------- */
+.tab-preview {
+  position: fixed;
+  z-index: 900; /* above content + rail, below modals (1037+) */
+  max-width: 340px;
+  min-width: 180px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+  font-family: var(--font-ui);
+  color: var(--ink-soft);
+  opacity: 0;
+  transform: translateY(-3px);
+  pointer-events: none;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+.tab-preview.visible { opacity: 1; transform: none; }
+.tab-preview-name {
+  font-size: 12.5px; font-weight: 600; color: var(--ink);
+  word-break: break-word; white-space: normal;
+}
+.tab-preview-path {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px; color: var(--faint);
+  margin-top: 2px; margin-bottom: 8px;
+  word-break: break-all; white-space: normal;
+}
+.tab-preview-meta {
+  display: grid; grid-template-columns: max-content 1fr;
+  gap: 4px 12px; align-items: baseline;
+  font-size: 11.5px;
+}
+.tab-preview-row { display: contents; }
+.tab-preview-key {
+  color: var(--faint); text-transform: lowercase;
+  letter-spacing: 0.02em; white-space: nowrap;
+}
+.tab-preview-value { color: var(--ink-soft); word-break: break-word; white-space: normal; }
+.tab-preview-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.tab-preview-chip {
+  background: var(--accent-tint); color: var(--accent);
+  border-radius: 999px; padding: 1px 8px; font-size: 10.5px;
+}
 
 /* Read / Edit segmented control */
 .titlebar-actions { -webkit-app-region: drag; display: flex; align-items: center; }
