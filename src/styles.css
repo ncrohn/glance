@@ -461,8 +461,19 @@ body {
 .rendered li { margin: 0.3em 0; }
 .rendered li::marker { color: var(--accent); }
 .rendered ul.contains-task-list { list-style: none; padding-left: 0.2em; }
-.rendered .task-list-item { display: flex; align-items: baseline; gap: 0.55em; }
-.rendered .task-list-item input { accent-color: var(--accent); transform: translateY(1px); }
+/* Hanging indent, NOT flex: flex would promote every inline child (each
+   <strong>/<code>/text run) to its own flex item and crush them into columns.
+   Normal inline flow keeps the item on one wrapping line; the negative
+   text-indent lets the checkbox sit in the outdent and wrapped lines align
+   under the text. */
+.rendered .task-list-item { list-style: none; padding-left: 1.55em; text-indent: -1.55em; }
+.rendered .task-list-item .task-list-item-checkbox {
+  accent-color: var(--accent);
+  width: 1em; height: 1em;
+  margin-right: 0.5em;
+  vertical-align: -0.1em;
+  text-indent: 0;
+}
 
 .rendered hr {
   border: none; height: 1px; margin: 2.4em auto; width: 60%;
