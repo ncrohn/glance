@@ -263,8 +263,9 @@ function renderContent(): void {
     const view = el("div", "rendered");
     view.innerHTML = renderMarkdown(doc.editorContent, changedLines(doc));
     host.appendChild(view);
-    void renderMermaidBlocks(view, currentThemeId(), currentAppearance());
-    mountBlockExpanders(view);
+    const mermaidDone = renderMermaidBlocks(view, currentThemeId(), currentAppearance());
+    mountBlockExpanders(view); // code/tables + any synchronously-cached diagrams
+    void mermaidDone.then(() => mountBlockExpanders(view)); // first-render diagrams
     const markers = assignMarkers(doc.annotations, doc.resolutions);
     applyHighlights(view, doc.annotations, doc.resolutions, markers);
     teardownToolbar = mountSelectionToolbar(view, () => startComment(doc.absPath));

@@ -540,9 +540,12 @@ body {
     margin-right 0.26s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .rendered .block-expand-wrap > pre,
-.rendered .block-expand-wrap > .table-scroll {
+.rendered .block-expand-wrap > .table-scroll,
+.rendered .block-expand-wrap > .mermaid-diagram {
   margin: 0; /* the wrapper owns the block's outer spacing now */
 }
+/* A wider container lets mermaid's max-width:100% SVG scale up when expanded. */
+.rendered .block-expand-wrap.expanded > .mermaid-diagram { justify-content: center; }
 .rendered .block-expand-wrap.expanded {
   width: calc(var(--pane-w, 100%) - 6rem);
   margin-left: calc((100% - (var(--pane-w, 100%) - 6rem)) / 2);
@@ -584,6 +587,60 @@ body {
 .rendered .block-expand-btn:focus-visible {
   color: var(--accent);
   border-color: var(--accent-line);
+}
+/* On mermaid diagrams the zoom button sits left of the expand button. */
+.rendered .block-zoom-btn { right: 39px; }
+
+/* Full-window mermaid pan/zoom viewer (mermaid-zoom.ts). */
+.mermaid-zoom-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  overflow: hidden;
+  cursor: grab;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: blur(3px);
+}
+.mermaid-zoom-overlay.dragging { cursor: grabbing; }
+.mermaid-zoom-stage {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.mermaid-zoom-stage svg { display: block; }
+.mermaid-zoom-close {
+  position: fixed;
+  top: 16px;
+  right: 18px;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-soft);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+.mermaid-zoom-close:hover { color: var(--accent); border-color: var(--accent-line); }
+.mermaid-zoom-hint {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 12px;
+  font-family: var(--font-ui);
+  font-size: 0.78rem;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  pointer-events: none;
 }
 
 .rendered hr {
