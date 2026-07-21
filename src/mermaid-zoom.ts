@@ -7,9 +7,19 @@
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 12;
 
+// Only one viewer at a time. Held here so app.ts can dismiss a stray overlay on
+// re-render/tab-switch (it lives on document.body, outside the rendered view) —
+// the same lifecycle discipline the selection toolbar gets via teardownToolbar.
+let closeCurrent: (() => void) | null = null;
+
+export function closeMermaidZoom(): void {
+  closeCurrent?.();
+}
+
 export function openMermaidZoom(diagram: HTMLElement): void {
   const svg = diagram.querySelector("svg");
   if (!svg) return;
+  closeCurrent?.(); // never stack two overlays
 
   const rect = svg.getBoundingClientRect();
   const baseW = rect.width || 400;
@@ -107,7 +117,9 @@ export function openMermaidZoom(diagram: HTMLElement): void {
     window.removeEventListener("pointerup", onPointerUp);
     window.removeEventListener("keydown", onKey);
     overlay.remove();
+    if (closeCurrent === teardown) closeCurrent = null;
   }
+  closeCurrent = teardown;
 
   overlay.addEventListener("wheel", onWheel, { passive: false });
   overlay.addEventListener("pointerdown", onPointerDown);

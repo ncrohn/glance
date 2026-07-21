@@ -72,4 +72,11 @@ describe("parseFrontmatter", () => {
     const src = "---\ntags: []\n---\nbody";
     expect(parseFrontmatter(src).entries).toEqual([]);
   });
+
+  it("does not split a quoted array item on its internal comma", () => {
+    const src = `---\ntags: ["hello, world", "foo"]\n---\nbody`;
+    expect(parseFrontmatter(src).entries).toEqual([
+      { key: "tags", value: ["hello, world", "foo"] },
+    ]);
+  });
 });

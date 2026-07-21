@@ -9,6 +9,7 @@ import { isDirty, basename, changedLines, hasUnreviewedChanges } from "./documen
 import { renderMarkdown } from "./renderer";
 import { renderMermaidBlocks } from "./mermaid";
 import { mountBlockExpanders } from "./block-expand";
+import { closeMermaidZoom } from "./mermaid-zoom";
 import {
   readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs,
   readAnnotations, addStoredAnnotation, removeStoredAnnotation, resolveAnchors, ensureAnnotationStore,
@@ -273,6 +274,10 @@ function renderContent(): void {
 }
 
 export function render(): void {
+  // The mermaid zoom overlay lives on document.body, outside the rendered view,
+  // so it would otherwise survive a tab switch / re-render on top of the new
+  // content. Dismiss it here (same discipline as the selection toolbar).
+  closeMermaidZoom();
   renderTabBar();
   renderActions();
   renderContent();
@@ -388,6 +393,9 @@ export async function start(): Promise<void> {
       state = applyDiskChange(state, doc.id, e.contents);
       render();
     } else {
+      // Dismiss any open zoom overlay first — it sits above the modal layer, so
+      // the reload prompt would otherwise be unreachable underneath it.
+      closeMermaidZoom();
       const choice = await confirmReload(doc.fileName);
       if (choice === "disk") {
         state = applyDiskChange(state, doc.id, e.contents);

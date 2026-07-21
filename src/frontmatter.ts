@@ -52,14 +52,36 @@ function parseLine(line: string): FrontmatterEntry | null {
   if (raw === "") return null;
 
   if (raw.startsWith("[") && raw.endsWith("]")) {
-    const items = raw
-      .slice(1, -1)
-      .split(",")
+    const items = splitArray(raw.slice(1, -1))
       .map((s) => unquote(s.trim()))
       .filter((s) => s !== "");
     return items.length ? { key, value: items } : null;
   }
   return { key, value: unquote(raw) };
+}
+
+// Split a flow-array body on commas, ignoring commas inside quotes so a quoted
+// item like "hello, world" stays a single value.
+function splitArray(inner: string): string[] {
+  const items: string[] = [];
+  let cur = "";
+  let quote: string | null = null;
+  for (const ch of inner) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      cur += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+      cur += ch;
+    } else if (ch === ",") {
+      items.push(cur);
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  items.push(cur);
+  return items;
 }
 
 function unquote(s: string): string {

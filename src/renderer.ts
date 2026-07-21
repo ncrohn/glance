@@ -58,10 +58,15 @@ md.core.ruler.push("source_lines", (state) => {
 // in a colon — so ordinary body paragraphs like `**Ask Nicole:** …` that live
 // under a section are left alone.
 md.core.ruler.push("doc_meta", (state) => {
-  for (const token of state.tokens) {
+  for (let i = 0; i < state.tokens.length; i++) {
+    const token = state.tokens[i];
+    // Only consider top-level blocks (level 0), like source_lines/changed_lines
+    // do — so headings and paragraphs nested in blockquotes or list items
+    // neither end the scan early nor get mistakenly tagged.
+    if (token.level !== 0) continue;
     if (token.type === "heading_open" && /^h[2-6]$/.test(token.tag)) break;
     if (token.type === "paragraph_open") {
-      const inline = state.tokens[state.tokens.indexOf(token) + 1];
+      const inline = state.tokens[i + 1];
       if (inline?.type === "inline" && startsWithBoldLabel(inline.children)) {
         token.attrJoin("class", "doc-meta");
       }

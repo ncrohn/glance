@@ -600,6 +600,7 @@ body {
   cursor: grab;
   background: color-mix(in srgb, var(--bg) 82%, transparent);
   backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
 }
 .mermaid-zoom-overlay.dragging { cursor: grabbing; }
 .mermaid-zoom-stage {

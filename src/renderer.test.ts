@@ -97,6 +97,17 @@ describe("renderMarkdown leading meta paragraph", () => {
     const html = renderMarkdown("# T\n\n## Section\n\n**Ask Nicole:** later\n");
     expect(html).not.toContain("doc-meta");
   });
+
+  it("does not tag a **Label:** paragraph nested inside a blockquote", () => {
+    const html = renderMarkdown("# T\n\n> **Date:** today\n\nbody\n");
+    expect(html).not.toContain("doc-meta");
+  });
+
+  it("still tags the top-level meta paragraph even when a blockquote above it contains a heading", () => {
+    // The nested `## Q` must NOT end the scan; the real top-level meta line follows.
+    const html = renderMarkdown("# T\n\n> ## Q\n> quote\n\n**Date:** today\n");
+    expect(/<p[^>]*class="[^"]*doc-meta/.test(html)).toBe(true);
+  });
 });
 
 describe("renderMarkdown changed-line marking", () => {
