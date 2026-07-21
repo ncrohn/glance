@@ -5,7 +5,8 @@ import {
   setDocAnnotations, setDocResolutions,
   markReviewed, setReviewedBaseline,
 } from "./store";
-import { isDirty, basename, changedLines, hasUnreviewedChanges } from "./document";
+import { isDirty, basename, changedLines, hasUnreviewedChanges, type Doc } from "./document";
+import { parseFrontmatter } from "./frontmatter";
 import { renderMarkdown } from "./renderer";
 import { renderMermaidBlocks } from "./mermaid";
 import { mountBlockExpanders } from "./block-expand";
@@ -155,25 +156,165 @@ function renderRailFor(): void {
   });
 }
 
+// Click handling is delegated once onto the #tabs container rather than bound
+// per-tab. This fixes two flaky-click causes: (1) the whole tab is now a live
+// hit target — previously only the inner .label span selected, so clicks on the
+// padding / dirty dot / "(deleted)" tag did nothing; (2) the listener lives on
+// the container, which survives the innerHTML teardown, so a re-render mid-click
+// can't strip the handler off the node being clicked.
+function bindTabBar(bar: HTMLElement): void {
+  if (bar.dataset.bound) return;
+  bar.dataset.bound = "1";
+  bar.addEventListener("click", (ev) => {
+    const target = ev.target as HTMLElement;
+    const tab = target.closest<HTMLElement>(".tab");
+    const id = tab?.dataset.id;
+    if (!id) return;
+    if (target.closest(".close")) { closeTab(id); return; }
+    if (id !== state.activeId) { state = setActive(state, id); render(); }
+  });
+  bindTabHover(bar);
+}
+
 function renderTabBar(): void {
   const bar = document.getElementById("tabs")!;
+  bindTabBar(bar);
+  hideTabPreview(); // rebuilding the nodes invalidates any open preview's anchor
   bar.innerHTML = "";
   for (const d of state.docs) {
     const tab = el("div", "tab");
+    tab.dataset.id = d.id;
     if (d.id === state.activeId) tab.classList.add("active");
     if (isDirty(d)) tab.classList.add("dirty");
     if (hasUnreviewedChanges(d)) tab.classList.add("has-changes");
     tab.appendChild(el("span", "dot"));
     if (hasUnreviewedChanges(d)) tab.appendChild(el("span", "change-dot"));
-    const label = el("span", "label", d.fileName);
-    label.onclick = () => { state = setActive(state, d.id); render(); };
-    tab.appendChild(label);
-    if (!d.existsOnDisk) { const m = el("span", "removed", "(deleted)"); tab.appendChild(m); }
-    const close = el("span", "close", "×");
-    close.onclick = (ev) => { ev.stopPropagation(); closeTab(d.id); };
-    tab.appendChild(close);
+    tab.appendChild(el("span", "label", d.fileName));
+    if (!d.existsOnDisk) tab.appendChild(el("span", "removed", "(deleted)"));
+    tab.appendChild(el("span", "close", "×"));
     bar.appendChild(tab);
   }
+}
+
+// Lightweight update for the typing path: only the dirty dot changes while the
+// user edits, so toggle that class in place instead of tearing down and
+// rebuilding every tab node (which discarded any in-flight click).
+function refreshTabDirty(): void {
+  const bar = document.getElementById("tabs");
+  if (!bar) return;
+  for (const tab of Array.from(bar.children) as HTMLElement[]) {
+    const d = state.docs.find((x) => x.id === tab.dataset.id);
+    if (d) tab.classList.toggle("dirty", isDirty(d));
+  }
+}
+
+// ---- Tab hover preview --------------------------------------------------
+// A single floating card, reused across tabs, that appears on hover: the doc's
+// frontmatter/preamble if it has any, otherwise basic file details.
+
+let tabPreviewEl: HTMLElement | null = null;
+let tabPreviewTimer: number | null = null;
+let tabPreviewFor: string | null = null;
+
+function hideTabPreview(): void {
+  if (tabPreviewTimer) { clearTimeout(tabPreviewTimer); tabPreviewTimer = null; }
+  tabPreviewFor = null;
+  if (tabPreviewEl) tabPreviewEl.classList.remove("visible");
+}
+
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function metaRow(key: string, value: string): HTMLElement {
+  const row = el("div", "tab-preview-row");
+  row.appendChild(el("span", "tab-preview-key", key));
+  row.appendChild(el("span", "tab-preview-value", value));
+  return row;
+}
+
+// The directory a doc lives in, home collapsed to ~ (macOS app). Shown on every
+// preview so same-named files across folders (e.g. many index.md) are tellable
+// apart at a glance.
+function dirLabel(absPath: string): string {
+  const slash = absPath.lastIndexOf("/");
+  const dir = slash > 0 ? absPath.slice(0, slash) : absPath;
+  return dir.replace(/^\/Users\/[^/]+/, "~");
+}
+
+function buildTabPreview(host: HTMLElement, d: Doc): void {
+  host.innerHTML = "";
+  host.appendChild(el("div", "tab-preview-name", d.fileName));
+  host.appendChild(el("div", "tab-preview-path", dirLabel(d.absPath)));
+
+  const { entries } = parseFrontmatter(d.editorContent);
+  if (entries.length) {
+    const meta = el("div", "tab-preview-meta");
+    for (const e of entries) {
+      if (Array.isArray(e.value)) {
+        const row = el("div", "tab-preview-row");
+        row.appendChild(el("span", "tab-preview-key", e.key));
+        const chips = el("span", "tab-preview-chips");
+        for (const v of e.value) chips.appendChild(el("span", "tab-preview-chip", v));
+        row.appendChild(chips);
+        meta.appendChild(row);
+      } else {
+        meta.appendChild(metaRow(e.key, e.value));
+      }
+    }
+    host.appendChild(meta);
+    return;
+  }
+
+  // No preamble — fall back to basic file details, all derivable in-memory.
+  const details = el("div", "tab-preview-meta");
+  details.appendChild(metaRow("lines", String(d.editorContent.split("\n").length)));
+  details.appendChild(metaRow("size", humanSize(new TextEncoder().encode(d.editorContent).length)));
+  const status = [
+    isDirty(d) ? "unsaved" : null,
+    hasUnreviewedChanges(d) ? "unreviewed changes" : null,
+    !d.existsOnDisk ? "deleted on disk" : null,
+  ].filter(Boolean).join(" · ") || "clean";
+  details.appendChild(metaRow("status", status));
+  host.appendChild(details);
+}
+
+function positionTabPreview(host: HTMLElement, tab: HTMLElement): void {
+  const r = tab.getBoundingClientRect();
+  host.classList.add("visible");
+  const maxLeft = window.innerWidth - host.offsetWidth - 8;
+  host.style.left = `${Math.max(8, Math.min(r.left, maxLeft))}px`;
+  host.style.top = `${r.bottom + 6}px`;
+}
+
+function bindTabHover(bar: HTMLElement): void {
+  bar.addEventListener("mouseover", (ev) => {
+    const tab = (ev.target as HTMLElement).closest<HTMLElement>(".tab");
+    const id = tab?.dataset.id;
+    if (!tab || !id || tabPreviewFor === id) return;
+    tabPreviewFor = id;
+    if (tabPreviewTimer) clearTimeout(tabPreviewTimer);
+    tabPreviewTimer = window.setTimeout(() => {
+      const d = state.docs.find((x) => x.id === id);
+      if (!d || !tab.isConnected) return;
+      if (!tabPreviewEl) {
+        tabPreviewEl = el("div", "tab-preview");
+        tabPreviewEl.setAttribute("role", "tooltip");
+        document.body.appendChild(tabPreviewEl);
+      }
+      buildTabPreview(tabPreviewEl, d);
+      positionTabPreview(tabPreviewEl, tab);
+    }, 350);
+  });
+  bar.addEventListener("mouseout", (ev) => {
+    const to = ev.relatedTarget as HTMLElement | null;
+    if (to?.closest?.("#tabs")) return; // moving between spans within the bar
+    hideTabPreview();
+  });
+  bar.addEventListener("scroll", hideTabPreview, true);
+  bar.addEventListener("click", hideTabPreview);
 }
 
 function renderActions(): void {
@@ -258,7 +399,7 @@ function renderContent(): void {
     host.appendChild(cmHost);
     activeEditor = mountEditor(cmHost, doc.editorContent, (v) => {
       state = updateEditorContent(state, doc.id, v);
-      renderTabBar(); // refresh dirty dot without tearing down the editor
+      refreshTabDirty(); // toggle dirty dot in place; don't rebuild tab nodes mid-interaction
     }, currentAppearance() === "dark");
   } else {
     const view = el("div", "rendered");
