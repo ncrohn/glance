@@ -111,6 +111,30 @@ md.core.ruler.push("changed_lines", (state) => {
   }
 });
 
+// Reduce inline markdown source to the plain text the DOM actually shows —
+// `**b**` → `b`, `[t](u)` → `t`, `` `c` `` → `c` — so the annotation layer can
+// match a stored (source-form) quote against the rendered text nodes. Uses the
+// real renderer, so anything markdown-it leaves literal (e.g. `[[wikilinks]]`,
+// which Glance does not process) stays literal, exactly as rendered.
+export function inlineToText(src: string): string {
+  return decodeEntities(md.renderInline(src).replace(/<[^>]*>/g, ""));
+}
+
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0*39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&#x?[0-9a-fA-F]+;/g, (m) => {
+      const hex = /^&#x/i.test(m);
+      const code = parseInt(m.slice(hex ? 3 : 2, -1), hex ? 16 : 10);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : m;
+    })
+    .replace(/&amp;/g, "&");
+}
+
 export function renderMarkdown(src: string, changedLines?: Set<number>): string {
   const { entries, body, lineOffset } = parseFrontmatter(src);
   const card = entries.length ? frontmatterCard(entries) : "";

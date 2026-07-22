@@ -448,6 +448,7 @@ body {
 /* ---- Rendered markdown (the star) ------------------------------------- */
 
 .rendered {
+  position: relative; /* anchor for absolutely-placed gutter annotation markers */
   max-width: 47rem;
   margin: 0 auto;
   padding: 52px 56px 120px;
@@ -1103,40 +1104,35 @@ body {
   background: var(--accent); color: var(--surface); cursor: pointer;
   box-shadow: 0 2px 8px rgba(0,0,0,.25);
 }
-/* Annotated block: color-keyed bar + faint tint, marker(s) in the gutter. */
-.rendered .annotated {
-  position: relative;
-  padding: 0.15em 0 0.15em 1.1em;
-  margin-left: -1.1em;
-  background: color-mix(in srgb, var(--anno-color, var(--accent)) 10%, transparent);
-  border-radius: 4px;
+/* Inline annotation: tint the exact quoted text; box-decoration-break keeps the
+   tint continuous when the quote wraps across lines. The numbered marker sits in
+   the left gutter (absolutely positioned within .rendered), aligned to the mark
+   and fanned into lanes when several land on the same row. */
+.rendered .anno-highlight {
+  background: color-mix(in srgb, var(--anno-color, var(--accent)) 22%, transparent);
+  border-radius: 3px;
+  padding: 0.06em 0.05em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  cursor: default;
+  transition: background 0.12s ease;
 }
-.rendered .annotated::before {
-  content: "";
+.rendered .anno-highlight.anno-emphasis {
+  background: color-mix(in srgb, var(--anno-color, var(--accent)) 40%, transparent);
+}
+.anno-gutter-marker {
   position: absolute;
-  left: 0; top: 0.15em; bottom: 0.15em;
-  width: 3px; border-radius: 99px;
-  background: var(--anno-color, var(--accent));
-  opacity: 0.85;
-}
-.anno-marker-stack {
-  position: absolute;
-  left: -2.1em; top: 0.1em;
-  display: flex; flex-direction: column; gap: 3px;
-}
-.anno-marker {
   width: 18px; height: 18px; border-radius: 50%;
   display: grid; place-items: center;
   font: 600 11px/1 var(--font-mono, system-ui);
   color: #fff;
   background: var(--anno-color, var(--accent));
-  cursor: default; user-select: none;
   box-shadow: 0 1px 3px rgba(0,0,0,.25);
+  cursor: pointer; user-select: none;
+  z-index: 3;
+  transition: transform 0.12s ease;
 }
-.rendered .annotated.anno-emphasis {
-  background: color-mix(in srgb, var(--anno-color, var(--accent)) 20%, transparent);
-}
-.anno-marker.anno-emphasis { transform: scale(1.15); }
+.anno-gutter-marker.anno-emphasis { transform: scale(1.18); }
 
 /* Rail number chip mirrors the marker. */
 .note-chip {
@@ -1227,12 +1223,10 @@ body {
    so content stays put, markers keep their place, and the bar sits clean.
    Applies to change- and annotation-highlighting alike; nested lists aren't
    top-level blocks so they ride inside the one outer highlight. */
-.rendered ul[data-changed], .rendered ol[data-changed],
-.rendered ul.annotated, .rendered ol.annotated {
+.rendered ul[data-changed], .rendered ol[data-changed] {
   padding-left: 2.5em; /* 1.4em list marker indent + 1.1em gutter */
 }
-.rendered ul.contains-task-list[data-changed],
-.rendered ul.contains-task-list.annotated {
+.rendered ul.contains-task-list[data-changed] {
   padding-left: 1.3em; /* 0.2em task-list indent + 1.1em gutter */
 }
 

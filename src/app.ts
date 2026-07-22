@@ -140,7 +140,7 @@ function renderRailFor(): void {
     onScrollTo: (a) => {
       const r = doc.resolutions[a.id];
       if (r?.startLine == null) return;
-      const node = document.querySelector(`[data-annotation-ids~="${a.id}"]`)
+      const node = document.querySelector(`mark.anno-highlight[data-annotation-id="${a.id}"]`)
         ?? document.querySelector(`[data-sourceline="${r.startLine}"]`);
       node?.scrollIntoView({ behavior: "smooth", block: "center" });
       pulseBlock(node);

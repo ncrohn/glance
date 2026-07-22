@@ -1,4 +1,6 @@
 import type { Annotation, Resolution } from "./annotations";
+import { locateQuote } from "./annotation-highlight";
+import { inlineToText } from "./renderer";
 
 export interface Marker {
   number: number;
@@ -134,44 +136,150 @@ export function renderRail(
   section("Resolved", g.resolved, "resolved");
 }
 
-/** Mark rendered blocks whose source span intersects any open annotation's
- *  range; inject colored number markers and stamp data-annotation-ids. */
+/** Highlight the exact quoted text of each open annotation (a tinted <mark>),
+ *  and place a numbered gutter marker in the left margin aligned to it. When the
+ *  quote can't be located in the rendered text (multi-block span, or a formatted
+ *  quote that doesn't match), fall back to a gutter marker only, aligned to the
+ *  block. Purely a render pass over a freshly-rendered view. */
 export function applyHighlights(
   renderedEl: HTMLElement,
   annotations: Annotation[],
   resolutions: Record<string, Resolution>,
   markers: Map<string, Marker>,
 ): void {
-  renderedEl.querySelectorAll<HTMLElement>("[data-sourceline]").forEach((node) => {
-    node.classList.remove("annotated");
-    node.style.removeProperty("--anno-color");
-    node.removeAttribute("data-annotation-ids");
-    node.querySelectorAll(".anno-marker-stack").forEach((m) => m.remove());
+  clearHighlights(renderedEl);
 
-    const start = parseInt(node.dataset.sourceline ?? "0", 10);
-    const end = parseInt(node.dataset.sourcelineEnd ?? node.dataset.sourceline ?? "0", 10);
-    const ids = annotationsForBlock(start, end, annotations, resolutions)
-      .filter((id) => markers.has(id))
-      .sort((a, b) => markers.get(a)!.number - markers.get(b)!.number);
-    if (!ids.length) return;
+  // Order by marker number so gutter stacking is stable top-to-bottom.
+  const ordered = [...markers.keys()].sort(
+    (a, b) => markers.get(a)!.number - markers.get(b)!.number,
+  );
+  const placed: { top: number; lane: number }[] = [];
 
-    node.classList.add("annotated");
-    node.dataset.annotationIds = ids.join(" ");
-    node.style.setProperty("--anno-color", markers.get(ids[0])!.color);
+  for (const id of ordered) {
+    const a = annotations.find((x) => x.id === id);
+    const r = resolutions[id];
+    if (!a || !r || r.startLine == null) continue;
+    const marker = markers.get(id)!;
 
-    const stack = document.createElement("span");
-    stack.className = "anno-marker-stack";
-    for (const id of ids) {
-      const mk = markers.get(id)!;
-      const chip = document.createElement("span");
-      chip.className = "anno-marker";
-      chip.textContent = String(mk.number);
-      chip.style.setProperty("--anno-color", mk.color);
-      chip.dataset.annotationId = id;
-      stack.appendChild(chip);
-    }
-    node.appendChild(stack);
+    const block = blockAtLine(renderedEl, r.startLine);
+    if (!block) continue;
+
+    const marks = highlightQuoteIn(block, a, marker.color);
+    placeGutterMarker(renderedEl, marks[0] ?? block, marker, id, placed);
+  }
+}
+
+// Undo a previous pass (defensive — the view is normally re-rendered fresh).
+function clearHighlights(renderedEl: HTMLElement): void {
+  renderedEl.querySelectorAll("mark.anno-highlight").forEach((m) => {
+    m.replaceWith(document.createTextNode(m.textContent ?? ""));
   });
+  renderedEl.normalize();
+  renderedEl.querySelectorAll(".anno-gutter-marker").forEach((m) => m.remove());
+}
+
+// The innermost [data-sourceline] block whose source range covers `line`.
+function blockAtLine(renderedEl: HTMLElement, line: number): HTMLElement | null {
+  let best: HTMLElement | null = null;
+  let bestSpan = Infinity;
+  renderedEl.querySelectorAll<HTMLElement>("[data-sourceline]").forEach((el) => {
+    const s = parseInt(el.dataset.sourceline ?? "0", 10);
+    const e = parseInt(el.dataset.sourcelineEnd ?? el.dataset.sourceline ?? "0", 10);
+    if (s <= line && line <= e && e - s < bestSpan) {
+      best = el;
+      bestSpan = e - s;
+    }
+  });
+  return best;
+}
+
+// Wrap the annotation's quote text inside `block` in <mark> spans. Returns the
+// created marks (empty when the quote couldn't be located).
+function highlightQuoteIn(
+  block: HTMLElement,
+  a: Annotation,
+  color: string,
+): HTMLElement[] {
+  const nodes = textNodesIn(block);
+  const text = nodes.map((n) => n.data).join("");
+  const range = locateQuote(
+    text,
+    inlineToText(a.quote),
+    inlineToText(a.prefix),
+    inlineToText(a.suffix),
+  );
+  if (!range || range.end <= range.start) return [];
+  return wrapTextRange(nodes, range.start, range.end, a.id, color);
+}
+
+function textNodesIn(root: Node): Text[] {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const out: Text[] = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) out.push(n as Text);
+  return out;
+}
+
+// Wrap [qs, qe) — offsets into the concatenation of `nodes` — in per-text-node
+// <mark> spans (a selection can cross inline elements like <strong>, so we can't
+// surroundContents the whole range).
+function wrapTextRange(
+  nodes: Text[],
+  qs: number,
+  qe: number,
+  id: string,
+  color: string,
+): HTMLElement[] {
+  const targets: { node: Text; s: number; e: number }[] = [];
+  let pos = 0;
+  for (const node of nodes) {
+    const len = node.data.length;
+    if (pos + len > qs && pos < qe) {
+      targets.push({ node, s: Math.max(qs, pos) - pos, e: Math.min(qe, pos + len) - pos });
+    }
+    pos += len;
+  }
+  const marks: HTMLElement[] = [];
+  for (const { node, s, e } of targets) {
+    let mid = node;
+    if (e < mid.data.length) mid.splitText(e); // trim tail first so `s` stays valid
+    if (s > 0) mid = mid.splitText(s);
+    const mark = document.createElement("mark");
+    mark.className = "anno-highlight";
+    mark.dataset.annotationId = id;
+    mark.style.setProperty("--anno-color", color);
+    mid.parentNode!.insertBefore(mark, mid);
+    mark.appendChild(mid);
+    marks.push(mark);
+  }
+  return marks;
+}
+
+const GUTTER_LANE_X = 14; // px from the rendered view's left edge (inside padding)
+const GUTTER_LANE_STEP = 20;
+
+// Place a numbered marker in the left gutter, vertically aligned to `anchorEl`.
+// Markers landing on the same row fan out into adjacent lanes so they don't
+// overlap — the key to tracking multiple annotations near each other.
+function placeGutterMarker(
+  renderedEl: HTMLElement,
+  anchorEl: HTMLElement,
+  marker: Marker,
+  id: string,
+  placed: { top: number; lane: number }[],
+): void {
+  const top = anchorEl.getBoundingClientRect().top - renderedEl.getBoundingClientRect().top;
+  let lane = 0;
+  for (const p of placed) {
+    if (Math.abs(p.top - top) < 16) lane = Math.max(lane, p.lane + 1);
+  }
+  placed.push({ top, lane });
+
+  const chip = el("span", "anno-gutter-marker", String(marker.number));
+  chip.dataset.annotationId = id;
+  chip.style.setProperty("--anno-color", marker.color);
+  chip.style.top = `${top}px`;
+  chip.style.left = `${GUTTER_LANE_X + lane * GUTTER_LANE_STEP}px`;
+  renderedEl.appendChild(chip);
 }
 
 /** Show a floating "Comment" button when the user selects text in the view. */
@@ -220,7 +328,7 @@ export function mountSelectionToolbar(
 /** Bidirectional hover emphasis between rendered blocks/markers and rail cards. */
 export function linkAnnotationHovers(renderedEl: HTMLElement, railEl: HTMLElement): () => void {
   const setEmphasis = (id: string, on: boolean) => {
-    const sel = `[data-annotation-ids~="${id}"], .anno-marker[data-annotation-id="${id}"], .note-card[data-annotation-id="${id}"]`;
+    const sel = `mark.anno-highlight[data-annotation-id="${id}"], .anno-gutter-marker[data-annotation-id="${id}"], .note-card[data-annotation-id="${id}"]`;
     renderedEl.querySelectorAll(sel).forEach((n) => (n as HTMLElement).classList.toggle("anno-emphasis", on));
     railEl.querySelectorAll(sel).forEach((n) => (n as HTMLElement).classList.toggle("anno-emphasis", on));
   };
@@ -230,7 +338,7 @@ export function linkAnnotationHovers(renderedEl: HTMLElement, railEl: HTMLElemen
     return [];
   };
   const toggle = (on: boolean) => (e: Event) => {
-    const t = (e.target as HTMLElement).closest("[data-annotation-id],[data-annotation-ids]") as HTMLElement | null;
+    const t = (e.target as HTMLElement).closest("[data-annotation-id]") as HTMLElement | null;
     if (t) idsFrom(t).forEach((id) => setEmphasis(id, on));
   };
   const over = toggle(true);
