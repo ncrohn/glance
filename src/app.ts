@@ -15,7 +15,7 @@ import {
   readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs,
   readAnnotations, addStoredAnnotation, removeStoredAnnotation, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
-  onShowAbout, onShowTheme, onCloseActiveTab, onMenuSave, appVersion,
+  onShowAbout, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
   readReviewed, writeReviewed,
 } from "./ipc";
 import { addAnnotation, removeAnnotation, genId, type Annotation } from "./annotations";
@@ -49,7 +49,7 @@ function saveSession(): void {
 }
 
 let state: State = emptyState();
-let activeEditor: { destroy(): void } | null = null;
+let activeEditor: { destroy(): void; selectAll(): void } | null = null;
 let teardownToolbar: (() => void) | null = null;
 let teardownHovers: (() => void) | null = null;
 
@@ -430,6 +430,33 @@ export function render(): void {
   saveSession();
 }
 
+// Cmd+A, routed from the native Edit menu (lib.rs) so we can do a real
+// full-document select-all. In source mode the native selectAll: would grab only
+// CodeMirror's visible (virtualized) lines, so we run CodeMirror's own command;
+// in read mode we select the whole rendered view.
+function selectAllContent(): void {
+  // A focused text field (comment composer, rename/theme modal input) owns Cmd+A
+  // — select its own text, not the document behind it. CodeMirror's editable is a
+  // contenteditable div, not an input/textarea, so it correctly falls through.
+  const active = document.activeElement;
+  if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+    active.select();
+    return;
+  }
+  const doc = getActive(state);
+  if (doc?.viewMode === "source" && activeEditor) {
+    activeEditor.selectAll();
+    return;
+  }
+  const view = document.querySelector<HTMLElement>(".rendered");
+  const sel = window.getSelection();
+  if (!view || !sel) return;
+  const range = document.createRange();
+  range.selectNodeContents(view);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
 function closeTab(id: string): void {
   const doc = state.docs.find((d) => d.id === id);
   if (doc) {
@@ -522,6 +549,7 @@ export async function start(): Promise<void> {
   });
   await onCloseActiveTab(() => { const d = getActive(state); if (d) closeTab(d.id); });
   await onMenuSave(() => saveActive());
+  await onSelectAll(() => selectAllContent());
   await onAnnotationsChanged((docPath) => { void loadAnnotations(docPath); });
   await onFileChanged(async (e) => {
     const doc = state.docs.find((d) => d.absPath === e.path);

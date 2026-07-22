@@ -110,6 +110,9 @@ pub fn run() {
                 "save_file" => {
                     let _ = app.emit("menu-save", ());
                 }
+                "select_all" => {
+                    let _ = app.emit("menu-select-all", ());
+                }
                 "setup_integration" => {
                     let _ = app.emit("show-integration-picker", "setup");
                 }
@@ -203,6 +206,19 @@ pub fn run() {
                     &save_item,
                 ],
             )?;
+            // Select All is a custom item (not the predefined one) so Cmd+A is
+            // routed to the frontend. The native selectAll: acts on the focused
+            // view's DOM, which for the source-mode editor (CodeMirror) is only
+            // the virtualized/visible lines — so it would select just what's on
+            // screen. The frontend handler instead runs CodeMirror's full-document
+            // select-all, and selects the whole rendered view in read mode.
+            let select_all_item = MenuItem::with_id(
+                handle,
+                "select_all",
+                "Select All",
+                true,
+                Some("CmdOrCtrl+A"),
+            )?;
             let edit_menu = Submenu::with_items(
                 handle,
                 "Edit",
@@ -214,7 +230,7 @@ pub fn run() {
                     &PredefinedMenuItem::cut(handle, None)?,
                     &PredefinedMenuItem::copy(handle, None)?,
                     &PredefinedMenuItem::paste(handle, None)?,
-                    &PredefinedMenuItem::select_all(handle, None)?,
+                    &select_all_item,
                 ],
             )?;
             let theme_item = MenuItem::with_id(
