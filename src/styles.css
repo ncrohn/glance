@@ -646,6 +646,13 @@ body {
 }
 /* On mermaid diagrams the zoom button sits left of the expand button. */
 .rendered .block-zoom-btn { right: 39px; }
+/* On code blocks the copy button sits left of the expand button. */
+.rendered .block-copy-btn { right: 39px; }
+.rendered .block-copy-btn.copied {
+  opacity: 1;
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
 
 /* Full-window mermaid pan/zoom viewer (mermaid-zoom.ts). */
 .mermaid-zoom-overlay {
@@ -1090,7 +1097,7 @@ body {
 #workspace { display: flex; flex: 1; min-height: 0; }
 
 .comment-fab {
-  position: absolute; z-index: 50;
+  position: fixed; z-index: 50;
   font: 600 12px/1 var(--font-mono, system-ui);
   padding: 6px 10px; border-radius: 6px; border: none;
   background: var(--accent); color: var(--surface); cursor: pointer;
@@ -1211,6 +1218,22 @@ body {
   border-radius: 99px;
   background: var(--accent);
   opacity: 0.85;
+}
+
+/* Lists carry their own left padding for the bullet/number markers. The
+   highlight rules above set `padding-left: 1.1em` (the gutter), which clobbers
+   that marker indent and drags the markers onto the accent bar. When a whole
+   list is the highlighted block, re-add the marker indent ON TOP of the gutter
+   so content stays put, markers keep their place, and the bar sits clean.
+   Applies to change- and annotation-highlighting alike; nested lists aren't
+   top-level blocks so they ride inside the one outer highlight. */
+.rendered ul[data-changed], .rendered ol[data-changed],
+.rendered ul.annotated, .rendered ol.annotated {
+  padding-left: 2.5em; /* 1.4em list marker indent + 1.1em gutter */
+}
+.rendered ul.contains-task-list[data-changed],
+.rendered ul.contains-task-list.annotated {
+  padding-left: 1.3em; /* 0.2em task-list indent + 1.1em gutter */
 }
 
 /* Tab badge: a doc changed on disk since it was last reviewed. */

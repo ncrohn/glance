@@ -185,19 +185,36 @@ export function mountSelectionToolbar(
   btn.onmousedown = (e) => { e.preventDefault(); }; // keep selection alive
   btn.onclick = () => { btn.style.display = "none"; onComment(); };
 
-  const onUp = () => {
+  // The rendered view scrolls inside #content, not the window, so the button
+  // (position: fixed) is placed in viewport coordinates and re-placed on scroll
+  // so it tracks the selected text instead of sticking to the window. Hidden
+  // when the selection is gone or has scrolled out of the scroller's viewport.
+  const scroller = renderedEl.closest<HTMLElement>("#content");
+  const place = () => {
     const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || !renderedEl.contains(sel.anchorNode)) {
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0 || !renderedEl.contains(sel.anchorNode)) {
       btn.style.display = "none";
       return;
     }
     const rect = sel.getRangeAt(0).getBoundingClientRect();
+    const clip = scroller?.getBoundingClientRect();
+    if (clip && (rect.bottom < clip.top || rect.top > clip.bottom)) {
+      btn.style.display = "none";
+      return;
+    }
     btn.style.display = "block";
-    btn.style.top = `${window.scrollY + rect.top - 36}px`;
-    btn.style.left = `${window.scrollX + rect.left}px`;
+    btn.style.top = `${rect.top - 36}px`;
+    btn.style.left = `${rect.left}px`;
   };
-  document.addEventListener("mouseup", onUp);
-  return () => { document.removeEventListener("mouseup", onUp); btn.remove(); };
+  document.addEventListener("mouseup", place);
+  scroller?.addEventListener("scroll", place, { passive: true });
+  window.addEventListener("resize", place);
+  return () => {
+    document.removeEventListener("mouseup", place);
+    scroller?.removeEventListener("scroll", place);
+    window.removeEventListener("resize", place);
+    btn.remove();
+  };
 }
 
 /** Bidirectional hover emphasis between rendered blocks/markers and rail cards. */

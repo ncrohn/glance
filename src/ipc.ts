@@ -140,6 +140,9 @@ export function onCloseActiveTab(cb: () => void): Promise<UnlistenFn> {
 export function onMenuSave(cb: () => void): Promise<UnlistenFn> {
   return listen("menu-save", () => cb());
 }
+export function onSelectAll(cb: () => void): Promise<UnlistenFn> {
+  return listen("menu-select-all", () => cb());
+}
 
 export function readReviewed(path: string): Promise<string | null> {
   return invoke<string | null>("read_reviewed", { path });

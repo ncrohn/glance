@@ -1,6 +1,6 @@
 import { EditorView, keymap } from "@codemirror/view";
 import { EditorState } from "@codemirror/state";
-import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, selectAll } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
@@ -45,7 +45,7 @@ export function mountEditor(
   initial: string,
   onChange: (v: string) => void,
   dark = false,
-): { destroy(): void } {
+): { destroy(): void; selectAll(): void } {
   const view = new EditorView({
     parent: host,
     state: EditorState.create({
@@ -64,5 +64,11 @@ export function mountEditor(
       ],
     }),
   });
-  return { destroy: () => view.destroy() };
+  return {
+    destroy: () => view.destroy(),
+    // Full-document select-all: CodeMirror knows the whole doc even though only
+    // the visible lines are in the DOM, so this beats the webview's native
+    // selectAll: (which would grab only the rendered lines).
+    selectAll: () => { view.focus(); selectAll(view); },
+  };
 }
