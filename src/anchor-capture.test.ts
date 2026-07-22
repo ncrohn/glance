@@ -45,6 +45,44 @@ describe("locateInSource", () => {
     expect(span!.start).toBe(7);
   });
 
+  it("anchors a selection that crosses a bold boundary", () => {
+    // The reported bug: rendered "core = NestJS" vs source "core = **NestJS".
+    const src = "their core = **NestJS + Postgres** on GCP.";
+    const span = locateInSource(src, "core = NestJS + Postgres on")!;
+    expect(span).not.toBeNull();
+    const got = src.slice(span.start, span.end);
+    expect(got.startsWith("core = ")).toBe(true);
+    expect(got.endsWith(" on")).toBe(true);
+    expect(got).toContain("**NestJS + Postgres**");
+  });
+
+  it("anchors a selection ending mid-word inside emphasis", () => {
+    const src = "their core = **NestJS** on GCP.";
+    const span = locateInSource(src, "core = NestJ")!; // partial word, like the bug report
+    expect(src.slice(span.start, span.end)).toBe("core = **NestJ");
+  });
+
+  it("anchors a selection crossing a code span", () => {
+    const src = "run `node grade.mjs` to score.";
+    const span = locateInSource(src, "run node grade.mjs to")!;
+    const got = src.slice(span.start, span.end);
+    expect(got).toContain("`node grade.mjs`");
+    expect(got.endsWith(" to")).toBe(true);
+  });
+
+  it("anchors a selection crossing a link", () => {
+    const src = "see [the post](https://x.com) for more.";
+    const span = locateInSource(src, "see the post for")!;
+    const got = src.slice(span.start, span.end);
+    expect(got).toContain("[the post](https://x.com)");
+  });
+
+  it("keeps wikilinks literal (matched as-is)", () => {
+    const src = "ref [[2026-note]] here today.";
+    const span = locateInSource(src, "[[2026-note]] here")!;
+    expect(src.slice(span.start, span.end)).toBe("[[2026-note]] here");
+  });
+
   it("returns null when the text isn't present", () => {
     expect(locateInSource("hello world", "nothing here")).toBeNull();
   });

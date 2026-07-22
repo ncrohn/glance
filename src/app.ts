@@ -109,7 +109,7 @@ function startComment(absPath: string): void {
     ? sel.getRangeAt(0).getBoundingClientRect()
     : ({ top: 120, bottom: 140, left: 120 } as DOMRect);
   showCommentComposer({
-    quote: cap.quote,
+    quote: cap.displayQuote,
     anchor: { top: rect.top, bottom: rect.bottom, left: rect.left },
     onSubmit: (note) => {
       const annotation: Annotation = {
