@@ -1,6 +1,6 @@
 [package]
 name = "glance"
-version = "0.7.0"
+version = "0.7.1"
 description = "Glance markdown companion"
 edition = "2021"
 # Two bins (glance GUI + glance-mcp). `cargo run` / `tauri dev` need to know
