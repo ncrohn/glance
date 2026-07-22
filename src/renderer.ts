@@ -45,7 +45,12 @@ md.renderer.rules.table_close = (tokens, idx, options, _env, self) =>
 md.core.ruler.push("source_lines", (state) => {
   const offset = (state.env?.lineOffset as number | undefined) ?? 0;
   for (const token of state.tokens) {
-    if (token.level === 0 && token.map && token.type.endsWith("_open")) {
+    // Top-level blocks, plus list items — the latter are nested (level > 0) but
+    // carry their own source range, so stamping them lets a selection inside a
+    // list anchor to the item, not the whole <ul> (annotation capture fallback +
+    // per-block highlighting both resolve to the nearest data-sourceline).
+    const stampable = token.level === 0 || token.type === "list_item_open";
+    if (stampable && token.map && token.type.endsWith("_open")) {
       token.attrSet("data-sourceline", String(token.map[0] + 1 + offset));
       token.attrSet("data-sourceline-end", String(token.map[1] + offset));
     }
@@ -110,30 +115,6 @@ md.core.ruler.push("changed_lines", (state) => {
     }
   }
 });
-
-// Reduce inline markdown source to the plain text the DOM actually shows —
-// `**b**` → `b`, `[t](u)` → `t`, `` `c` `` → `c` — so the annotation layer can
-// match a stored (source-form) quote against the rendered text nodes. Uses the
-// real renderer, so anything markdown-it leaves literal (e.g. `[[wikilinks]]`,
-// which Glance does not process) stays literal, exactly as rendered.
-export function inlineToText(src: string): string {
-  return decodeEntities(md.renderInline(src).replace(/<[^>]*>/g, ""));
-}
-
-function decodeEntities(s: string): string {
-  return s
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#0*39;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&#x?[0-9a-fA-F]+;/g, (m) => {
-      const hex = /^&#x/i.test(m);
-      const code = parseInt(m.slice(hex ? 3 : 2, -1), hex ? 16 : 10);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : m;
-    })
-    .replace(/&amp;/g, "&");
-}
 
 export function renderMarkdown(src: string, changedLines?: Set<number>): string {
   const { entries, body, lineOffset } = parseFrontmatter(src);

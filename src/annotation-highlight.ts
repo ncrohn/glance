@@ -4,8 +4,8 @@
 // whitespace differences (collapsed runs, source hard-wraps) and disambiguated
 // by prefix/suffix when the quote repeats. Returns offsets into `text`, or null.
 // The caller converts the stored source anchor to visible text (via
-// renderer.inlineToText) before calling this, and maps the returned offsets back
-// to DOM text nodes.
+// markdown-visible.toVisible) before calling this, and maps the returned offsets
+// back to DOM text nodes.
 
 export interface TextRange {
   start: number;

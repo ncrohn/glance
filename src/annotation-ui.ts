@@ -1,6 +1,6 @@
 import type { Annotation, Resolution } from "./annotations";
 import { locateQuote } from "./annotation-highlight";
-import { inlineToText } from "./renderer";
+import { toVisible } from "./markdown-visible";
 
 export interface Marker {
   number: number;
@@ -204,9 +204,9 @@ function highlightQuoteIn(
   const text = nodes.map((n) => n.data).join("");
   const range = locateQuote(
     text,
-    inlineToText(a.quote),
-    inlineToText(a.prefix),
-    inlineToText(a.suffix),
+    toVisible(a.quote),
+    toVisible(a.prefix),
+    toVisible(a.suffix),
   );
   if (!range || range.end <= range.start) return [];
   return wrapTextRange(nodes, range.start, range.end, a.id, color);

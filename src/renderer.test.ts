@@ -1,22 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { renderMarkdown, inlineToText } from "./renderer";
-
-describe("inlineToText", () => {
-  it("reduces inline markdown to the visible text the DOM shows", () => {
-    expect(inlineToText("**billed** through")).toBe("billed through");
-    expect(inlineToText("see `code` here")).toBe("see code here");
-    expect(inlineToText("~~gone~~ now")).toBe("gone now");
-    expect(inlineToText("[the post](https://x.com)")).toBe("the post");
-  });
-
-  it("keeps wikilinks literal (Glance does not process them)", () => {
-    expect(inlineToText("ref [[2026-note]] here")).toBe("ref [[2026-note]] here");
-  });
-
-  it("decodes HTML entities so the text matches the rendered characters", () => {
-    expect(inlineToText("AT&T <tag>")).toBe("AT&T <tag>");
-  });
-});
+import { renderMarkdown } from "./renderer";
 
 describe("renderMarkdown", () => {
   it("renders headings", () => {

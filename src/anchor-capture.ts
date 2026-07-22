@@ -1,8 +1,10 @@
 import { buildAnchor } from "./build-anchor";
+import { buildVisible } from "./markdown-visible";
 import type { LineHint } from "./annotations";
 
 export interface CapturedSelection {
-  quote: string;
+  quote: string; // source slice — what the Rust resolver re-finds
+  displayQuote: string; // the exact rendered selection — what the composer shows
   prefix: string;
   suffix: string;
   lineHint: LineHint;
@@ -61,7 +63,13 @@ export function captureSelection(sourceText: string): CapturedSelection | null {
   const endLine = startLine + (sourceQuote.split("\n").length - 1);
 
   const { prefix, suffix } = buildAnchor(sourceText, start, end);
-  return { quote: sourceQuote, prefix, suffix, lineHint: { start: startLine, end: endLine } };
+  return {
+    quote: sourceQuote,
+    displayQuote: quote,
+    prefix,
+    suffix,
+    lineHint: { start: startLine, end: endLine },
+  };
 }
 
 /**
@@ -79,14 +87,41 @@ export function locateInSource(
   const exact = indexFrom(sourceText, quote, fromOffset);
   if (exact !== -1) return { start: exact, end: exact + quote.length };
 
+  // Whitespace-normalized: handles hard-wrapped source, list markers.
   const nm = buildNorm(sourceText);
   const segs = quote.split("\n").map((s) => s.trim()).filter(Boolean);
-  if (segs.length === 0) return null;
-  const first = findNorm(nm, segs[0], fromOffset);
-  if (!first) return null;
-  if (segs.length === 1) return { start: first.start, end: first.end };
-  const last = findNorm(nm, segs[segs.length - 1], first.end);
-  return { start: first.start, end: last ? last.end : first.end };
+  if (segs.length > 0) {
+    const first = findNorm(nm, segs[0], fromOffset);
+    if (first) {
+      if (segs.length === 1) return { start: first.start, end: first.end };
+      const last = findNorm(nm, segs[segs.length - 1], first.end);
+      return { start: first.start, end: last ? last.end : first.end };
+    }
+  }
+
+  // Markdown-tolerant: the rendered selection strips inline markup the source
+  // still has (**bold**, `code`, [links]), so a selection that crosses such a
+  // boundary matches neither pass above. Match against a "visible view" of the
+  // source — inline markup removed, whitespace collapsed — that carries an
+  // offset map back to real source positions, then map the hit back so the
+  // stored quote is a tight source slice the resolver can re-find.
+  return locateInVisible(sourceText, quote, fromOffset);
+}
+
+function locateInVisible(
+  source: string,
+  quote: string,
+  fromOffset: number,
+): { start: number; end: number } | null {
+  const { visible, map } = buildVisible(source);
+  const q = quote.replace(/\s+/g, " ").trim();
+  if (!q) return null;
+  let fromVis = 0;
+  while (fromVis < map.length && map[fromVis] < fromOffset) fromVis++;
+  let i = visible.indexOf(q, fromVis);
+  if (i === -1) i = visible.indexOf(q);
+  if (i === -1) return null;
+  return { start: map[i], end: map[i + q.length] };
 }
 
 // Nearest ancestor element that carries a source line range.
