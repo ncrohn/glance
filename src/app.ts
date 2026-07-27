@@ -3,7 +3,7 @@ import {
   State, emptyState, openDoc, closeDoc, setActive, getActive,
   toggleViewMode, updateEditorContent, markSaved, applyDiskChange, markRemoved,
   setDocAnnotations, setDocResolutions,
-  markReviewed, setReviewedBaseline,
+  markReviewed, setReviewedBaseline, canRevealActive,
 } from "./store";
 import { isDirty, basename, changedLines, hasUnreviewedChanges, type Doc } from "./document";
 import { parseFrontmatter } from "./frontmatter";
@@ -16,6 +16,7 @@ import {
   readAnnotations, addStoredAnnotation, removeStoredAnnotation, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
   onShowAbout, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
+  onShowInFinder, revealInFinder, setShowInFinderEnabled,
   readReviewed, writeReviewed,
 } from "./ipc";
 import { addAnnotation, removeAnnotation, genId, type Annotation } from "./annotations";
@@ -414,6 +415,19 @@ function renderContent(): void {
   }
 }
 
+// Mirrors the native menu item's initial `false` in lib.rs, so a first render
+// with no docs open doesn't need an IPC round trip to say what's already true.
+let showInFinderEnabled = false;
+
+// render() runs on every state change, so only cross the IPC boundary when the
+// answer actually flips.
+function syncShowInFinderMenu(): void {
+  const enabled = canRevealActive(state);
+  if (enabled === showInFinderEnabled) return;
+  showInFinderEnabled = enabled;
+  void setShowInFinderEnabled(enabled);
+}
+
 export function render(): void {
   // The mermaid zoom overlay lives on document.body, outside the rendered view,
   // so it would otherwise survive a tab switch / re-render on top of the new
@@ -423,6 +437,7 @@ export function render(): void {
   renderActions();
   renderContent();
   renderRailFor();
+  syncShowInFinderMenu();
   if (teardownHovers) { teardownHovers(); teardownHovers = null; }
   const renderedView = document.querySelector<HTMLElement>(".rendered");
   const railEl = document.getElementById("rail");
@@ -550,6 +565,14 @@ export async function start(): Promise<void> {
   await onCloseActiveTab(() => { const d = getActive(state); if (d) closeTab(d.id); });
   await onMenuSave(() => saveActive());
   await onSelectAll(() => selectAllContent());
+  await onShowInFinder(() => {
+    // The menu item is greyed out unless canRevealActive(state), so these guards
+    // only fire if the file vanishes between the last render and the click.
+    const d = getActive(state);
+    if (!d) return;
+    if (!d.existsOnDisk) { showNotice(`${d.fileName} no longer exists on disk.`, false); return; }
+    void revealInFinder(d.absPath).catch(() => showNotice(`Couldn't show ${d.absPath} in Finder.`, false));
+  });
   await onAnnotationsChanged((docPath) => { void loadAnnotations(docPath); });
   await onFileChanged(async (e) => {
     const doc = state.docs.find((d) => d.absPath === e.path);

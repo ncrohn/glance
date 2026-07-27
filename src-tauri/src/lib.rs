@@ -22,6 +22,19 @@ struct LaunchArgs(std::sync::Mutex<Vec<String>>);
 #[derive(Default)]
 struct FrontendReady(AtomicBool);
 
+/// Handle to File → Show in Finder, so the frontend can grey it out when there's
+/// no revealable document (HIG: disable, don't silently no-op). Only the
+/// frontend knows which tab is active, hence the round trip.
+struct ShowInFinderItem(MenuItem<tauri::Wry>);
+
+#[tauri::command]
+fn set_show_in_finder_enabled(
+    item: tauri::State<ShowInFinderItem>,
+    enabled: bool,
+) -> Result<(), String> {
+    item.0.set_enabled(enabled).map_err(|e| e.to_string())
+}
+
 fn emit_open_files(app: &tauri::AppHandle, argv: &[String], cwd: &Path) {
     for raw in cli::md_paths_from_argv(argv) {
         let abs = cli::to_abs(&raw, cwd);
@@ -69,6 +82,7 @@ pub fn run() {
             reviewed::write_reviewed,
             setup::list_integration_targets,
             setup::run_integration,
+            set_show_in_finder_enabled,
             take_launch_args,
         ])
         .on_menu_event(|app, event| {
@@ -109,6 +123,11 @@ pub fn run() {
                 }
                 "save_file" => {
                     let _ = app.emit("menu-save", ());
+                }
+                "show_in_finder" => {
+                    // The frontend owns which tab is active, so it answers back
+                    // with the path via `reveal_in_finder`.
+                    let _ = app.emit("show-in-finder", ());
                 }
                 "select_all" => {
                     let _ = app.emit("menu-select-all", ());
@@ -194,6 +213,16 @@ pub fn run() {
                 true,
                 Some("CmdOrCtrl+W"),
             )?;
+            // Starts disabled: at launch no tab is open yet. The frontend's
+            // render() enables it as soon as there's a doc on disk to reveal.
+            let show_in_finder_item = MenuItem::with_id(
+                handle,
+                "show_in_finder",
+                "Show in Finder",
+                false,
+                Some("CmdOrCtrl+Alt+R"),
+            )?;
+            app.manage(ShowInFinderItem(show_in_finder_item.clone()));
             let file_menu = Submenu::with_items(
                 handle,
                 "File",
@@ -201,6 +230,9 @@ pub fn run() {
                 &[
                     &new_item,
                     &open_item,
+                    // Grouped with Open — it's a "where does this document live"
+                    // command, and the menu's tail is conventionally Print's.
+                    &show_in_finder_item,
                     &PredefinedMenuItem::separator(handle)?,
                     &close_tab_item,
                     &save_item,
