@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { Annotation, AnnotationStore, Resolution } from "./annotations";
 
@@ -11,6 +11,17 @@ export function appVersion(): Promise<string> {
 // Open a URL in the user's default browser (never in the app webview).
 export function openExternal(url: string): Promise<void> {
   return openUrl(url);
+}
+
+// Grey out / re-enable File → Show in Finder. Only the frontend knows whether
+// the active tab has a file to reveal, so it pushes the state to the native menu.
+export function setShowInFinderEnabled(enabled: boolean): Promise<void> {
+  return invoke<void>("set_show_in_finder_enabled", { enabled });
+}
+
+// Reveal a file in Finder (opens its folder with the file selected).
+export function revealInFinder(path: string): Promise<void> {
+  return revealItemInDir(path);
 }
 
 export function readFile(path: string): Promise<string> {
@@ -142,6 +153,9 @@ export function onMenuSave(cb: () => void): Promise<UnlistenFn> {
 }
 export function onSelectAll(cb: () => void): Promise<UnlistenFn> {
   return listen("menu-select-all", () => cb());
+}
+export function onShowInFinder(cb: () => void): Promise<UnlistenFn> {
+  return listen("show-in-finder", () => cb());
 }
 
 export function readReviewed(path: string): Promise<string | null> {

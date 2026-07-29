@@ -14,6 +14,13 @@ export function getActive(s: State): Doc | null {
   return s.docs.find((d) => d.id === s.activeId) ?? null;
 }
 
+// Whether "Show in Finder" has anything to reveal: a focused tab whose file
+// still exists. Drives the menu item's enabled state.
+export function canRevealActive(s: State): boolean {
+  const d = getActive(s);
+  return d !== null && d.existsOnDisk;
+}
+
 function mapDoc(s: State, id: string, fn: (d: Doc) => Doc): State {
   return { ...s, docs: s.docs.map((d) => (d.id === id ? fn(d) : d)) };
 }

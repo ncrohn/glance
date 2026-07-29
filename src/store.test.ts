@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   emptyState, openDoc, closeDoc, setActive, updateEditorContent,
-  toggleViewMode, markSaved, applyDiskChange, markRemoved, getActive,
+  toggleViewMode, markSaved, applyDiskChange, markRemoved, getActive, canRevealActive,
   markReviewed, setReviewedBaseline,
 } from "./store";
 import { isDirty } from "./document";
@@ -88,6 +88,21 @@ describe("store", () => {
     const b = s.docs.find((d) => d.absPath === "/b.md")!;
     expect(a.existsOnDisk).toBe(false);
     expect(b.existsOnDisk).toBe(true);
+  });
+
+  it("canRevealActive is false with no docs, true for a doc on disk", () => {
+    expect(canRevealActive(emptyState())).toBe(false);
+    const s = openDoc(emptyState(), "/a.md", "A");
+    expect(canRevealActive(s)).toBe(true);
+  });
+
+  it("canRevealActive is false once the active doc is gone from disk", () => {
+    let s = openDoc(emptyState(), "/a.md", "A");
+    s = openDoc(s, "/b.md", "B");
+    s = markRemoved(s, "/b.md"); // /b.md is active
+    expect(canRevealActive(s)).toBe(false);
+    s = setActive(s, "/a.md");
+    expect(canRevealActive(s)).toBe(true);
   });
 });
 
