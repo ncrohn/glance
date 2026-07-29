@@ -415,17 +415,21 @@ function renderContent(): void {
   }
 }
 
-// Mirrors the native menu item's initial `false` in lib.rs, so a first render
-// with no docs open doesn't need an IPC round trip to say what's already true.
-let showInFinderEnabled = false;
+// What we last told the native menu. `null` until the first render: the item is
+// created disabled in lib.rs, but a webview reload resets this module while the
+// native MenuItem keeps whatever it was last set to, so the first sync always
+// crosses the boundary rather than assuming.
+let showInFinderEnabled: boolean | null = null;
 
 // render() runs on every state change, so only cross the IPC boundary when the
 // answer actually flips.
 function syncShowInFinderMenu(): void {
   const enabled = canRevealActive(state);
   if (enabled === showInFinderEnabled) return;
+  // Record optimistically so a burst of renders sends one invoke, but clear it
+  // on failure so the next render retries instead of leaving the menu stale.
   showInFinderEnabled = enabled;
-  void setShowInFinderEnabled(enabled);
+  void setShowInFinderEnabled(enabled).catch(() => { showInFinderEnabled = null; });
 }
 
 export function render(): void {
