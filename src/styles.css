@@ -1158,6 +1158,7 @@ body {
   background: var(--accent); color: var(--surface); cursor: pointer;
   box-shadow: 0 2px 8px rgba(0,0,0,.25);
 }
+.comment-fab kbd { margin-left: 6px; opacity: .7; font: inherit; }
 /* Inline annotation: tint the exact quoted text; box-decoration-break keeps the
    tint continuous when the quote wraps across lines. The numbered marker sits in
    the left gutter (absolutely positioned within .rendered), aligned to the mark

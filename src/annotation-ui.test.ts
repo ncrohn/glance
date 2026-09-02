@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { groupAnnotations, assignMarkers, annotationsForBlock, cardModel, parseRailPref, MARKER_PALETTE } from "./annotation-ui";
+import { groupAnnotations, assignMarkers, annotationsForBlock, cardModel, parseRailPref, MARKER_PALETTE, fabPosition } from "./annotation-ui";
 import type { Annotation, Resolution } from "./annotations";
 
 function ann(id: string, status: Annotation["status"] = "open"): Annotation {
@@ -161,5 +161,35 @@ describe("annotationsForBlock", () => {
     const l2 = [annAt("a", "t", "resolved"), annAt("c")];
     const r2 = { a: res("a", 3, 5), c: res("c", null) };
     expect(annotationsForBlock(1, 20, l2, r2)).toEqual([]);
+  });
+});
+
+describe("fabPosition", () => {
+  const clip = { top: 100, bottom: 700, left: 200, right: 800 };
+  const size = { width: 96, height: 26 };
+
+  it("sits above the selection when there is room", () => {
+    const pos = fabPosition({ top: 300, bottom: 320, left: 400, right: 500 }, clip, size);
+    expect(pos).toEqual({ top: 300 - 26 - 8, left: 400 });
+  });
+
+  it("flips below the selection when there is no room above", () => {
+    const pos = fabPosition({ top: 110, bottom: 130, left: 400, right: 500 }, clip, size);
+    expect(pos).toEqual({ top: 130 + 8, left: 400 });
+  });
+
+  it("returns null when the selection is scrolled out of the clip box", () => {
+    expect(fabPosition({ top: 20, bottom: 40, left: 400, right: 500 }, clip, size)).toBeNull();
+    expect(fabPosition({ top: 720, bottom: 740, left: 400, right: 500 }, clip, size)).toBeNull();
+  });
+
+  it("clamps left at the right edge", () => {
+    const pos = fabPosition({ top: 300, bottom: 320, left: 780, right: 800 }, clip, size);
+    expect(pos?.left).toBe(800 - 96 - 4);
+  });
+
+  it("clamps left at the left edge", () => {
+    const pos = fabPosition({ top: 300, bottom: 320, left: 150, right: 260 }, clip, size);
+    expect(pos?.left).toBe(200 + 4);
   });
 });

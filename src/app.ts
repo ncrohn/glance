@@ -54,7 +54,7 @@ function saveSession(): void {
 
 let state: State = emptyState();
 let activeEditor: { destroy(): void; selectAll(): void } | null = null;
-let teardownToolbar: (() => void) | null = null;
+let toolbar: { hide(): void; destroy(): void } | null = null;
 let teardownHovers: (() => void) | null = null;
 
 // #content is the scroll container and renderContent() wipes it on every state
@@ -379,7 +379,7 @@ function renderContent(): void {
   const host = document.getElementById("content")!;
   if (activeEditor) { activeEditor.destroy(); activeEditor = null; }
   host.innerHTML = "";
-  if (teardownToolbar) { teardownToolbar(); teardownToolbar = null; }
+  if (toolbar) { toolbar.destroy(); toolbar = null; }
   const doc = getActive(state);
   if (!doc) {
     const empty = el("div", "empty");
@@ -446,7 +446,7 @@ function renderContent(): void {
       const rail = document.getElementById("rail");
       if (rail) focusRailCard(rail, id);
     });
-    teardownToolbar = mountSelectionToolbar(view, () => startComment(doc.absPath));
+    toolbar = mountSelectionToolbar(view, () => startComment(doc.absPath));
   }
 }
 
@@ -650,6 +650,12 @@ export async function start(): Promise<void> {
       e.preventDefault();
       const doc = getActive(state);
       if (doc) { state = toggleViewMode(state, doc.id); render(); }
+      return;
+    }
+    if (e.metaKey && e.shiftKey && (e.key === "m" || e.key === "M")) {
+      e.preventDefault();
+      const doc = getActive(state);
+      if (doc && doc.viewMode === "rendered") { toolbar?.hide(); startComment(doc.absPath); }
     }
   });
   const launchPaths = await takeLaunchArgs();
