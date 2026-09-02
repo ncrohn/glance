@@ -98,8 +98,10 @@ All paths are derived from the running app's binary location, not this source ch
 
 | Tool | What it does |
 |---|---|
-| `list_annotations` | List annotations on a file; filters by status (default: `open`). |
+| `list_annotations` | List annotations on a file, ordered by `number`; filters by status (default: `open`). |
 | `get_annotation` | Fetch one annotation by id with its current line range. |
+
+Every view carries `number`, the stable number Glance shows in the rail and gutter, so Claude can say "comment 3" instead of quoting an id.
 | `resolve_annotation` | Mark an annotation resolved after applying the change. |
 
 A `glance://annotations/{path}` resource is also registered for direct resource reads.

@@ -10,6 +10,7 @@ use std::io::{BufRead, Write};
 #[derive(Serialize, PartialEq, Debug)]
 struct AnnotationView {
     id: String,
+    number: u32,
     note: String,
     quote: String,
     #[serde(rename = "lineStart")]
@@ -24,6 +25,7 @@ fn view_of(a: &Annotation, text: &str) -> AnnotationView {
     let r = resolve_anchor(text, a);
     AnnotationView {
         id: a.id.clone(),
+        number: a.number,
         note: a.note.clone(),
         quote: a.quote.clone(),
         line_start: r.start_line,
@@ -33,7 +35,7 @@ fn view_of(a: &Annotation, text: &str) -> AnnotationView {
     }
 }
 
-/// Build the view list, optionally filtered by status (default "open").
+/// Build the view list, sorted by number, optionally filtered by status (default "open").
 ///
 /// Filtering happens on the resolved view so that `orphaned` (a live anchor
 /// state, not a stored status) is meaningful:
@@ -43,7 +45,7 @@ fn view_of(a: &Annotation, text: &str) -> AnnotationView {
 ///   "orphaned" → anchor == "orphaned" (quote absent from current text)
 fn build_views(store: &AnnotationStore, text: &str, status_filter: Option<&str>) -> Vec<AnnotationView> {
     let filter = status_filter.unwrap_or("open");
-    store
+    let mut views: Vec<AnnotationView> = store
         .annotations
         .iter()
         .map(|a| view_of(a, text))
@@ -54,7 +56,9 @@ fn build_views(store: &AnnotationStore, text: &str, status_filter: Option<&str>)
             "orphaned" => v.anchor == "orphaned",
             _ => false,
         })
-        .collect()
+        .collect();
+    views.sort_by_key(|v| v.number);
+    views
 }
 
 /// Mark one annotation resolved in-place. Returns true if it was found.
@@ -84,11 +88,12 @@ mod tests {
             status: status.into(),
             author: "user".into(),
             created_at: "t".into(),
+            number: 0,
         }
     }
 
     fn store_of(anns: Vec<Annotation>) -> AnnotationStore {
-        AnnotationStore { doc_path: "/d.md".into(), annotations: anns }
+        AnnotationStore { doc_path: "/d.md".into(), annotations: anns, next_number: 0 }
     }
 
     #[test]
@@ -106,6 +111,21 @@ mod tests {
         let store = store_of(vec![ann("a", "hello", "open"), ann("b", "x", "resolved")]);
         let views = build_views(&store, "hello x\n", Some("all"));
         assert_eq!(views.len(), 2);
+    }
+
+    #[test]
+    fn build_views_carries_number_and_sorts_by_it() {
+        let mut second = ann("b", "hello", "open");
+        second.number = 2;
+        let mut first = ann("a", "hello", "open");
+        first.number = 1;
+        let store = store_of(vec![second, first]);
+        let views = build_views(&store, "hello world\n", None);
+        let nums: Vec<u32> = views.iter().map(|v| v.number).collect();
+        assert_eq!(nums, vec![1, 2]);
+        assert_eq!(views[0].id, "a");
+        let json = serde_json::to_value(&views[0]).unwrap();
+        assert_eq!(json["number"], 1);
     }
 
     #[test]
@@ -139,6 +159,7 @@ mod tests {
             status: "open".into(),
             author: "user".into(),
             created_at: "t".into(),
+            number: 0,
         };
         let store = store_of(vec![a]);
         let text = "hello world\n"; // 1 line only, so line_hint 99 is out of range → orphaned

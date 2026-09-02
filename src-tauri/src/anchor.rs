@@ -19,6 +19,10 @@ pub struct Annotation {
     pub author: String,
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// Stable per-document number, assigned once when the store adds it.
+    /// 0 means not yet assigned (a pre-numbers store, or an add in flight).
+    #[serde(default)]
+    pub number: u32,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -125,6 +129,7 @@ mod tests {
             status: "open".into(),
             author: "user".into(),
             created_at: "t".into(),
+            number: 0,
         }
     }
 

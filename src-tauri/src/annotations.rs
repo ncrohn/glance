@@ -10,6 +10,8 @@ pub struct AnnotationStore {
     pub doc_path: String,
     #[serde(default)]
     pub annotations: Vec<Annotation>,
+    #[serde(default, rename = "nextNumber")]
+    pub next_number: u32,
 }
 
 pub fn sha1_hex(s: &str) -> String {
@@ -30,15 +32,38 @@ pub fn read_store(doc_path: &str) -> AnnotationStore {
     let empty = || AnnotationStore {
         doc_path: doc_path.to_string(),
         annotations: Vec::new(),
+        next_number: 0,
     };
     let path = match store_path_for(doc_path) {
         Some(p) => p,
         None => return empty(),
     };
-    match std::fs::read_to_string(&path) {
+    let mut store = match std::fs::read_to_string(&path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|_| empty()),
         Err(_) => empty(),
+    };
+    backfill_numbers(&mut store);
+    store
+}
+
+/// Give every unnumbered annotation a permanent number and push `next_number`
+/// past everything in use. Idempotent, so it runs on every read: stores written
+/// before numbers existed pick them up in creation order, and the file gains
+/// `nextNumber` on its next mutation.
+pub fn backfill_numbers(store: &mut AnnotationStore) {
+    let mut max = store.annotations.iter().map(|a| a.number).max().unwrap_or(0);
+    let mut unnumbered: Vec<usize> = (0..store.annotations.len())
+        .filter(|&i| store.annotations[i].number == 0)
+        .collect();
+    unnumbered.sort_by(|&x, &y| {
+        let (a, b) = (&store.annotations[x], &store.annotations[y]);
+        (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id))
+    });
+    for i in unnumbered {
+        max += 1;
+        store.annotations[i].number = max;
     }
+    store.next_number = store.next_number.max(max + 1);
 }
 
 pub fn write_store(store: &AnnotationStore) -> Result<(), String> {
@@ -94,12 +119,20 @@ pub fn read_annotations(path: String) -> AnnotationStore {
     read_store(&path)
 }
 
-/// Append one annotation to the store under lock. Replaces the old
-/// whole-store write so a concurrent `resolve_annotation` from glance-mcp
-/// can't be lost.
+/// Append one annotation to the store under lock, giving it the store's next
+/// number. An annotation that already carries a number (an undo re-add) keeps
+/// it. Replaces the old whole-store write so a concurrent `resolve_annotation`
+/// from glance-mcp can't be lost.
 #[tauri::command]
-pub fn add_annotation(doc_path: String, annotation: Annotation) -> Result<(), String> {
-    mutate_store(&doc_path, move |s| s.annotations.push(annotation))
+pub fn add_annotation(doc_path: String, mut annotation: Annotation) -> Result<(), String> {
+    mutate_store(&doc_path, move |s| {
+        backfill_numbers(s);
+        if annotation.number == 0 {
+            annotation.number = s.next_number;
+        }
+        s.next_number = s.next_number.max(annotation.number + 1);
+        s.annotations.push(annotation);
+    })
 }
 
 /// Remove one annotation by id under lock.
@@ -162,6 +195,10 @@ mod tests {
     }
 
     fn ann(id: &str) -> Annotation {
+        ann_at(id, "t")
+    }
+
+    fn ann_at(id: &str, created_at: &str) -> Annotation {
         Annotation {
             id: id.into(),
             quote: "q".into(),
@@ -171,8 +208,83 @@ mod tests {
             note: "n".into(),
             status: "open".into(),
             author: "user".into(),
-            created_at: "t".into(),
+            created_at: created_at.into(),
+            number: 0,
         }
+    }
+
+    fn store_of(annotations: Vec<Annotation>) -> AnnotationStore {
+        AnnotationStore { doc_path: "/d.md".into(), annotations, next_number: 0 }
+    }
+
+    #[test]
+    fn backfill_numbers_in_created_order_and_sets_next() {
+        let mut store = store_of(vec![ann_at("b", "2026-02"), ann_at("a", "2026-01"), ann_at("c", "2026-03")]);
+        backfill_numbers(&mut store);
+        let nums: Vec<(String, u32)> = store.annotations.iter().map(|a| (a.id.clone(), a.number)).collect();
+        assert_eq!(nums, vec![("b".into(), 2), ("a".into(), 1), ("c".into(), 3)]);
+        assert_eq!(store.next_number, 4);
+    }
+
+    #[test]
+    fn backfill_numbers_leaves_existing_numbers_alone() {
+        let mut numbered = ann_at("old", "2026-09");
+        numbered.number = 5;
+        let mut store = store_of(vec![numbered, ann_at("new", "2026-01")]);
+        backfill_numbers(&mut store);
+        assert_eq!(store.annotations[0].number, 5);
+        assert_eq!(store.annotations[1].number, 6); // after the max, despite the earlier created_at
+        assert_eq!(store.next_number, 7);
+        let before = store.clone();
+        backfill_numbers(&mut store);
+        assert_eq!(store.annotations, before.annotations);
+        assert_eq!(store.next_number, 7);
+    }
+
+    #[test]
+    #[serial]
+    fn add_annotation_assigns_sequential_numbers_and_persists_next() {
+        std::env::set_var("HOME", "/tmp/glance-test-numbers");
+        let doc = "/m/numbers.md";
+        let path = store_path_for(doc).unwrap();
+        let _ = std::fs::remove_file(&path);
+        for id in ["a", "b", "c"] {
+            add_annotation(doc.into(), ann(id)).unwrap();
+        }
+        let store = read_store(doc);
+        let nums: Vec<u32> = store.annotations.iter().map(|a| a.number).collect();
+        assert_eq!(nums, vec![1, 2, 3]);
+        assert_eq!(store.next_number, 4);
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("\"nextNumber\": 4"), "{on_disk}");
+        // A re-add that already carries a number keeps it and only bumps next_number if needed.
+        let mut undo = ann("d");
+        undo.number = 9;
+        add_annotation(doc.into(), undo).unwrap();
+        let store = read_store(doc);
+        assert_eq!(store.annotations[3].number, 9);
+        assert_eq!(store.next_number, 10);
+    }
+
+    #[test]
+    #[serial]
+    fn old_store_without_numbers_backfills_on_read_and_keeps_them_on_add() {
+        std::env::set_var("HOME", "/tmp/glance-test-backfill");
+        let doc = "/m/old.md";
+        let path = store_path_for(doc).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"docPath":"/m/old.md","annotations":[
+            {"id":"late","quote":"q","prefix":"","suffix":"","lineHint":{"start":1,"end":1},"note":"n","status":"open","author":"user","createdAt":"2026-02"},
+            {"id":"early","quote":"q","prefix":"","suffix":"","lineHint":{"start":1,"end":1},"note":"n","status":"open","author":"user","createdAt":"2026-01"}]}"#).unwrap();
+        let store = read_store(doc);
+        assert_eq!(store.annotations[0].number, 2);
+        assert_eq!(store.annotations[1].number, 1);
+        assert_eq!(store.next_number, 3);
+        add_annotation(doc.into(), ann("new")).unwrap();
+        let store = read_store(doc);
+        let nums: Vec<(String, u32)> = store.annotations.iter().map(|a| (a.id.clone(), a.number)).collect();
+        assert_eq!(nums, vec![("late".into(), 2), ("early".into(), 1), ("new".into(), 3)]);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("\"nextNumber\": 4"));
     }
 
     #[test]

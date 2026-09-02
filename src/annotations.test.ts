@@ -6,7 +6,7 @@ import {
 
 function ann(id: string, status: Annotation["status"] = "open"): Annotation {
   return {
-    id, quote: "q", prefix: "", suffix: "",
+    id, number: 0, quote: "q", prefix: "", suffix: "",
     lineHint: { start: 1, end: 1 }, note: "n",
     status, author: "user", createdAt: "t",
   };
