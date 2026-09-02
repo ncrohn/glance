@@ -1,4 +1,4 @@
-use crate::anchor::{resolve_anchor, Annotation, Resolution};
+use crate::anchor::{resolve_anchor, Annotation, Reply, Resolution};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -195,6 +195,30 @@ pub fn update_annotation(doc_path: String, id: String, patch: AnnotationPatch) -
     }
 }
 
+/// Append one reply to an annotation's thread. Status is untouched.
+pub fn apply_reply(a: &mut Annotation, author: &str, text: &str, at: &str) {
+    a.replies.push(Reply { author: author.into(), text: text.into(), created_at: at.into() });
+}
+
+/// Append a user reply to one annotation by id under lock. Errors when the id
+/// is not in the store.
+#[tauri::command]
+pub fn add_reply(doc_path: String, id: String, text: String) -> Result<(), String> {
+    let now = now_iso8601();
+    let found = mutate_store(&doc_path, |s| match s.annotations.iter_mut().find(|a| a.id == id) {
+        Some(a) => {
+            apply_reply(a, "user", &text, &now);
+            true
+        }
+        None => false,
+    })?;
+    if found {
+        Ok(())
+    } else {
+        Err(format!("no annotation '{id}'"))
+    }
+}
+
 /// Current UTC time as `YYYY-MM-DDTHH:MM:SSZ`, without a date crate.
 pub fn now_iso8601() -> String {
     let secs = SystemTime::now()
@@ -292,6 +316,7 @@ mod tests {
             number: 0,
             resolved_by: None,
             resolved_at: None,
+            replies: Vec::new(),
         }
     }
 
@@ -463,6 +488,54 @@ mod tests {
         assert!(!std::fs::read_to_string(&path).unwrap().contains("resolvedBy"));
         let err = update_annotation(doc.into(), "missing".into(), AnnotationPatch::default()).unwrap_err();
         assert!(err.contains("missing"), "{err}");
+    }
+
+    #[test]
+    fn apply_reply_pushes_onto_thread_and_leaves_status() {
+        let mut a = ann("a");
+        apply_reply(&mut a, "claude", "Cut the cap to 5 min", "2026-09-01T00:00:00Z");
+        apply_reply(&mut a, "user", "Thanks", "2026-09-01T00:01:00Z");
+        assert_eq!(a.replies.len(), 2);
+        assert_eq!(a.replies[0], Reply { author: "claude".into(), text: "Cut the cap to 5 min".into(), created_at: "2026-09-01T00:00:00Z".into() });
+        assert_eq!(a.replies[1].author, "user");
+        assert_eq!(a.status, "open");
+    }
+
+    #[test]
+    #[serial]
+    fn add_reply_round_trips_and_errors_on_missing_id() {
+        std::env::set_var("HOME", "/tmp/glance-test-reply");
+        let doc = "/m/reply.md";
+        let path = store_path_for(doc).unwrap();
+        let _ = std::fs::remove_file(&path);
+        add_annotation(doc.into(), ann("a")).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("replies"));
+        add_reply(doc.into(), "a".into(), "what did you mean?".into()).unwrap();
+        let a = &read_store(doc).annotations[0];
+        assert_eq!(a.replies.len(), 1);
+        assert_eq!(a.replies[0].author, "user");
+        assert_eq!(a.replies[0].text, "what did you mean?");
+        assert_eq!(a.replies[0].created_at.len(), 20);
+        assert_eq!(a.status, "open");
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("\"replies\""), "{on_disk}");
+        assert!(on_disk.contains("\"createdAt\""), "{on_disk}");
+        let err = add_reply(doc.into(), "missing".into(), "x".into()).unwrap_err();
+        assert!(err.contains("missing"), "{err}");
+    }
+
+    #[test]
+    #[serial]
+    fn old_store_without_replies_deserializes_with_empty_thread() {
+        std::env::set_var("HOME", "/tmp/glance-test-no-replies");
+        let doc = "/m/noreplies.md";
+        let path = store_path_for(doc).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"docPath":"/m/noreplies.md","annotations":[
+            {"id":"a","quote":"q","prefix":"","suffix":"","lineHint":{"start":1,"end":1},"note":"n","status":"open","author":"user","createdAt":"2026-01","number":1}],"nextNumber":2}"#).unwrap();
+        let store = read_store(doc);
+        assert_eq!(store.annotations.len(), 1);
+        assert!(store.annotations[0].replies.is_empty());
     }
 
     #[test]

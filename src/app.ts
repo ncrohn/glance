@@ -13,14 +13,14 @@ import { mountBlockExpanders } from "./block-expand";
 import { closeMermaidZoom } from "./mermaid-zoom";
 import {
   readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs,
-  readAnnotations, addStoredAnnotation, removeStoredAnnotation, updateStoredAnnotation, resolveAnchors, ensureAnnotationStore,
+  readAnnotations, addStoredAnnotation, removeStoredAnnotation, updateStoredAnnotation, addStoredReply, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
   onShowAbout, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
   onShowInFinder, revealInFinder, setShowInFinderEnabled,
   readReviewed, writeReviewed,
 } from "./ipc";
 import {
-  addAnnotation, removeAnnotation, patchAnnotation, genId, type Annotation, type AnnotationPatch,
+  addAnnotation, removeAnnotation, patchAnnotation, appendReply, genId, type Annotation, type AnnotationPatch,
 } from "./annotations";
 import { captureSelection } from "./anchor-capture";
 import { showCommentComposer } from "./composer";
@@ -132,7 +132,7 @@ function startComment(absPath: string): void {
       const annotation: Annotation = {
         id: genId(), number: 0, quote: cap.quote, prefix: cap.prefix, suffix: cap.suffix,
         lineHint: cap.lineHint, note, status: "open", author: "user",
-        createdAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(), replies: [],
       };
       // Optimistically add to the local list for instant feedback (re-read from
       // current state, not the list captured when the composer opened). The
@@ -194,6 +194,15 @@ function renderRailFor(): void {
         onSubmit: (note) => { if (note !== a.note) patch(a, { note }); },
         onCancel: () => {},
       });
+    },
+    onReply: (a, text) => {
+      // Same shape as `patch`: optimistic append, then the locked server-side
+      // add (which stamps its own time), then reconcile.
+      const cur = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? doc.annotations;
+      const reply = { author: "user" as const, text, createdAt: new Date().toISOString() };
+      state = setDocAnnotations(state, doc.absPath, appendReply(cur, a.id, reply));
+      render();
+      void addStoredReply(doc.absPath, a.id, text).then(() => loadAnnotations(doc.absPath));
     },
     onRemove: (a) => {
       // Optimistic local remove (fresh from state), then the locked server-side

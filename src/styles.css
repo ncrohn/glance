@@ -1345,6 +1345,27 @@ body {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   border-left: 2px solid var(--anno-color, var(--faint)); padding-left: 8px;
 }
+/* Reply thread under the note: Claude's resolution notes and questions, the
+   user's answers, and the inline box for typing one. */
+.note-replies { display: flex; flex-direction: column; gap: 4px; margin-left: 10px; border-left: 2px solid var(--border); padding-left: 8px; }
+.note-replies:empty { display: none; }
+.note-reply { font-size: 12.5px; line-height: 1.4; }
+.note-reply-author { font: 600 10px/1 var(--font-mono); text-transform: uppercase; color: var(--faint); margin-right: 6px; }
+.note-reply-box textarea {
+  width: 100%; box-sizing: border-box; resize: none; min-height: 0;
+  font-family: var(--font-body); font-size: 12.5px; line-height: 1.4;
+  color: var(--ink); background: var(--bg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 8px;
+}
+.note-reply-box textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.note-reply-box { display: flex; flex-direction: column; gap: 4px; }
+.note-reply-box textarea { max-height: 10em; overflow-y: auto; }
+.note-reply-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.note-reply-keys { font: 10px/1 var(--font-mono, monospace); color: var(--faint); }
+.note-reply-send {
+  font: 500 11px/1 var(--font-body); padding: 3px 8px; border-radius: 5px;
+  border: 1px solid var(--accent); background: var(--accent); color: var(--bg); cursor: pointer;
+}
 .note-text.expanded { -webkit-line-clamp: unset; }
 .note-more {
   align-self: flex-start; font: 500 11px/1 var(--font-mono, system-ui); color: var(--muted);

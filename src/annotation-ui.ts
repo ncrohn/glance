@@ -1,4 +1,4 @@
-import type { AnchorKind, Annotation, Resolution } from "./annotations";
+import type { AnchorKind, Annotation, Reply, Resolution } from "./annotations";
 import { locateQuote } from "./annotation-highlight";
 import { toVisible } from "./markdown-visible";
 
@@ -128,6 +128,7 @@ export interface CardModel {
   tag: string | null;
   note: string;
   quote: string;
+  replies: Reply[];
   done: boolean;
 }
 
@@ -154,6 +155,7 @@ export function cardModel(
     tag,
     note: a.note,
     quote,
+    replies: a.replies ?? [],
     done,
   };
 }
@@ -170,6 +172,7 @@ export interface RailHandlers {
   onResolve: (a: Annotation) => void;
   onReopen: (a: Annotation) => void;
   onEdit: (a: Annotation) => void;
+  onReply: (a: Annotation, text: string) => void;
   onRemove: (a: Annotation) => void;
   onClearResolved: (ids: string[]) => void;
 }
@@ -234,11 +237,57 @@ export function renderRail(
         btn.onclick = (ev) => { ev.stopPropagation(); run(); };
         actions.appendChild(btn);
       };
+      // Replies sit between the note and the quote; the reply box, when open,
+      // goes under them. Both stop mouse events so the card's scroll-to
+      // does not fire while the user is reading or typing.
+      const replies = el("div", "note-replies");
+      for (const r of m.replies) {
+        const row = el("div", "note-reply");
+        row.appendChild(el("span", "note-reply-author", r.author === "claude" ? "Claude" : "You"));
+        row.appendChild(el("span", "note-reply-text", r.text));
+        replies.appendChild(row);
+      }
+      const openReplyBox = () => {
+        if (replies.querySelector(".note-reply-box")) {
+          replies.querySelector<HTMLTextAreaElement>(".note-reply-box textarea")?.focus();
+          return;
+        }
+        const box = el("div", "note-reply-box");
+        const input = el("textarea");
+        input.rows = 1;
+        input.placeholder = "Reply…";
+        const close = () => box.remove();
+        const send = () => {
+          const text = input.value.trim();
+          if (!text) return;
+          handlers.onReply(a, text);
+          close();
+        };
+        input.onkeydown = (ev) => {
+          if (ev.key === "Escape") { ev.preventDefault(); close(); }
+          else if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); send(); }
+        };
+        input.oninput = () => {
+          input.style.height = "auto";
+          input.style.height = `${input.scrollHeight}px`;
+        };
+        const foot = el("div", "note-reply-foot");
+        foot.appendChild(el("span", "note-reply-keys", "⌘↩ send · esc cancel"));
+        const sendBtn = el("button", "note-reply-send", "Send");
+        sendBtn.onclick = send;
+        foot.appendChild(sendBtn);
+        box.onmousedown = (ev) => ev.stopPropagation();
+        box.onclick = (ev) => ev.stopPropagation();
+        box.append(input, foot);
+        replies.appendChild(box);
+        input.focus();
+      };
       if (m.done) {
         action("↺", "Reopen", () => handlers.onReopen(a));
       } else {
         action("✓", "Resolve", () => handlers.onResolve(a));
         action("✎", "Edit", () => handlers.onEdit(a));
+        action("↩", "Reply", openReplyBox);
         action("×", "Delete", () => handlers.onRemove(a));
       }
       head.appendChild(actions);
@@ -246,6 +295,7 @@ export function renderRail(
 
       const noteEl = el("div", "note-text", m.note);
       card.appendChild(noteEl);
+      if (m.replies.length || !m.done) card.appendChild(replies);
       if (m.quote) card.appendChild(el("div", "note-quote", m.quote));
       card.onclick = () => handlers.onScrollTo(a);
       host.appendChild(card);

@@ -89,14 +89,16 @@ Use `get_annotation(path, id)` for one comment with surrounding context.
 
 ## Act, then close the loop
 
-1. Make the change the comment asks for, at the indicated lines.
-2. Call `resolve_annotation(path: "<absolute-path>", id: "<id>")`. It flips to resolved live in Glance so the user sees it handled.
-3. When done, call `list_annotations` again to confirm nothing is still open.
+1. If the comment is `drifted`, `orphaned`, or you cannot tell what it asks for, call `reply_annotation(path: "<absolute-path>", id: "<id>", text: "<question or reason>")` with your question, or the reason you are not making the change. Do not ask in chat what you can ask on the card. A replied-to comment stays open until the user answers there; move on to the next one.
+2. Otherwise make the change the comment asks for, at the indicated lines.
+3. Call `resolve_annotation(path: "<absolute-path>", id: "<id>", note: "<what changed>")`. `note` is one line saying what you changed ("Cut the cap to 5 min; batch keeps 10"). It flips to resolved live in Glance, with your note on the card, so the user sees it handled without reading the diff.
+4. When done, call `list_annotations` again to confirm nothing is still open.
 
 ## Etiquette
 
-- Your tools are read + resolve only (`list_annotations`, `get_annotation`, `resolve_annotation`). There is no tool to create annotations — that is the user's side.
-- Resolve a comment only after you actually addressed it. One resolve per comment.
+- Your tools are `list_annotations`, `get_annotation`, `resolve_annotation`, `reply_annotation`. There is no tool to create annotations — that is the user's side.
+- Resolve a comment only after you actually addressed it. One resolve per comment, always with a `note`.
+- Replies belong on the card, not in chat. Keep them to a line or two.
 "#
     .to_string()
 }
@@ -873,11 +875,15 @@ mod tests {
         let s = skill_doc();
         assert!(s.contains("name: glance"));
         assert!(s.contains("description:"));
-        // teaches the mdview open convention and all three read+resolve MCP tools
+        // teaches the mdview open convention and all four MCP tools
         assert!(s.contains("mdview <absolute-path>"));
         assert!(s.contains("list_annotations"));
         assert!(s.contains("get_annotation"));
         assert!(s.contains("resolve_annotation"));
+        assert!(s.contains("reply_annotation"));
+        // resolves carry a note; questions go on the card, not in chat
+        assert!(s.contains("note: \"<what changed>\""));
+        assert!(s.contains("Do not ask in chat"));
         // tells the agent to talk in the user-visible comment number
         assert!(s.contains("`number`"));
         assert!(s.contains("never the id"));

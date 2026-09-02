@@ -1,8 +1,8 @@
 // Glance MCP server — stdio JSON-RPC. Lets a Claude session read the user's
-// anchored annotations on a markdown file. v1: read + resolve only.
+// anchored annotations on a markdown file: read, reply, resolve (with a note).
 
-use glance_lib::anchor::{resolve_anchor, Annotation};
-use glance_lib::annotations::{mutate_store, now_iso8601, read_store, AnnotationStore};
+use glance_lib::anchor::{resolve_anchor, Annotation, Reply};
+use glance_lib::annotations::{apply_reply, mutate_store, now_iso8601, read_store, AnnotationStore};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -23,6 +23,7 @@ struct AnnotationView {
     resolved_by: Option<String>,
     #[serde(rename = "resolvedAt", skip_serializing_if = "Option::is_none")]
     resolved_at: Option<String>,
+    replies: Vec<Reply>,
 }
 
 fn view_of(a: &Annotation, text: &str) -> AnnotationView {
@@ -38,6 +39,7 @@ fn view_of(a: &Annotation, text: &str) -> AnnotationView {
         anchor: r.anchor,
         resolved_by: a.resolved_by.clone(),
         resolved_at: a.resolved_at.clone(),
+        replies: a.replies.clone(),
     }
 }
 
@@ -68,17 +70,34 @@ fn build_views(store: &AnnotationStore, text: &str, status_filter: Option<&str>)
 }
 
 /// Mark one annotation resolved in-place, recording that Claude did it and
-/// when. Returns true if it was found.
-fn apply_resolve(store: &mut AnnotationStore, id: &str) -> bool {
+/// when. A non-empty `note` is appended to the thread as a Claude reply first,
+/// so the card shows what changed. Returns true if it was found.
+fn apply_resolve(store: &mut AnnotationStore, id: &str, note: Option<&str>) -> bool {
     for a in store.annotations.iter_mut() {
         if a.id == id {
+            let now = now_iso8601();
+            if let Some(n) = note.map(str::trim).filter(|n| !n.is_empty()) {
+                apply_reply(a, "claude", n, &now);
+            }
             a.status = "resolved".to_string();
             a.resolved_by = Some("claude".to_string());
-            a.resolved_at = Some(now_iso8601());
+            a.resolved_at = Some(now);
             return true;
         }
     }
     false
+}
+
+/// Append a Claude reply to one annotation in-place, leaving its status alone.
+/// Returns true if it was found.
+fn apply_claude_reply(store: &mut AnnotationStore, id: &str, text: &str) -> bool {
+    match store.annotations.iter_mut().find(|a| a.id == id) {
+        Some(a) => {
+            apply_reply(a, "claude", text, &now_iso8601());
+            true
+        }
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -100,6 +119,7 @@ mod tests {
             number: 0,
             resolved_by: None,
             resolved_at: None,
+            replies: Vec::new(),
         }
     }
 
@@ -142,13 +162,66 @@ mod tests {
     #[test]
     fn apply_resolve_sets_status_and_records_claude() {
         let mut store = store_of(vec![ann("a", "hello", "open")]);
-        assert!(apply_resolve(&mut store, "a"));
+        assert!(apply_resolve(&mut store, "a", None));
         let a = &store.annotations[0];
         assert_eq!(a.status, "resolved");
         assert_eq!(a.resolved_by.as_deref(), Some("claude"));
         assert_eq!(a.resolved_at.as_ref().map(|t| t.len()), Some(20));
         assert!(a.resolved_at.as_deref().unwrap().ends_with('Z'));
-        assert!(!apply_resolve(&mut store, "missing"));
+        assert!(a.replies.is_empty());
+        assert!(!apply_resolve(&mut store, "missing", None));
+    }
+
+    #[test]
+    fn apply_resolve_with_note_appends_claude_reply_then_resolves() {
+        let mut store = store_of(vec![ann("a", "hello", "open")]);
+        assert!(apply_resolve(&mut store, "a", Some("Cut the cap to 5 min; batch keeps 10")));
+        let a = &store.annotations[0];
+        assert_eq!(a.status, "resolved");
+        assert_eq!(a.replies.len(), 1);
+        assert_eq!(a.replies[0].author, "claude");
+        assert_eq!(a.replies[0].text, "Cut the cap to 5 min; batch keeps 10");
+        assert_eq!(a.replies[0].created_at, a.resolved_at.clone().unwrap());
+        // An empty or whitespace note is not a reply.
+        let mut store = store_of(vec![ann("b", "hello", "open")]);
+        assert!(apply_resolve(&mut store, "b", Some("   ")));
+        assert!(store.annotations[0].replies.is_empty());
+    }
+
+    #[test]
+    fn apply_claude_reply_appends_and_leaves_status_open() {
+        let mut store = store_of(vec![ann("a", "hello", "open")]);
+        assert!(apply_claude_reply(&mut store, "a", "Which section did you mean?"));
+        let a = &store.annotations[0];
+        assert_eq!(a.status, "open");
+        assert_eq!(a.resolved_by, None);
+        assert_eq!(a.replies.len(), 1);
+        assert_eq!(a.replies[0].author, "claude");
+        assert_eq!(a.replies[0].text, "Which section did you mean?");
+        assert!(!apply_claude_reply(&mut store, "missing", "x"));
+    }
+
+    #[test]
+    fn view_json_includes_replies() {
+        let open = ann("a", "hello", "open");
+        let json = serde_json::to_value(view_of(&open, "hello\n")).unwrap();
+        assert_eq!(json["replies"], json!([]));
+        let mut threaded = ann("b", "hello", "open");
+        threaded.replies.push(Reply { author: "claude".into(), text: "why?".into(), created_at: "2026-09-01T00:00:00Z".into() });
+        let json = serde_json::to_value(view_of(&threaded, "hello\n")).unwrap();
+        assert_eq!(json["replies"], json!([{ "author": "claude", "text": "why?", "createdAt": "2026-09-01T00:00:00Z" }]));
+    }
+
+    #[test]
+    fn tool_schemas_list_reply_and_resolve_note() {
+        let schemas = tool_schemas();
+        let names: Vec<&str> = schemas.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"reply_annotation"));
+        let resolve = schemas.as_array().unwrap().iter().find(|t| t["name"] == "resolve_annotation").unwrap();
+        assert_eq!(resolve["inputSchema"]["properties"]["note"]["type"], "string");
+        assert_eq!(resolve["inputSchema"]["required"], json!(["path", "id"]));
+        let reply = schemas.as_array().unwrap().iter().find(|t| t["name"] == "reply_annotation").unwrap();
+        assert_eq!(reply["inputSchema"]["required"], json!(["path", "id", "text"]));
     }
 
     #[test]
@@ -190,6 +263,7 @@ mod tests {
             number: 0,
             resolved_by: None,
             resolved_at: None,
+            replies: Vec::new(),
         };
         let store = store_of(vec![a]);
         let text = "hello world\n"; // 1 line only, so line_hint 99 is out of range → orphaned
@@ -232,14 +306,28 @@ fn tool_schemas() -> Value {
         },
         {
             "name": "resolve_annotation",
-            "description": "Mark an annotation resolved after you have applied the requested change.",
+            "description": "Mark an annotation resolved after you have applied the requested change. Pass `note` so the user sees what changed on the card.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "id": { "type": "string" }
+                    "id": { "type": "string" },
+                    "note": { "type": "string", "description": "One line saying what you changed. Appended to the comment's thread as your reply." }
                 },
                 "required": ["path", "id"]
+            }
+        },
+        {
+            "name": "reply_annotation",
+            "description": "Reply on an annotation without resolving it: ask what a drifted or orphaned comment meant, or say why you are not making the change. The comment stays open until the user answers.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "id": { "type": "string" },
+                    "text": { "type": "string", "description": "Your question or reason, one or two lines." }
+                },
+                "required": ["path", "id", "text"]
             }
         }
     ])
@@ -273,9 +361,19 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
         }
         "resolve_annotation" => {
             let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing 'id'")?;
+            let note = args.get("note").and_then(|v| v.as_str());
             // Read-modify-write under the shared cross-process lock so a
             // concurrent add/remove from the GUI isn't clobbered.
-            if mutate_store(path, |store| apply_resolve(store, id))? {
+            if mutate_store(path, |store| apply_resolve(store, id, note))? {
+                Ok(text_result(json!({ "ok": true, "id": id })))
+            } else {
+                Err(format!("no annotation '{id}'"))
+            }
+        }
+        "reply_annotation" => {
+            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing 'id'")?;
+            let text = args.get("text").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty()).ok_or("missing 'text'")?;
+            if mutate_store(path, |store| apply_claude_reply(store, id, text))? {
                 Ok(text_result(json!({ "ok": true, "id": id })))
             } else {
                 Err(format!("no annotation '{id}'"))

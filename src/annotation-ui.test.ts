@@ -107,6 +107,12 @@ describe("cardModel", () => {
     expect(cardModel(exact, undefined, undefined).quote).toBe("y".repeat(80));
   });
 
+  it("passes the reply thread through, defaulting to empty", () => {
+    expect(cardModel(annAt("a"), res("a", 4), marker).replies).toEqual([]);
+    const replies = [{ author: "claude" as const, text: "Cut the cap", createdAt: "t" }];
+    expect(cardModel({ ...annAt("a"), replies }, res("a", 4), marker).replies).toEqual(replies);
+  });
+
   it("marks a resolved annotation done, with no number and no tag", () => {
     const m = cardModel(annAt("a", "t", "resolved"), { id: "a", startLine: 4, endLine: 4, anchor: "drifted" }, marker);
     expect(m).toMatchObject({ done: true, number: null, tag: null, line: "L4" });

@@ -124,6 +124,11 @@ export function updateStoredAnnotation(docPath: string, id: string, patch: Store
   return invoke<void>("update_annotation", { docPath, id, patch });
 }
 
+/** Append a user reply to an annotation's thread; the server stamps the time. */
+export function addStoredReply(docPath: string, id: string, text: string): Promise<void> {
+  return invoke<void>("add_reply", { docPath, id, text });
+}
+
 export function resolveAnchors(text: string, annotations: Annotation[]): Promise<Resolution[]> {
   return invoke<Resolution[]>("resolve_anchors", { text, annotations });
 }

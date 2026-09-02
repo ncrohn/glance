@@ -90,9 +90,9 @@ All paths are derived from the running app's binary location, not this source ch
 1. Open a markdown file with `mdview`.
 2. Select text in the rendered view and click **Comment** to attach a note.
 3. In a Claude Code session, Claude calls `list_annotations` (MCP tool) to read your open comments with **current line numbers** — the server re-anchors every annotation against the live file on each read, so line numbers stay correct even after edits.
-4. Claude makes the requested changes, then calls `resolve_annotation` to mark each comment resolved. The change is reflected live in Glance.
+4. Claude makes the requested changes, then calls `resolve_annotation` with a one-line `note` saying what changed. The comment flips to resolved live in Glance with the note on its card. When a comment is unclear or its text has moved, Claude calls `reply_annotation` instead and the comment stays open until you answer on the card.
 
-**v1 scope:** user → Claude (read + resolve). Claude-authored highlights are future work (v2).
+**v1 scope:** user ↔ Claude comments with replies (read, reply, resolve). Claude-authored highlights are still future work (v2).
 
 ### MCP tools
 
@@ -100,9 +100,10 @@ All paths are derived from the running app's binary location, not this source ch
 |---|---|
 | `list_annotations` | List annotations on a file, ordered by `number`; filters by status (default: `open`). |
 | `get_annotation` | Fetch one annotation by id with its current line range. |
+| `reply_annotation` | Append a Claude reply to an annotation's thread without resolving it. |
+| `resolve_annotation` | Mark an annotation resolved after applying the change; an optional `note` is appended to the thread as Claude's reply. |
 
-Every view carries `number`, the stable number Glance shows in the rail and gutter, so Claude can say "comment 3" instead of quoting an id.
-| `resolve_annotation` | Mark an annotation resolved after applying the change. |
+Every view carries `number`, the stable number Glance shows in the rail and gutter, so Claude can say "comment 3" instead of quoting an id, and `replies`, the thread under the note.
 
 A `glance://annotations/{path}` resource is also registered for direct resource reads.
 
