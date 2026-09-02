@@ -57,6 +57,19 @@ describe("annotation reducers", () => {
       expect(b[0].resolvedAt).toBeUndefined();
     });
 
+    it("re-anchor replaces the anchor fields and keeps id, number, note, and replies", () => {
+      const reply = { author: "claude" as const, text: "r", createdAt: "t" };
+      const moved: Annotation = { ...ann("a"), number: 7, replies: [reply] };
+      const b = patchAnnotation([moved], "a", {
+        quote: "new quote", prefix: "before ", suffix: " after", lineHint: { start: 12, end: 13 }, status: "open",
+      });
+      expect(b[0]).toMatchObject({
+        id: "a", number: 7, note: "n", replies: [reply], status: "open",
+        quote: "new quote", prefix: "before ", suffix: " after", lineHint: { start: 12, end: 13 },
+      });
+      expect(moved.quote).toBe("q");
+    });
+
     it("leaves the list unchanged for an unknown id", () => {
       const a = [ann("a")];
       expect(patchAnnotation(a, "zzz", { note: "x" })).toEqual(a);
