@@ -7,14 +7,17 @@ export interface Marker {
   color: string;
 }
 
-// Fixed curated palette; number disambiguates when colors recycle. Tuned live.
+// Six marker slots; number disambiguates when colors recycle. Each theme
+// defines the actual colors as --anno-1..6 in styles.css (hue order is always
+// amber, teal, violet, rose, green, blue), and palette.test.ts holds every
+// theme to WCAG contrast targets.
 export const MARKER_PALETTE = [
-  "#c9822b", // amber
-  "#2f9e8f", // teal
-  "#7c5cbf", // violet
-  "#c0567e", // rose
-  "#4f9d52", // green
-  "#3d7fbf", // blue
+  "var(--anno-1)", // amber
+  "var(--anno-2)", // teal
+  "var(--anno-3)", // violet
+  "var(--anno-4)", // rose
+  "var(--anno-5)", // green
+  "var(--anno-6)", // blue
 ];
 
 // Per-annotation number + color for open, anchored annotations, ordered by
