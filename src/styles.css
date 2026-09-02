@@ -102,6 +102,15 @@
   --code-title: #3f7d99;
   --code-attr: #9a7420;
   --code-regexp: #b8503f;
+  --anno-1: #a85d14;
+  --anno-2: #1b7a6e;
+  --anno-3: #6647ad;
+  --anno-4: #a83f66;
+  --anno-5: #3a8340;
+  --anno-6: #2a68a8;
+  --anno-tint: 22%;
+  --anno-tint-hover: 36%;
+  --anno-chip-ink: #ffffff;
 }
 
 /* ---- Ink (dark) ------------------------------------------------------- */
@@ -130,6 +139,15 @@
   --code-title: #5b9bb8;
   --code-attr: #c99a4e;
   --code-regexp: #cd6b5a;
+  --anno-1: #e9aa5e;
+  --anno-2: #62cdbc;
+  --anno-3: #b8a0ec;
+  --anno-4: #ec95b5;
+  --anno-5: #93d38f;
+  --anno-6: #85b9ec;
+  --anno-tint: 22%;
+  --anno-tint-hover: 36%;
+  --anno-chip-ink: var(--bg);
 }
 
 /* ---- Solarized Light -------------------------------------------------- */
@@ -162,6 +180,15 @@
   --code-title: #268bd2;
   --code-attr: #b58900;
   --code-regexp: #dc322f;
+  --anno-1: #a85d14;
+  --anno-2: #1b7a6e;
+  --anno-3: #6647ad;
+  --anno-4: #a83f66;
+  --anno-5: #3a8340;
+  --anno-6: #2a68a8;
+  --anno-tint: 22%;
+  --anno-tint-hover: 36%;
+  --anno-chip-ink: #ffffff;
 }
 
 /* ---- Solarized Dark --------------------------------------------------- */
@@ -194,6 +221,15 @@
   --code-title: #268bd2;
   --code-attr: #b58900;
   --code-regexp: #dc322f;
+  --anno-1: #9e6a21;
+  --anno-2: #127b6d;
+  --anno-3: #8b55e7;
+  --anno-4: #d2276f;
+  --anno-5: #1a7f2a;
+  --anno-6: #1c6fc2;
+  --anno-tint: 12%;
+  --anno-tint-hover: 20%;
+  --anno-chip-ink: #ffffff;
 }
 
 /* ---- Nord (dark) ------------------------------------------------------ */
@@ -225,6 +261,15 @@
   --code-title: #88c0d0;
   --code-attr: #ebcb8b;
   --code-regexp: #d08770;
+  --anno-1: #e9aa5e;
+  --anno-2: #62cdbc;
+  --anno-3: #b8a0ec;
+  --anno-4: #ec95b5;
+  --anno-5: #93d38f;
+  --anno-6: #85b9ec;
+  --anno-tint: 16%;
+  --anno-tint-hover: 28%;
+  --anno-chip-ink: var(--bg);
 }
 
 /* ---- High Contrast (dark) --------------------------------------------- */
@@ -256,6 +301,15 @@
   --code-title: #79d3ff;
   --code-attr: #ffd479;
   --code-regexp: #ff8f7a;
+  --anno-1: #e9aa5e;
+  --anno-2: #62cdbc;
+  --anno-3: #b8a0ec;
+  --anno-4: #ec95b5;
+  --anno-5: #93d38f;
+  --anno-6: #85b9ec;
+  --anno-tint: 22%;
+  --anno-tint-hover: 36%;
+  --anno-chip-ink: var(--bg);
 }
 
 * { box-sizing: border-box; }
@@ -1109,7 +1163,12 @@ body {
    the left gutter (absolutely positioned within .rendered), aligned to the mark
    and fanned into lanes when several land on the same row. */
 .rendered .anno-highlight {
-  background: color-mix(in srgb, var(--anno-color, var(--accent)) 22%, transparent);
+  background: color-mix(in srgb, var(--anno-color, var(--accent)) var(--anno-tint, 22%), transparent);
+  text-decoration: underline;
+  text-decoration-color: var(--anno-color, var(--accent));
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.15em;
+  text-decoration-skip-ink: none;
   border-radius: 3px;
   padding: 0.06em 0.05em;
   box-decoration-break: clone;
@@ -1118,14 +1177,14 @@ body {
   transition: background 0.12s ease;
 }
 .rendered .anno-highlight.anno-emphasis {
-  background: color-mix(in srgb, var(--anno-color, var(--accent)) 40%, transparent);
+  background: color-mix(in srgb, var(--anno-color, var(--accent)) var(--anno-tint-hover, 36%), transparent);
 }
 .anno-gutter-marker {
   position: absolute;
   width: 18px; height: 18px; border-radius: 50%;
   display: grid; place-items: center;
   font: 600 11px/1 var(--font-mono, system-ui);
-  color: #fff;
+  color: var(--anno-chip-ink, #fff);
   background: var(--anno-color, var(--accent));
   box-shadow: 0 1px 3px rgba(0,0,0,.25);
   cursor: pointer; user-select: none;
@@ -1148,7 +1207,7 @@ body {
   width: 18px; height: 18px; border-radius: 50%;
   display: grid; place-items: center;
   font: 600 11px/1 var(--font-mono, system-ui);
-  color: #fff; background: var(--anno-color, var(--accent));
+  color: var(--anno-chip-ink, #fff); background: var(--anno-color, var(--accent));
 }
 .note-card.anno-emphasis { background: var(--raised, #0001); outline: 1px solid var(--anno-color, var(--accent)); }
 
