@@ -267,9 +267,18 @@ export function renderRail(
           if (ev.key === "Escape") { ev.preventDefault(); close(); }
           else if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); send(); }
         };
+        input.oninput = () => {
+          input.style.height = "auto";
+          input.style.height = `${input.scrollHeight}px`;
+        };
+        const foot = el("div", "note-reply-foot");
+        foot.appendChild(el("span", "note-reply-keys", "⌘↩ send · esc cancel"));
+        const sendBtn = el("button", "note-reply-send", "Send");
+        sendBtn.onclick = send;
+        foot.appendChild(sendBtn);
         box.onmousedown = (ev) => ev.stopPropagation();
         box.onclick = (ev) => ev.stopPropagation();
-        box.appendChild(input);
+        box.append(input, foot);
         replies.appendChild(box);
         input.focus();
       };
