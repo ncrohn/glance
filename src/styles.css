@@ -1417,6 +1417,18 @@ body {
   margin-left: 2px;
 }
 
+/* Tab badge: Claude resolved or replied on a background doc. Ringed in the
+   surface color so it reads apart from change-dot. */
+.tab .claude-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--anno-color, var(--accent));
+  box-shadow: 0 0 0 2px var(--surface);
+  flex: 0 0 auto;
+  margin-left: 2px;
+}
+
 /* "Mark reviewed" action in the titlebar. */
 .review-btn {
   margin-left: 10px;

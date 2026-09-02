@@ -2,7 +2,7 @@ import "./styles.css";
 import {
   State, emptyState, openDoc, closeDoc, setActive, getActive,
   toggleViewMode, updateEditorContent, markSaved, applyDiskChange, markRemoved,
-  setDocAnnotations, setDocResolutions,
+  setDocAnnotations, setDocResolutions, setDocActivity, clearDocActivity,
   markReviewed, setReviewedBaseline, canRevealActive,
 } from "./store";
 import { isDirty, basename, changedLines, hasUnreviewedChanges, type Doc } from "./document";
@@ -25,9 +25,10 @@ import {
 import { captureSelection } from "./anchor-capture";
 import { showCommentComposer } from "./composer";
 import { showToast } from "./toast";
+import { diffActivity, activityMessage } from "./activity";
 import {
-  renderRail, applyHighlights, mountSelectionToolbar, assignMarkers, linkAnnotationHovers, pulseBlock, focusRailCard,
-  parseRailPref,
+  renderRail, applyHighlights, mountSelectionToolbar, assignMarkers, markerColor, linkAnnotationHovers, pulseBlock,
+  focusRailCard, parseRailPref,
 } from "./annotation-ui";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
@@ -99,11 +100,33 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return e;
 }
 
+// Paths whose store has been read at least once. The first read has no
+// baseline to diff against, so it must not report Claude activity.
+const annotationsLoaded = new Set<string>();
+
 async function loadAnnotations(absPath: string): Promise<void> {
   const store = await readAnnotations(absPath);
-  state = setDocAnnotations(state, absPath, store.annotations);
+  const next = store.annotations;
+  const before = state.docs.find((d) => d.absPath === absPath);
+  const prev = before && annotationsLoaded.has(absPath) ? before.annotations : next;
+  annotationsLoaded.add(absPath);
+  state = setDocAnnotations(state, absPath, next);
   await refreshResolutions(absPath);
   render();
+  const doc = state.docs.find((d) => d.absPath === absPath);
+  if (!doc) return;
+  const act = diffActivity(prev, next);
+  const ids = [...act.resolved, ...act.replied];
+  if (ids.length === 0) return;
+  if (doc.id === state.activeId) {
+    const rail = document.getElementById("rail");
+    if (!rail) return;
+    for (const id of ids) focusRailCard(rail, id);
+    showToast(activityMessage(act), { actionLabel: "Show", onAction: () => focusRailCard(rail, ids[0]) });
+  } else {
+    state = setDocActivity(state, doc.id, ids);
+    render();
+  }
 }
 
 async function refreshResolutions(absPath: string): Promise<void> {
@@ -277,6 +300,12 @@ function renderTabBar(): void {
     tab.appendChild(el("span", "dot"));
     if (hasUnreviewedChanges(d)) tab.appendChild(el("span", "change-dot"));
     tab.appendChild(el("span", "label", d.fileName));
+    if (d.claudeActivity.length > 0) {
+      const dot = el("span", "claude-dot");
+      const first = d.annotations.find((a) => a.id === d.claudeActivity[0]);
+      if (first) dot.style.setProperty("--anno-color", markerColor(first.number));
+      tab.appendChild(dot);
+    }
     if (!d.existsOnDisk) tab.appendChild(el("span", "removed", "(deleted)"));
     tab.appendChild(el("span", "close", "×"));
     bar.appendChild(tab);
@@ -547,6 +576,15 @@ export function render(): void {
   renderContent();
   renderRailFor();
   const active = getActive(state);
+  if (active && active.claudeActivity.length > 0) {
+    const ids = active.claudeActivity;
+    const rail = document.getElementById("rail");
+    // The rail was just rebuilt; pulse after layout so scrollIntoView lands.
+    requestAnimationFrame(() => { if (rail) for (const id of ids) focusRailCard(rail, id); });
+    // Tab bar only: a full render() here would recurse.
+    state = clearDocActivity(state, active.id);
+    renderTabBar();
+  }
   const next = { id: active?.id ?? null, mode: active?.viewMode ?? null };
   const target = restoreTarget({ id: lastRenderedId, mode: lastRenderedMode }, next, scrollPositions);
   // Mermaid blocks render async after renderContent(), so defer a frame.
@@ -594,6 +632,7 @@ function closeTab(id: string): void {
     void unwatchFile(doc.absPath);
     const storePath = annotationStorePaths.get(doc.absPath);
     if (storePath) { void unwatchFile(storePath); annotationStorePaths.delete(doc.absPath); }
+    annotationsLoaded.delete(doc.absPath);
   }
   state = closeDoc(state, id);
   render();
