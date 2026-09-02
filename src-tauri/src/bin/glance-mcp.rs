@@ -2,10 +2,11 @@
 // anchored annotations on a markdown file. v1: read + resolve only.
 
 use glance_lib::anchor::{resolve_anchor, Annotation};
-use glance_lib::annotations::{mutate_store, read_store, AnnotationStore};
+use glance_lib::annotations::{mutate_store, read_store, store_dir, AnnotationStore};
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, PartialEq, Debug)]
 struct AnnotationView {
@@ -66,6 +67,84 @@ fn apply_resolve(store: &mut AnnotationStore, id: &str) -> bool {
         }
     }
     false
+}
+
+/// Most docs a `--pending` run will mention. Keeps the injected context short.
+const PENDING_MAX_DOCS: usize = 5;
+
+/// One context line per project doc with open comments, for the
+/// `UserPromptSubmit` hook. `stores` are `(store file, parsed store)` pairs;
+/// `read_doc` returns the doc text or `None` if the doc is gone. Only docs
+/// under `cwd` count; a doc with zero open (non-orphaned) comments is skipped.
+/// Newest store file first, capped at [`PENDING_MAX_DOCS`]. Prints nothing
+/// when there is nothing to say.
+fn pending_lines(
+    cwd: &Path,
+    stores: Vec<(PathBuf, AnnotationStore)>,
+    read_doc: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let cwd = cwd.to_string_lossy();
+    let prefix = format!("{}/", cwd.trim_end_matches('/'));
+    let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
+    for (store_path, store) in stores {
+        let Some(rel) = store.doc_path.strip_prefix(&prefix) else { continue };
+        let Some(text) = read_doc(&store.doc_path) else { continue };
+        let n = build_views(&store, &text, Some("open")).len();
+        if n == 0 {
+            continue;
+        }
+        let noun = if n == 1 { "comment" } else { "comments" };
+        let mtime = std::fs::metadata(&store_path)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        found.push((
+            mtime,
+            format!("Glance: {n} open review {noun} on {rel}. Read them with list_annotations before continuing."),
+        ));
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.into_iter().take(PENDING_MAX_DOCS).map(|(_, line)| line).collect()
+}
+
+/// Every parseable `~/.glance/annotations/*.json` store. Lock files and
+/// unreadable stores are skipped; a missing dir yields nothing.
+fn load_stores() -> Vec<(PathBuf, AnnotationStore)> {
+    let Some(dir) = store_dir() else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("json"))
+        .filter_map(|p| {
+            let text = std::fs::read_to_string(&p).ok()?;
+            let store: AnnotationStore = serde_json::from_str(&text).ok()?;
+            Some((p, store))
+        })
+        .collect()
+}
+
+/// `glance-mcp --pending [cwd]`: print the pending-comment context lines and
+/// exit 0 whatever happens. `cwd` comes from argv, else the hook event JSON on
+/// stdin, else the process cwd. stdin is only read when argv lacks a cwd, so a
+/// manual `--pending /path` never waits on a terminal.
+fn run_pending(argv: &[String]) {
+    let cwd = match argv.get(2) {
+        Some(c) => Some(PathBuf::from(c)),
+        None => {
+            let mut input = String::new();
+            let _ = std::io::stdin().read_to_string(&mut input);
+            serde_json::from_str::<Value>(&input)
+                .ok()
+                .and_then(|v| v.get("cwd")?.as_str().map(PathBuf::from))
+                .or_else(|| std::env::current_dir().ok())
+        }
+    };
+    let Some(cwd) = cwd else { return };
+    let mut stdout = std::io::stdout();
+    for line in pending_lines(&cwd, load_stores(), |p| std::fs::read_to_string(p).ok()) {
+        let _ = writeln!(stdout, "{line}");
+    }
+    let _ = stdout.flush();
 }
 
 #[cfg(test)]
@@ -148,6 +227,75 @@ mod tests {
         assert_eq!(orphaned[0].anchor, "orphaned");
         let open = build_views(&store, text, Some("open"));
         assert_eq!(open.len(), 0, "open filter must exclude orphaned annotations");
+    }
+
+    // --- pending ----------------------------------------------------------
+
+    fn store_at(doc_path: &str, anns: Vec<Annotation>) -> (PathBuf, AnnotationStore) {
+        (
+            PathBuf::from(format!("/nonexistent/{}.json", doc_path.replace('/', "_"))),
+            AnnotationStore { doc_path: doc_path.into(), annotations: anns },
+        )
+    }
+
+    // Every doc reads as "hello world\n" so a quote of "hello" anchors exactly.
+    fn any_doc(_: &str) -> Option<String> {
+        Some("hello world\n".into())
+    }
+
+    #[test]
+    fn pending_lines_excludes_docs_outside_cwd() {
+        let stores = vec![
+            store_at("/proj/docs/plan.md", vec![ann("a", "hello", "open")]),
+            store_at("/other/notes.md", vec![ann("b", "hello", "open")]),
+            store_at("/projects/x.md", vec![ann("c", "hello", "open")]), // prefix match, not a child
+        ];
+        let lines = pending_lines(Path::new("/proj"), stores, any_doc);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("docs/plan.md"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn pending_lines_skips_zero_open_and_missing_docs() {
+        let mut orphan = ann("o", "NOTINTEXTEVER", "open");
+        orphan.line_hint = LineHint { start: 99, end: 99 }; // quote gone + hint out of range → orphaned
+        let stores = vec![
+            store_at("/proj/resolved.md", vec![ann("a", "hello", "resolved")]),
+            store_at("/proj/orphaned.md", vec![orphan]),
+            store_at("/proj/drifted.md", vec![ann("b", "NOTINTEXT", "open")]), // hint in range → drifted, still open
+            store_at("/proj/gone.md", vec![ann("c", "hello", "open")]),
+            store_at("/proj/empty.md", vec![]),
+        ];
+        let lines = pending_lines(Path::new("/proj"), stores, |p| if p.ends_with("gone.md") { None } else { any_doc(p) });
+        // resolved/orphaned → 0 open; gone → doc missing; empty → nothing; drifted stays open.
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("drifted.md"));
+        // trailing slash on cwd is tolerated
+        let stores = vec![store_at("/proj/a.md", vec![ann("a", "hello", "open")])];
+        assert_eq!(pending_lines(Path::new("/proj/"), stores, any_doc).len(), 1);
+    }
+
+    #[test]
+    fn pending_lines_wording_and_relative_path() {
+        let one = vec![store_at("/proj/docs/plan.md", vec![ann("a", "hello", "open")])];
+        assert_eq!(
+            pending_lines(Path::new("/proj"), one, any_doc),
+            vec!["Glance: 1 open review comment on docs/plan.md. Read them with list_annotations before continuing."]
+        );
+        let three = vec![store_at(
+            "/proj/docs/plan.md",
+            vec![ann("a", "hello", "open"), ann("b", "world", "open"), ann("c", "hello", "open"), ann("d", "x", "resolved")],
+        )];
+        assert_eq!(
+            pending_lines(Path::new("/proj"), three, any_doc),
+            vec!["Glance: 3 open review comments on docs/plan.md. Read them with list_annotations before continuing."]
+        );
+    }
+
+    #[test]
+    fn pending_lines_caps_at_five() {
+        let stores = (0..8).map(|i| store_at(&format!("/proj/d{i}.md"), vec![ann("a", "hello", "open")])).collect();
+        assert_eq!(pending_lines(Path::new("/proj"), stores, any_doc).len(), PENDING_MAX_DOCS);
     }
 }
 
@@ -276,6 +424,11 @@ fn handle(method: &str, params: &Value) -> Option<Result<Value, (i64, String)>> 
 }
 
 fn main() {
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("--pending") {
+        run_pending(&argv);
+        return;
+    }
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {

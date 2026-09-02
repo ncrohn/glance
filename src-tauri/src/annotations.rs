@@ -18,7 +18,7 @@ pub fn sha1_hex(s: &str) -> String {
     hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-fn store_dir() -> Option<PathBuf> {
+pub fn store_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".glance").join("annotations"))
 }
 

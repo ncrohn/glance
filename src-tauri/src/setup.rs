@@ -86,6 +86,8 @@ Each comment has:
 
 Use `get_annotation(path, id)` for one comment with surrounding context.
 
+When a prompt is prefixed with a `Glance:` line naming open comments, call `list_annotations` on that file before doing anything else.
+
 ## Act, then close the loop
 
 1. Make the change the comment asks for, at the indicated lines.
@@ -205,10 +207,35 @@ exit 0
     TEMPLATE.replace("__APP_BIN__", app_bin)
 }
 
-/// Add a PostToolUse/Write hook running `command` to a settings.json string,
-/// preserving everything else. Idempotent: no-op if `command` already appears
-/// under any PostToolUse entry. Tolerates empty/invalid input.
-pub fn merge_settings_hook(existing: &str, command: &str) -> Result<String, String> {
+/// The UserPromptSubmit hook script. Runs `glance-mcp --pending` with the hook
+/// event JSON passed through on stdin; whatever it prints becomes context for
+/// Claude's next turn. Guarded and `|| true` so a missing or broken binary can
+/// never block the prompt.
+pub fn pending_hook_script(mcp_bin: &str) -> String {
+    const TEMPLATE: &str = r#"#!/bin/sh
+# Glance pending-comments hook (UserPromptSubmit). Prints one context line per
+# project doc that has open review comments, so Claude reads them without being
+# told. stdin (the hook event JSON, with cwd) is passed straight through to
+# glance-mcp. Always exits 0 so it can never block the agent.
+if [ -x "__MCP_BIN__" ]; then
+  "__MCP_BIN__" --pending 2>/dev/null || true
+fi
+exit 0
+"#;
+    TEMPLATE.replace("__MCP_BIN__", mcp_bin)
+}
+
+/// Add a hook entry running `command` under `hooks.<event>` in a settings.json
+/// string, preserving everything else. `matcher` is written only when given
+/// (`UserPromptSubmit` entries have none). Idempotent: no-op if `command`
+/// already appears under any entry of that event. Tolerates empty input,
+/// refuses non-object content.
+pub fn merge_settings_hook_for(
+    existing: &str,
+    event: &str,
+    matcher: Option<&str>,
+    command: &str,
+) -> Result<String, String> {
     let mut root = parse_config_object(existing, "~/.claude/settings.json")?;
     let obj = root.as_object_mut().unwrap();
     let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
@@ -216,13 +243,13 @@ pub fn merge_settings_hook(existing: &str, command: &str) -> Result<String, Stri
         *hooks = serde_json::json!({});
     }
     let hooks_obj = hooks.as_object_mut().unwrap();
-    let post = hooks_obj
-        .entry("PostToolUse")
+    let list = hooks_obj
+        .entry(event)
         .or_insert_with(|| serde_json::json!([]));
-    if !post.is_array() {
-        *post = serde_json::json!([]);
+    if !list.is_array() {
+        *list = serde_json::json!([]);
     }
-    let arr = post.as_array_mut().unwrap();
+    let arr = list.as_array_mut().unwrap();
     let already = arr.iter().any(|entry| {
         entry
             .get("hooks")
@@ -233,12 +260,20 @@ pub fn merge_settings_hook(existing: &str, command: &str) -> Result<String, Stri
             })
     });
     if !already {
-        arr.push(serde_json::json!({
-            "matcher": "Write",
+        let mut entry = serde_json::json!({
             "hooks": [ { "type": "command", "command": command } ]
-        }));
+        });
+        if let Some(m) = matcher {
+            entry.as_object_mut().unwrap().insert("matcher".to_string(), serde_json::json!(m));
+        }
+        arr.push(entry);
     }
     serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
+}
+
+/// Add a PostToolUse/Write hook running `command`. See [`merge_settings_hook_for`].
+pub fn merge_settings_hook(existing: &str, command: &str) -> Result<String, String> {
+    merge_settings_hook_for(existing, "PostToolUse", Some("Write"), command)
 }
 
 /// Remove the `mcpServers.<name>` entry from a config string, preserving every
@@ -263,11 +298,16 @@ pub fn remove_mcp_config(existing: &str, name: &str, file: &str) -> Result<Optio
     Ok(Some(serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?))
 }
 
-/// Remove any PostToolUse entry that runs `command` from a settings.json string,
-/// preserving everything else. Drops an entry entirely if it had only that one
-/// hook. Returns `None` when nothing matched. Tolerates empty input, refuses
-/// non-object content.
-pub fn remove_settings_hook(existing: &str, command: &str, file: &str) -> Result<Option<String>, String> {
+/// Remove any `hooks.<event>` entry that runs `command` from a settings.json
+/// string, preserving everything else. Drops an entry entirely if it had only
+/// that one hook. Returns `None` when nothing matched. Tolerates empty input,
+/// refuses non-object content.
+pub fn remove_settings_hook_for(
+    existing: &str,
+    event: &str,
+    command: &str,
+    file: &str,
+) -> Result<Option<String>, String> {
     if existing.trim().is_empty() {
         return Ok(None);
     }
@@ -277,7 +317,7 @@ pub fn remove_settings_hook(existing: &str, command: &str, file: &str) -> Result
         .unwrap()
         .get_mut("hooks")
         .and_then(|h| h.as_object_mut())
-        .and_then(|h| h.get_mut("PostToolUse"))
+        .and_then(|h| h.get_mut(event))
         .and_then(|p| p.as_array_mut());
     let Some(arr) = post else { return Ok(None) };
     let before = arr.len();
@@ -298,6 +338,11 @@ pub fn remove_settings_hook(existing: &str, command: &str, file: &str) -> Result
         return Ok(None);
     }
     Ok(Some(serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?))
+}
+
+/// Remove any PostToolUse entry that runs `command`. See [`remove_settings_hook_for`].
+pub fn remove_settings_hook(existing: &str, command: &str, file: &str) -> Result<Option<String>, String> {
+    remove_settings_hook_for(existing, "PostToolUse", command, file)
 }
 
 /// Strip the guidance block (and the blank line before it) from a shared doc
@@ -336,7 +381,8 @@ fn home() -> Option<PathBuf> {
 pub struct Binaries {
     /// glance-mcp — the stdio MCP server clients spawn.
     pub mcp_bin: String,
-    /// The Glance GUI binary — what the auto-open hook launches.
+    /// The Glance GUI binary — what the auto-open hook launches. The
+    /// pending-comments hook runs `mcp_bin --pending` instead.
     pub app_bin: String,
 }
 
@@ -411,7 +457,7 @@ impl Capability {
             Capability::Mcp => "MCP server (glance-mcp)",
             Capability::Guidance => "Review guidance",
             Capability::Skill => "Agent skill",
-            Capability::Hook => "Auto-open hook",
+            Capability::Hook => "Auto-open + pending-comments hooks",
         }
     }
 }
@@ -477,9 +523,10 @@ pub trait ClientAdapter {
         Ok(Plan::NotSupported)
     }
 
-    /// Install the auto-open-on-write hook. Default: unsupported (Claude
-    /// PostToolUse only, today).
-    fn open_hook(&self, _home: &Path, _app_bin: &str) -> Result<Plan, String> {
+    /// Install the hooks: auto-open-on-write (PostToolUse, launches `app_bin`)
+    /// and pending-comments (UserPromptSubmit, runs `mcp_bin --pending`).
+    /// Default: unsupported (Claude only, today).
+    fn open_hook(&self, _home: &Path, _bins: &Binaries) -> Result<Plan, String> {
         Ok(Plan::NotSupported)
     }
 
@@ -503,7 +550,7 @@ pub trait ClientAdapter {
         Ok(Plan::NotSupported)
     }
 
-    /// Remove the auto-open hook's settings entry. Default: unsupported.
+    /// Remove both hooks' settings entries. Default: unsupported.
     fn open_hook_uninstall(&self, _home: &Path) -> Result<Plan, String> {
         Ok(Plan::NotSupported)
     }
@@ -554,12 +601,16 @@ impl ClientAdapter for ClaudeAdapter {
         Ok(Plan::Write(vec![FileWrite { path, contents: skill_doc(), executable: false }]))
     }
 
-    fn open_hook(&self, home: &Path, app_bin: &str) -> Result<Plan, String> {
-        let script_path = home.join(".claude").join("skills").join("glance").join("open-md-hook.sh");
+    fn open_hook(&self, home: &Path, bins: &Binaries) -> Result<Plan, String> {
+        let skill_dir = home.join(".claude").join("skills").join("glance");
+        let open_path = skill_dir.join("open-md-hook.sh");
+        let pending_path = skill_dir.join("pending-hook.sh");
         let settings_path = home.join(".claude").join("settings.json");
-        let merged = merge_settings_hook(&read_existing(&settings_path)?, script_path.to_string_lossy().as_ref())?;
+        let merged = merge_settings_hook(&read_existing(&settings_path)?, open_path.to_string_lossy().as_ref())?;
+        let merged = merge_settings_hook_for(&merged, "UserPromptSubmit", None, pending_path.to_string_lossy().as_ref())?;
         Ok(Plan::Write(vec![
-            FileWrite { path: script_path, contents: hook_script(app_bin), executable: true },
+            FileWrite { path: open_path, contents: hook_script(&bins.app_bin), executable: true },
+            FileWrite { path: pending_path, contents: pending_hook_script(&bins.mcp_bin), executable: true },
             FileWrite { path: settings_path, contents: merged, executable: false },
         ]))
     }
@@ -581,17 +632,24 @@ impl ClientAdapter for ClaudeAdapter {
     }
 
     fn skill_uninstall(&self, home: &Path) -> Result<Plan, String> {
-        // The skill dir holds both SKILL.md and open-md-hook.sh — remove it whole.
+        // The skill dir holds SKILL.md and both hook scripts — remove it whole.
         Ok(Plan::Delete(vec![home.join(".claude").join("skills").join("glance")]))
     }
 
     fn open_hook_uninstall(&self, home: &Path) -> Result<Plan, String> {
-        // The hook script is deleted with the skill dir above; here we only
-        // withdraw its reference from settings.json.
-        let script_path = home.join(".claude").join("skills").join("glance").join("open-md-hook.sh");
+        // Both hook scripts are deleted with the skill dir above; here we only
+        // withdraw their references from settings.json.
+        let skill_dir = home.join(".claude").join("skills").join("glance");
+        let open_path = skill_dir.join("open-md-hook.sh");
+        let pending_path = skill_dir.join("pending-hook.sh");
         let settings_path = home.join(".claude").join("settings.json");
-        match remove_settings_hook(&read_existing(&settings_path)?, script_path.to_string_lossy().as_ref(), "~/.claude/settings.json")? {
-            None => Ok(Plan::AlreadyDone("No auto-open hook entry to remove.".to_string())),
+        const FILE: &str = "~/.claude/settings.json";
+        let existing = read_existing(&settings_path)?;
+        let after_open = remove_settings_hook(&existing, open_path.to_string_lossy().as_ref(), FILE)?;
+        let base = after_open.as_deref().unwrap_or(&existing);
+        let after_pending = remove_settings_hook_for(base, "UserPromptSubmit", pending_path.to_string_lossy().as_ref(), FILE)?;
+        match after_pending.or(after_open) {
+            None => Ok(Plan::AlreadyDone("No Glance hook entries to remove.".to_string())),
             Some(next) => Ok(Plan::Write(vec![FileWrite { path: settings_path, contents: next, executable: false }])),
         }
     }
@@ -728,7 +786,7 @@ fn install_plan(adapter: &dyn ClientAdapter, c: Capability, bins: &Binaries, hom
         Capability::Mcp => adapter.mcp(home, &bins.mcp_bin),
         Capability::Guidance => adapter.guidance(home),
         Capability::Skill => adapter.skill(home),
-        Capability::Hook => adapter.open_hook(home, &bins.app_bin),
+        Capability::Hook => adapter.open_hook(home, bins),
     }
 }
 
@@ -978,21 +1036,110 @@ mod tests {
     fn cursor_has_no_skill_or_hook() {
         let home = tmp_home("cursor-caps");
         assert!(matches!(CursorAdapter.skill(&home).unwrap(), Plan::NotSupported));
-        assert!(matches!(CursorAdapter.open_hook(&home, "/bin/glance").unwrap(), Plan::NotSupported));
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        assert!(matches!(CursorAdapter.open_hook(&home, &bins).unwrap(), Plan::NotSupported));
         let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
-    fn claude_hook_writes_executable_script_and_settings() {
+    fn claude_hook_writes_both_scripts_and_settings() {
         let home = tmp_home("claude-hook");
-        let writes = plan_writes(ClaudeAdapter.open_hook(&home, "/Applications/Glance.app/Contents/MacOS/glance").unwrap());
-        assert_eq!(writes.len(), 2);
-        let script = writes.iter().find(|w| w.executable).expect("an executable script write");
-        assert!(script.path.ends_with("open-md-hook.sh"));
-        assert!(script.contents.contains("/Applications/Glance.app/Contents/MacOS/glance"));
+        let bins = Binaries {
+            mcp_bin: "/Applications/Glance.app/Contents/MacOS/glance-mcp".to_string(),
+            app_bin: "/Applications/Glance.app/Contents/MacOS/glance".to_string(),
+        };
+        let writes = plan_writes(ClaudeAdapter.open_hook(&home, &bins).unwrap());
+        assert_eq!(writes.len(), 3);
+        let open = writes.iter().find(|w| w.path.ends_with("open-md-hook.sh")).expect("open-md-hook.sh write");
+        assert!(open.executable);
+        assert!(open.contents.contains("/Applications/Glance.app/Contents/MacOS/glance\""));
+        let pending = writes.iter().find(|w| w.path.ends_with("pending-hook.sh")).expect("pending-hook.sh write");
+        assert!(pending.executable);
+        assert!(pending.contents.contains("/Applications/Glance.app/Contents/MacOS/glance-mcp\" --pending"));
         let settings = writes.iter().find(|w| w.path.ends_with("settings.json")).expect("a settings write");
         let v: serde_json::Value = serde_json::from_str(&settings.contents).unwrap();
         assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], "Write");
+        assert!(v["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap().ends_with("open-md-hook.sh"));
+        let ups = &v["hooks"]["UserPromptSubmit"][0];
+        assert!(ups.get("matcher").is_none(), "UserPromptSubmit entries carry no matcher");
+        assert!(ups["hooks"][0]["command"].as_str().unwrap().ends_with("pending-hook.sh"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn pending_hook_script_runs_mcp_pending_and_never_fails() {
+        let s = pending_hook_script("/Applications/Glance.app/Contents/MacOS/glance-mcp");
+        assert!(s.starts_with("#!/bin/sh\n"));
+        assert!(s.contains("\"/Applications/Glance.app/Contents/MacOS/glance-mcp\" --pending"));
+        assert!(s.contains("|| true"));
+        assert!(s.trim_end().ends_with("exit 0"));
+        // With a missing binary the script must still exit 0 and print nothing.
+        let dir = tmp_home("pending-script");
+        let script = dir.join("pending-hook.sh");
+        std::fs::write(&script, pending_hook_script(&dir.join("missing-mcp").to_string_lossy())).unwrap();
+        let out = std::process::Command::new("sh")
+            .arg(&script)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(out.stdout.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_settings_hook_for_adds_matcherless_entry_idempotently() {
+        let existing = r#"{"model":"opus","hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"/other.sh"}]}]}}"#;
+        let once = merge_settings_hook_for(existing, "UserPromptSubmit", None, "/h/pending-hook.sh").unwrap();
+        let twice = merge_settings_hook_for(&once, "UserPromptSubmit", None, "/h/pending-hook.sh").unwrap();
+        assert_eq!(once, twice, "second merge must be a no-op");
+        let v: serde_json::Value = serde_json::from_str(&twice).unwrap();
+        assert_eq!(v["model"], "opus");
+        let arr = v["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["hooks"][0]["command"], "/other.sh");
+        assert!(arr[1].get("matcher").is_none());
+        assert_eq!(arr[1]["hooks"][0]["type"], "command");
+        assert_eq!(arr[1]["hooks"][0]["command"], "/h/pending-hook.sh");
+        // other events untouched / not created
+        assert!(v["hooks"].get("PostToolUse").is_none());
+    }
+
+    #[test]
+    fn remove_settings_hook_for_removes_only_that_event_entry() {
+        let existing = r#"{"hooks":{
+            "PostToolUse":[{"matcher":"Write","hooks":[{"type":"command","command":"/h/open-md-hook.sh"}]}],
+            "UserPromptSubmit":[
+                {"hooks":[{"type":"command","command":"/other.sh"}]},
+                {"hooks":[{"type":"command","command":"/h/pending-hook.sh"}]}
+            ]}}"#;
+        let out = remove_settings_hook_for(existing, "UserPromptSubmit", "/h/pending-hook.sh", "cfg").unwrap().expect("a rewrite");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let ups = v["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(ups.len(), 1);
+        assert_eq!(ups[0]["hooks"][0]["command"], "/other.sh");
+        // PostToolUse entry untouched
+        assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "/h/open-md-hook.sh");
+        // same command under a different event → nothing to do
+        assert!(remove_settings_hook_for(&out, "PostToolUse", "/h/pending-hook.sh", "cfg").unwrap().is_none());
+        assert!(remove_settings_hook_for(&out, "UserPromptSubmit", "/h/pending-hook.sh", "cfg").unwrap().is_none());
+    }
+
+    #[test]
+    fn claude_hook_uninstall_removes_both_entries() {
+        let home = tmp_home("claude-hook-uninstall");
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        run_step("g", "hook", ClaudeAdapter.open_hook(&home, &bins));
+        // a second install plans the identical settings file: no-op
+        let again = plan_writes(ClaudeAdapter.open_hook(&home, &bins).unwrap());
+        let settings_again = again.iter().find(|w| w.path.ends_with("settings.json")).unwrap();
+        assert_eq!(settings_again.contents, std::fs::read_to_string(home.join(".claude").join("settings.json")).unwrap());
+        // uninstall drops both entries in one write
+        let w = plan_writes(ClaudeAdapter.open_hook_uninstall(&home).unwrap());
+        assert_eq!(w.len(), 1);
+        let v: serde_json::Value = serde_json::from_str(&w[0].contents).unwrap();
+        assert!(v["hooks"]["PostToolUse"].as_array().unwrap().is_empty());
+        assert!(v["hooks"]["UserPromptSubmit"].as_array().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1140,6 +1287,8 @@ mod tests {
         }
         assert!(home.join(".claude.json").exists());
         assert!(home.join(".claude").join("skills").join("glance").join("SKILL.md").exists());
+        assert!(home.join(".claude").join("skills").join("glance").join("open-md-hook.sh").exists());
+        assert!(home.join(".claude").join("skills").join("glance").join("pending-hook.sh").exists());
         // uninstall
         for r in remove_adapter(&ClaudeAdapter, &home) {
             assert!(r.ok, "uninstall step failed: {}", r.message);
@@ -1149,8 +1298,8 @@ mod tests {
         assert!(cfg["mcpServers"].get("glance").is_none());
         assert!(!home.join(".claude").join("skills").join("glance").exists());
         let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join(".claude").join("settings.json")).unwrap()).unwrap();
-        let arr = settings["hooks"]["PostToolUse"].as_array().unwrap();
-        assert!(arr.is_empty());
+        assert!(settings["hooks"]["PostToolUse"].as_array().unwrap().is_empty());
+        assert!(settings["hooks"]["UserPromptSubmit"].as_array().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&home);
     }
 
