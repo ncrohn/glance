@@ -143,6 +143,9 @@ pub fn run() {
                 "about_glance" => {
                     let _ = app.emit("show-about", ());
                 }
+                "whats_new" => {
+                    let _ = app.emit("show-whats-new", ());
+                }
                 "open_theme" => {
                     let _ = app.emit("show-theme", ());
                 }
@@ -156,6 +159,13 @@ pub fn run() {
                 handle,
                 "about_glance",
                 "About Glance",
+                true,
+                None::<&str>,
+            )?;
+            let whats_new_item = MenuItem::with_id(
+                handle,
+                "whats_new",
+                "What's New…",
                 true,
                 None::<&str>,
             )?;
@@ -179,6 +189,7 @@ pub fn run() {
                 true,
                 &[
                     &about_item,
+                    &whats_new_item,
                     &PredefinedMenuItem::separator(handle)?,
                     &install_cli_item,
                     &remove_cli_item,
