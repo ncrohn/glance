@@ -1032,16 +1032,47 @@ body {
 .modal-btn:hover { border-color: var(--accent); color: var(--accent); }
 .modal-btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 .modal-btn.primary:hover { background: var(--accent-bright); border-color: var(--accent-bright); color: #fff; }
-/* What's New: a taller box with the changelog section rendered as markdown. */
-.box.whats-new { width: min(600px, 92vw); }
-.box.whats-new .modal-body { max-height: 62vh; padding-right: 6px; }
-.whats-new-notes { font-size: 14px; line-height: 1.55; color: var(--ink-soft); }
-.whats-new-notes p:first-child { color: var(--ink); font-size: 15px; }
-.whats-new-notes h3 { margin: 1.1em 0 0.35em; font: 600 11px/1 var(--font-mono, system-ui); text-transform: uppercase; letter-spacing: 0.04em; color: var(--faint); border: 0; }
-.whats-new-notes ul { margin: 0 0 0.6em; padding-left: 1.2em; }
-.whats-new-notes li { margin: 0.2em 0; }
-.whats-new-notes strong { color: var(--ink); }
-.whats-new-notes code { font-size: 12.5px; }
+/* What's New: the About dialog's header language (icon, wordmark, accent dot)
+   over the document's editorial typography, sized to the notes. */
+.modal .box.whats-new { max-width: 560px; padding: 22px 26px 18px; }
+.whats-new-head {
+  display: flex; align-items: center; gap: 14px;
+  padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--border);
+}
+.whats-new-icon { width: 44px; height: 44px; border-radius: 11px; box-shadow: var(--shadow); flex: 0 0 auto; }
+.whats-new-name {
+  font-family: var(--font-display); font-weight: 700; font-size: 24px;
+  letter-spacing: -0.02em; color: var(--ink); line-height: 1;
+}
+.whats-new-name .dot { color: var(--accent); }
+.whats-new-kicker {
+  margin-top: 6px; font: 600 11px/1 var(--font-mono); text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--faint); font-variant-numeric: tabular-nums;
+}
+.box.whats-new .modal-body { max-height: 58vh; padding-right: 10px; margin-right: -10px; }
+.whats-new-notes { font-family: var(--font-body); font-size: 15.5px; line-height: 1.6; color: var(--ink-soft); }
+.whats-new-notes > p:first-child {
+  font-family: var(--font-display); font-style: italic; font-size: 18px; line-height: 1.4;
+  color: var(--ink); margin: 0 0 0.6em;
+}
+.whats-new-notes p { margin: 0 0 0.7em; }
+.whats-new-notes h3 {
+  display: flex; align-items: center; gap: 10px;
+  margin: 1.3em 0 0.5em; font: 600 11px/1 var(--font-mono); text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--faint);
+}
+.whats-new-notes h3::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.whats-new-notes ul { margin: 0 0 0.4em; padding-left: 1.15em; }
+.whats-new-notes li { margin: 0.28em 0; padding-left: 0.15em; }
+.whats-new-notes li::marker { color: var(--accent); }
+.whats-new-notes strong { font-weight: 600; color: var(--ink); }
+.whats-new-notes code {
+  font-family: var(--font-mono); font-size: 12.5px; padding: 1px 5px; border-radius: 5px;
+  background: var(--raised); color: var(--ink);
+}
+.whats-new-notes kbd { font-family: var(--font-mono); font-size: 12px; }
+.box.whats-new .modal-footer { justify-content: space-between; align-items: center; margin-top: 14px; }
+.whats-new-link { font-size: 12.5px; }
 
 /* Setup result — one row per step */
 .setup-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
