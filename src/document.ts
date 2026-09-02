@@ -13,6 +13,9 @@ export interface Doc {
   existsOnDisk: boolean;
   annotations: import("./annotations").Annotation[];
   resolutions: Record<string, import("./annotations").Resolution>;
+  // Ids Claude resolved or replied to while this doc was in a background tab;
+  // pulsed and cleared when the tab is next shown.
+  claudeActivity: string[];
 }
 
 export function basename(path: string): string {
@@ -32,6 +35,7 @@ export function createDoc(absPath: string, diskContent: string): Doc {
     existsOnDisk: true,
     annotations: [],
     resolutions: {},
+    claudeActivity: [],
   };
 }
 

@@ -11,6 +11,7 @@ describe("document", () => {
     expect(d.editorContent).toBe("# Hi");
     expect(d.viewMode).toBe("rendered");
     expect(d.existsOnDisk).toBe(true);
+    expect(d.claudeActivity).toEqual([]);
     expect(isDirty(d)).toBe(false);
   });
 

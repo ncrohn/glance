@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   emptyState, openDoc, closeDoc, setActive, updateEditorContent,
   toggleViewMode, markSaved, applyDiskChange, markRemoved, getActive, canRevealActive,
-  markReviewed, setReviewedBaseline,
+  markReviewed, setReviewedBaseline, setDocActivity, clearDocActivity,
 } from "./store";
 import { isDirty } from "./document";
 
@@ -126,5 +126,26 @@ describe("review baseline reducers", () => {
     let s = openDoc(emptyState(), "/x.md", "v2");
     s = setReviewedBaseline(s, "/x.md", "v1");
     expect(s.docs[0].reviewedContent).toBe("v1");
+  });
+});
+
+describe("claude activity reducers", () => {
+  it("setDocActivity replaces the list on the named doc only", () => {
+    let s = openDoc(emptyState(), "/a.md", "A");
+    s = openDoc(s, "/b.md", "B");
+    s = setDocActivity(s, "/a.md", ["x"]);
+    s = setDocActivity(s, "/a.md", ["y", "z"]);
+    expect(s.docs[0].claudeActivity).toEqual(["y", "z"]);
+    expect(s.docs[1].claudeActivity).toEqual([]);
+  });
+
+  it("clearDocActivity empties the list and is a no-op when already empty", () => {
+    let s = openDoc(emptyState(), "/a.md", "A");
+    s = setDocActivity(s, "/a.md", ["x"]);
+    s = clearDocActivity(s, "/a.md");
+    expect(s.docs[0].claudeActivity).toEqual([]);
+    const before = s.docs[0];
+    s = clearDocActivity(s, "/a.md");
+    expect(s.docs[0]).toBe(before);
   });
 });

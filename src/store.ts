@@ -96,3 +96,11 @@ export function setDocAnnotations(s: State, id: string, annotations: Annotation[
 export function setDocResolutions(s: State, id: string, resolutions: Record<string, Resolution>): State {
   return mapDoc(s, id, (d) => ({ ...d, resolutions }));
 }
+
+export function setDocActivity(s: State, id: string, ids: string[]): State {
+  return mapDoc(s, id, (d) => ({ ...d, claudeActivity: ids }));
+}
+
+export function clearDocActivity(s: State, id: string): State {
+  return mapDoc(s, id, (d) => (d.claudeActivity.length ? { ...d, claudeActivity: [] } : d));
+}
