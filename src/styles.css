@@ -1222,6 +1222,13 @@ body {
   color: var(--anno-color, var(--accent));
   box-shadow: none;
 }
+/* Claude-authored: a ring instead of a solid disc. */
+.anno-gutter-marker.by-claude {
+  box-sizing: border-box;
+  background: var(--surface);
+  color: var(--anno-color, var(--accent));
+  border: 2px solid var(--anno-color, var(--accent));
+}
 
 /* Rail number chip mirrors the marker. */
 .note-chip {
@@ -1365,6 +1372,10 @@ body {
 .note-card.drifted .note-chip {
   box-sizing: border-box; background: transparent;
   border: 2px dashed var(--anno-color, var(--accent)); color: var(--anno-color, var(--accent));
+}
+.note-card.by-claude .note-chip {
+  box-sizing: border-box; background: var(--surface);
+  color: var(--anno-color, var(--accent)); border: 2px solid var(--anno-color, var(--accent));
 }
 
 /* Blocks changed on disk since the doc was last marked reviewed. A rounded

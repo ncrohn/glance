@@ -94,9 +94,13 @@ Use `get_annotation(path, id)` when you need to see the lines around a comment; 
 3. Call `resolve_annotation(path: "<absolute-path>", id: "<id>", note: "<what changed>")`. `note` is one line saying what you changed ("Cut the cap to 5 min; batch keeps 10"). It flips to resolved live in Glance, with your note on the card, so the user sees it handled without reading the diff.
 4. When done, call `list_annotations` again to confirm nothing is still open.
 
+## Point the user at something
+
+Use `add_annotation(path: "<absolute-path>", quote: "<verbatim text>", note: "<one line>")` for a "look here" the user should see in the document: a risk you noticed, a section that needs their decision. `quote` must be copied verbatim from the file (the call fails otherwise); `note` is one line. It appears in Glance as a numbered card marked as yours, and the user resolves or deletes it like any other. Use it sparingly, and never to restate what you already said in chat.
+
 ## Etiquette
 
-- Your tools are `list_annotations`, `get_annotation`, `resolve_annotation`, `reply_annotation`. There is no tool to create annotations — that is the user's side.
+- Your tools are `list_annotations`, `get_annotation`, `resolve_annotation`, `reply_annotation`, `add_annotation`. Annotations you create show as yours.
 - Resolve a comment only after you actually addressed it. One resolve per comment, always with a `note`.
 - Replies belong on the card, not in chat. Keep them to a line or two.
 "#
@@ -875,12 +879,14 @@ mod tests {
         let s = skill_doc();
         assert!(s.contains("name: glance"));
         assert!(s.contains("description:"));
-        // teaches the mdview open convention and all four MCP tools
+        // teaches the mdview open convention and all five MCP tools
         assert!(s.contains("mdview <absolute-path>"));
         assert!(s.contains("list_annotations"));
         assert!(s.contains("get_annotation"));
         assert!(s.contains("resolve_annotation"));
         assert!(s.contains("reply_annotation"));
+        assert!(s.contains("add_annotation"));
+        assert!(s.contains("Point the user at something"));
         // get_annotation is the way to see surrounding lines
         assert!(s.contains("`context.before` and `context.after`"));
         // resolves carry a note; questions go on the card, not in chat
