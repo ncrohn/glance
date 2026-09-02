@@ -23,6 +23,12 @@ pub struct Annotation {
     /// 0 means not yet assigned (a pre-numbers store, or an add in flight).
     #[serde(default)]
     pub number: u32,
+    /// Who resolved it ("user" or "claude") and when (ISO 8601). Both absent
+    /// while the annotation is open.
+    #[serde(default, rename = "resolvedBy", skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
+    #[serde(default, rename = "resolvedAt", skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -130,6 +136,8 @@ mod tests {
             author: "user".into(),
             created_at: "t".into(),
             number: 0,
+            resolved_by: None,
+            resolved_at: None,
         }
     }
 

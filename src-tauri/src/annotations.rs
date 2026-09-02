@@ -3,6 +3,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AnnotationStore {
@@ -141,6 +142,85 @@ pub fn remove_annotation(doc_path: String, id: String) -> Result<(), String> {
     mutate_store(&doc_path, move |s| s.annotations.retain(|a| a.id != id))
 }
 
+/// Fields the GUI may change on a stored annotation. Every `Some` is applied;
+/// `clear_resolution` drops both resolved fields (a reopen), since a plain
+/// `Option` can't express "set to none" over IPC.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct AnnotationPatch {
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default, rename = "resolvedBy")]
+    pub resolved_by: Option<String>,
+    #[serde(default, rename = "resolvedAt")]
+    pub resolved_at: Option<String>,
+    #[serde(default, rename = "clearResolution")]
+    pub clear_resolution: bool,
+}
+
+pub fn apply_patch(a: &mut Annotation, patch: &AnnotationPatch) {
+    if let Some(note) = &patch.note {
+        a.note = note.clone();
+    }
+    if let Some(status) = &patch.status {
+        a.status = status.clone();
+    }
+    if let Some(by) = &patch.resolved_by {
+        a.resolved_by = Some(by.clone());
+    }
+    if let Some(at) = &patch.resolved_at {
+        a.resolved_at = Some(at.clone());
+    }
+    if patch.clear_resolution {
+        a.resolved_by = None;
+        a.resolved_at = None;
+    }
+}
+
+/// Patch one annotation by id under lock. Errors when the id is not in the store.
+#[tauri::command]
+pub fn update_annotation(doc_path: String, id: String, patch: AnnotationPatch) -> Result<(), String> {
+    let found = mutate_store(&doc_path, |s| match s.annotations.iter_mut().find(|a| a.id == id) {
+        Some(a) => {
+            apply_patch(a, &patch);
+            true
+        }
+        None => false,
+    })?;
+    if found {
+        Ok(())
+    } else {
+        Err(format!("no annotation '{id}'"))
+    }
+}
+
+/// Current UTC time as `YYYY-MM-DDTHH:MM:SSZ`, without a date crate.
+pub fn now_iso8601() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    iso8601_from_epoch(secs)
+}
+
+/// Epoch seconds → `YYYY-MM-DDTHH:MM:SSZ` (proleptic Gregorian, civil-from-days).
+pub fn iso8601_from_epoch(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (h, m, s) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if mo <= 2 { 1 } else { 0 };
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
 #[tauri::command]
 pub fn resolve_anchors(text: String, annotations: Vec<Annotation>) -> Vec<Resolution> {
     annotations.iter().map(|a| resolve_anchor(&text, a)).collect()
@@ -210,6 +290,8 @@ mod tests {
             author: "user".into(),
             created_at: created_at.into(),
             number: 0,
+            resolved_by: None,
+            resolved_at: None,
         }
     }
 
@@ -285,6 +367,102 @@ mod tests {
         let nums: Vec<(String, u32)> = store.annotations.iter().map(|a| (a.id.clone(), a.number)).collect();
         assert_eq!(nums, vec![("late".into(), 2), ("early".into(), 1), ("new".into(), 3)]);
         assert!(std::fs::read_to_string(&path).unwrap().contains("\"nextNumber\": 4"));
+    }
+
+    #[test]
+    fn iso8601_from_fixed_epoch() {
+        assert_eq!(iso8601_from_epoch(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(iso8601_from_epoch(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso8601_from_epoch(951_782_400), "2000-02-29T00:00:00Z"); // leap day
+        assert_eq!(now_iso8601().len(), 20);
+    }
+
+    #[test]
+    fn apply_patch_changes_note_only() {
+        let mut a = ann("a");
+        apply_patch(&mut a, &AnnotationPatch { note: Some("edited".into()), ..Default::default() });
+        assert_eq!(a.note, "edited");
+        assert_eq!(a.status, "open");
+        assert_eq!(a.resolved_by, None);
+    }
+
+    #[test]
+    fn apply_patch_resolve_sets_status_by_and_at() {
+        let mut a = ann("a");
+        apply_patch(&mut a, &AnnotationPatch {
+            status: Some("resolved".into()),
+            resolved_by: Some("user".into()),
+            resolved_at: Some("2026-09-01T00:00:00Z".into()),
+            ..Default::default()
+        });
+        assert_eq!(a.status, "resolved");
+        assert_eq!(a.resolved_by.as_deref(), Some("user"));
+        assert_eq!(a.resolved_at.as_deref(), Some("2026-09-01T00:00:00Z"));
+        assert_eq!(a.note, "n");
+    }
+
+    #[test]
+    fn apply_patch_reopen_clears_resolution() {
+        let mut a = ann("a");
+        a.status = "resolved".into();
+        a.resolved_by = Some("claude".into());
+        a.resolved_at = Some("t".into());
+        apply_patch(&mut a, &AnnotationPatch {
+            status: Some("open".into()),
+            clear_resolution: true,
+            ..Default::default()
+        });
+        assert_eq!(a.status, "open");
+        assert_eq!(a.resolved_by, None);
+        assert_eq!(a.resolved_at, None);
+    }
+
+    #[test]
+    fn annotation_patch_deserializes_camel_case() {
+        let p: AnnotationPatch =
+            serde_json::from_str(r#"{"status":"open","clearResolution":true}"#).unwrap();
+        assert_eq!(p.status.as_deref(), Some("open"));
+        assert!(p.clear_resolution);
+        let p: AnnotationPatch = serde_json::from_str(r#"{"resolvedBy":"user","resolvedAt":"x"}"#).unwrap();
+        assert_eq!(p.resolved_by.as_deref(), Some("user"));
+        assert_eq!(p.resolved_at.as_deref(), Some("x"));
+        assert!(!p.clear_resolution);
+    }
+
+    #[test]
+    #[serial]
+    fn update_annotation_round_trips_and_errors_on_missing_id() {
+        std::env::set_var("HOME", "/tmp/glance-test-update");
+        let doc = "/m/update.md";
+        let path = store_path_for(doc).unwrap();
+        let _ = std::fs::remove_file(&path);
+        add_annotation(doc.into(), ann("a")).unwrap();
+        update_annotation(doc.into(), "a".into(), AnnotationPatch {
+            status: Some("resolved".into()),
+            resolved_by: Some("user".into()),
+            resolved_at: Some("2026-09-01T00:00:00Z".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let a = &read_store(doc).annotations[0];
+        assert_eq!(a.status, "resolved");
+        assert_eq!(a.resolved_by.as_deref(), Some("user"));
+        assert_eq!(a.number, 1);
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("\"resolvedBy\": \"user\""), "{on_disk}");
+        update_annotation(doc.into(), "a".into(), AnnotationPatch {
+            status: Some("open".into()),
+            note: Some("edited".into()),
+            clear_resolution: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let a = &read_store(doc).annotations[0];
+        assert_eq!((a.status.as_str(), a.note.as_str()), ("open", "edited"));
+        assert_eq!(a.resolved_by, None);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("resolvedBy"));
+        let err = update_annotation(doc.into(), "missing".into(), AnnotationPatch::default()).unwrap_err();
+        assert!(err.contains("missing"), "{err}");
     }
 
     #[test]

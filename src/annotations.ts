@@ -19,7 +19,12 @@ export interface Annotation {
   status: AnnotationStatus;
   author: "user" | "claude";
   createdAt: string;
+  // Who resolved it and when; both absent while open.
+  resolvedBy?: "user" | "claude";
+  resolvedAt?: string;
 }
+
+export type AnnotationPatch = Partial<Pick<Annotation, "note" | "status" | "resolvedBy" | "resolvedAt">>;
 
 export interface AnnotationStore {
   docPath: string;
@@ -47,4 +52,10 @@ export function resolveAnnotation(list: Annotation[], id: string): Annotation[] 
 
 export function removeAnnotation(list: Annotation[], id: string): Annotation[] {
   return list.filter((a) => a.id !== id);
+}
+
+/** Merge `patch` into the annotation with `id`. A key set to `undefined`
+ *  clears that field (how a reopen drops resolvedBy/resolvedAt). */
+export function patchAnnotation(list: Annotation[], id: string, patch: AnnotationPatch): Annotation[] {
+  return list.map((a) => (a.id === id ? { ...a, ...patch } : a));
 }

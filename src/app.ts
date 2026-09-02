@@ -13,15 +13,18 @@ import { mountBlockExpanders } from "./block-expand";
 import { closeMermaidZoom } from "./mermaid-zoom";
 import {
   readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs,
-  readAnnotations, addStoredAnnotation, removeStoredAnnotation, resolveAnchors, ensureAnnotationStore,
+  readAnnotations, addStoredAnnotation, removeStoredAnnotation, updateStoredAnnotation, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
   onShowAbout, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
   onShowInFinder, revealInFinder, setShowInFinderEnabled,
   readReviewed, writeReviewed,
 } from "./ipc";
-import { addAnnotation, removeAnnotation, genId, type Annotation } from "./annotations";
+import {
+  addAnnotation, removeAnnotation, patchAnnotation, genId, type Annotation, type AnnotationPatch,
+} from "./annotations";
 import { captureSelection } from "./anchor-capture";
 import { showCommentComposer } from "./composer";
+import { showToast } from "./toast";
 import {
   renderRail, applyHighlights, mountSelectionToolbar, assignMarkers, linkAnnotationHovers, pulseBlock, focusRailCard,
   parseRailPref,
@@ -155,6 +158,16 @@ function renderRailFor(): void {
   // The rail's cards can't scroll-to or highlight anything in the editor.
   if (doc.viewMode === "source") { host.classList.add("empty"); host.innerHTML = ""; return; }
   const markers = assignMarkers(doc.annotations, doc.resolutions);
+  // Optimistic local patch (fresh from state), then the locked server-side
+  // update, then reconcile with the merged on-disk truth. `clearResolution`
+  // tells the server to drop resolvedBy/resolvedAt, which `undefined` can't.
+  const patch = (a: Annotation, local: AnnotationPatch, clearResolution = false) => {
+    const cur = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? doc.annotations;
+    state = setDocAnnotations(state, doc.absPath, patchAnnotation(cur, a.id, local));
+    render();
+    const stored = clearResolution ? { ...local, clearResolution } : local;
+    void updateStoredAnnotation(doc.absPath, a.id, stored).then(() => loadAnnotations(doc.absPath));
+  };
   renderRail(host, doc.annotations, doc.resolutions, markers, {
     onScrollTo: (a) => {
       const r = doc.resolutions[a.id];
@@ -164,13 +177,42 @@ function renderRailFor(): void {
       node?.scrollIntoView({ behavior: "smooth", block: "center" });
       pulseBlock(node);
     },
+    onResolve: (a) => {
+      patch(a, { status: "resolved", resolvedBy: "user", resolvedAt: new Date().toISOString() });
+    },
+    onReopen: (a) => {
+      patch(a, { status: "open", resolvedBy: undefined, resolvedAt: undefined }, true);
+    },
+    onEdit: (a) => {
+      const card = host.querySelector<HTMLElement>(`.note-card[data-annotation-id="${a.id}"]`);
+      const rect = card?.getBoundingClientRect() ?? ({ top: 120, bottom: 140, left: 120 } as DOMRect);
+      showCommentComposer({
+        quote: a.quote,
+        anchor: { top: rect.top, bottom: rect.bottom, left: rect.left },
+        initial: a.note,
+        mode: "edit",
+        onSubmit: (note) => { if (note !== a.note) patch(a, { note }); },
+        onCancel: () => {},
+      });
+    },
     onRemove: (a) => {
       // Optimistic local remove (fresh from state), then the locked server-side
-      // remove, then reconcile with the merged on-disk truth.
+      // remove, then reconcile with the merged on-disk truth. Undo re-adds the
+      // same annotation (id and number intact) after the remove has landed, so
+      // the store stays consistent even if the app quits mid-toast.
       const cur = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? doc.annotations;
       state = setDocAnnotations(state, doc.absPath, removeAnnotation(cur, a.id));
       render();
-      void removeStoredAnnotation(doc.absPath, a.id).then(() => loadAnnotations(doc.absPath));
+      const removed = removeStoredAnnotation(doc.absPath, a.id).then(() => loadAnnotations(doc.absPath));
+      showToast(a.number > 0 ? `Comment ${a.number} deleted` : "Comment deleted", {
+        actionLabel: "Undo",
+        onAction: () => {
+          const now = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? [];
+          state = setDocAnnotations(state, doc.absPath, addAnnotation(now, a));
+          render();
+          void removed.then(() => addStoredAnnotation(doc.absPath, a)).then(() => loadAnnotations(doc.absPath));
+        },
+      });
     },
     onClearResolved: (ids) => {
       let cur = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? doc.annotations;
