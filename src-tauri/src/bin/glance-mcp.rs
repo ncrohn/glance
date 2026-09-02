@@ -43,6 +43,46 @@ fn view_of(a: &Annotation, text: &str) -> AnnotationView {
     }
 }
 
+#[derive(Serialize, PartialEq, Debug)]
+struct Context {
+    before: Vec<String>,
+    after: Vec<String>,
+}
+
+/// `get_annotation` payload: the list view plus the lines around the range.
+/// `context` is `None` when the annotation is orphaned (no current lines).
+#[derive(Serialize)]
+struct AnnotationDetail {
+    #[serde(flatten)]
+    view: AnnotationView,
+    context: Option<Context>,
+}
+
+const CONTEXT_LINES: usize = 3;
+
+/// Up to `n` lines on each side of the 1-indexed inclusive range
+/// `start..=end`, clamped at the file edges.
+fn context_around(text: &str, start: usize, end: usize, n: usize) -> Context {
+    let lines: Vec<&str> = text.lines().collect();
+    let before_to = start.saturating_sub(1).min(lines.len());
+    let before_from = before_to.saturating_sub(n);
+    let after_from = end.min(lines.len());
+    let after_to = (end + n).min(lines.len());
+    Context {
+        before: lines[before_from..before_to].iter().map(|l| l.to_string()).collect(),
+        after: lines[after_from..after_to].iter().map(|l| l.to_string()).collect(),
+    }
+}
+
+fn detail_of(a: &Annotation, text: &str) -> AnnotationDetail {
+    let view = view_of(a, text);
+    let context = match (view.line_start, view.line_end) {
+        (Some(s), Some(e)) => Some(context_around(text, s, e, CONTEXT_LINES)),
+        _ => None,
+    };
+    AnnotationDetail { view, context }
+}
+
 /// Build the view list, sorted by number, optionally filtered by status (default "open").
 ///
 /// Filtering happens on the resolved view so that `orphaned` (a live anchor
@@ -246,6 +286,95 @@ mod tests {
         }
     }
 
+    const NINE: &str = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n";
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn context_around_middle_of_file() {
+        let c = context_around(NINE, 5, 5, 3);
+        assert_eq!(c.before, strs(&["l2", "l3", "l4"]));
+        assert_eq!(c.after, strs(&["l6", "l7", "l8"]));
+        // Multi-line range: context hugs both ends.
+        let c = context_around(NINE, 4, 6, 3);
+        assert_eq!(c.before, strs(&["l1", "l2", "l3"]));
+        assert_eq!(c.after, strs(&["l7", "l8", "l9"]));
+    }
+
+    #[test]
+    fn context_around_first_line_has_nothing_before() {
+        let c = context_around(NINE, 1, 1, 3);
+        assert!(c.before.is_empty());
+        assert_eq!(c.after, strs(&["l2", "l3", "l4"]));
+        let c = context_around(NINE, 2, 2, 3);
+        assert_eq!(c.before, strs(&["l1"]));
+    }
+
+    #[test]
+    fn context_around_last_line_has_nothing_after() {
+        let c = context_around(NINE, 9, 9, 3);
+        assert_eq!(c.before, strs(&["l6", "l7", "l8"]));
+        assert!(c.after.is_empty());
+        let c = context_around(NINE, 8, 8, 3);
+        assert_eq!(c.after, strs(&["l9"]));
+    }
+
+    #[test]
+    fn context_around_short_file_clamps_both_sides() {
+        let c = context_around("a\nb\n", 1, 1, 3);
+        assert!(c.before.is_empty());
+        assert_eq!(c.after, strs(&["b"]));
+        let c = context_around("a\nb\n", 2, 2, 3);
+        assert_eq!(c.before, strs(&["a"]));
+        assert!(c.after.is_empty());
+        // Range past the end of the file must not panic.
+        let c = context_around("a\n", 7, 9, 3);
+        assert_eq!(c.before, strs(&["a"]));
+        assert!(c.after.is_empty());
+    }
+
+    #[test]
+    fn detail_of_orphaned_has_no_context() {
+        let mut a = ann("a", "NOTINTEXTEVER", "open");
+        a.line_hint = LineHint { start: 99, end: 99 };
+        let json = serde_json::to_value(detail_of(&a, "hello world\n")).unwrap();
+        assert_eq!(json["anchor"], "orphaned");
+        assert_eq!(json["context"], Value::Null);
+        // Anchored: the view's fields are flattened next to `context`.
+        let json = serde_json::to_value(detail_of(&ann("b", "l5", "open"), NINE)).unwrap();
+        assert_eq!(json["id"], "b");
+        assert_eq!(json["lineStart"], 5);
+        assert_eq!(json["context"]["before"], json!(["l2", "l3", "l4"]));
+        assert_eq!(json["context"]["after"], json!(["l6", "l7", "l8"]));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn get_annotation_tool_returns_context_from_disk() {
+        let home = "/tmp/glance-test-mcp-context";
+        std::env::set_var("HOME", home);
+        std::fs::create_dir_all(home).unwrap();
+        let doc = format!("{home}/doc.md");
+        std::fs::write(&doc, NINE).unwrap();
+        let _ = std::fs::remove_file(glance_lib::annotations::store_path_for(&doc).unwrap());
+        mutate_store(&doc, |s| s.annotations.push(ann("mid", "l5", "open"))).unwrap();
+
+        let out = call_tool("get_annotation", &json!({ "path": doc, "id": "mid" })).unwrap();
+        let payload: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["id"], "mid");
+        assert_eq!(payload["lineStart"], 5);
+        assert_eq!(payload["lineEnd"], 5);
+        assert_eq!(payload["context"]["before"], json!(["l2", "l3", "l4"]));
+        assert_eq!(payload["context"]["after"], json!(["l6", "l7", "l8"]));
+
+        // list_annotations is unchanged: no context field.
+        let out = call_tool("list_annotations", &json!({ "path": doc })).unwrap();
+        let list: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(list[0].get("context").is_none());
+    }
+
     #[test]
     fn build_views_orphaned_filter_returns_unresolvable() {
         // Quote absent from text AND line_hint out of range → resolve_anchor returns "orphaned".
@@ -294,7 +423,7 @@ fn tool_schemas() -> Value {
         },
         {
             "name": "get_annotation",
-            "description": "Get one annotation by id with its current line range and quoted text.",
+            "description": "Get one annotation by id with its current line range, quoted text, replies, and three lines of context before and after.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -355,7 +484,7 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             let store = read_store(path);
             let text = read_doc(path);
             match store.annotations.iter().find(|a| a.id == id) {
-                Some(a) => Ok(text_result(serde_json::to_value(view_of(a, &text)).unwrap())),
+                Some(a) => Ok(text_result(serde_json::to_value(detail_of(a, &text)).unwrap())),
                 None => Err(format!("no annotation '{id}'")),
             }
         }

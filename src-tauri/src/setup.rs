@@ -85,7 +85,7 @@ Each comment has:
   - `drifted` — the quoted text is gone; this is an approximate line. Confirm with the user before editing.
   - `orphaned` — the quoted text no longer exists anywhere. Do not guess — ask the user what they meant.
 
-Use `get_annotation(path, id)` for one comment with surrounding context.
+Use `get_annotation(path, id)` when you need to see the lines around a comment; it returns `context.before` and `context.after` (three lines each).
 
 ## Act, then close the loop
 
@@ -881,6 +881,8 @@ mod tests {
         assert!(s.contains("get_annotation"));
         assert!(s.contains("resolve_annotation"));
         assert!(s.contains("reply_annotation"));
+        // get_annotation is the way to see surrounding lines
+        assert!(s.contains("`context.before` and `context.after`"));
         // resolves carry a note; questions go on the card, not in chat
         assert!(s.contains("note: \"<what changed>\""));
         assert!(s.contains("Do not ask in chat"));
