@@ -240,6 +240,9 @@ export function renderRail(
       const action = (glyph: string, title: string, run: () => void) => {
         const btn = el("button", "note-action", glyph);
         btn.title = title;
+        // A mousedown in the rail would collapse the document selection before
+        // the click runs; Re-anchor needs that selection alive.
+        btn.onmousedown = (ev) => { ev.preventDefault(); };
         btn.onclick = (ev) => { ev.stopPropagation(); run(); };
         actions.appendChild(btn);
       };
