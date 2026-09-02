@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { groupAnnotations, assignMarkers, annotationsForBlock, MARKER_PALETTE } from "./annotation-ui";
+import { groupAnnotations, assignMarkers, annotationsForBlock, cardModel, MARKER_PALETTE } from "./annotation-ui";
 import type { Annotation, Resolution } from "./annotations";
 
 function ann(id: string, status: Annotation["status"] = "open"): Annotation {
@@ -25,6 +25,65 @@ describe("groupAnnotations", () => {
     expect(g.open.map((x) => x.id)).toEqual(["a"]);
     expect(g.resolved.map((x) => x.id)).toEqual(["b"]);
     expect(g.orphaned.map((x) => x.id)).toEqual(["c"]);
+  });
+
+  it("orders open annotations by document line, not store order", () => {
+    const list = [annAt("a"), annAt("b"), annAt("c")];
+    const r = { a: res("a", 9), b: res("b", 34), c: res("c", 21) };
+    const g = groupAnnotations(list, r);
+    expect(g.open.map((x) => x.id)).toEqual(["a", "c", "b"]);
+  });
+
+  it("puts open annotations without a line last, tie-breaking by createdAt then id", () => {
+    const list = [annAt("noline", "2026-03"), annAt("b", "2026-02"), annAt("a", "2026-01"), annAt("z", "2026-01")];
+    const r: Record<string, Resolution> = {
+      b: res("b", 5), a: res("a", 5), z: res("z", 5),
+      noline: { id: "noline", startLine: null, endLine: null, anchor: "exact" },
+    };
+    const g = groupAnnotations(list, r);
+    expect(g.open.map((x) => x.id)).toEqual(["a", "z", "b", "noline"]);
+  });
+
+  it("orders orphaned and resolved newest first", () => {
+    const list = [
+      annAt("o1", "2026-01"), annAt("o2", "2026-02"),
+      annAt("r1", "2026-01", "resolved"), annAt("r2", "2026-02", "resolved"),
+    ];
+    const r = { o1: res("o1", null), o2: res("o2", null), r1: res("r1", 1), r2: res("r2", 1) };
+    const g = groupAnnotations(list, r);
+    expect(g.orphaned.map((x) => x.id)).toEqual(["o2", "o1"]);
+    expect(g.resolved.map((x) => x.id)).toEqual(["r2", "r1"]);
+  });
+});
+
+describe("cardModel", () => {
+  const marker = { number: 2, color: MARKER_PALETTE[1] };
+
+  it("tags drifted as moved, orphaned as not found, exact as nothing", () => {
+    const a = annAt("a");
+    expect(cardModel(a, { id: "a", startLine: 4, endLine: 4, anchor: "drifted" }, marker).tag).toBe("moved");
+    expect(cardModel(a, res("a", null), undefined).tag).toBe("not found");
+    expect(cardModel(a, res("a", 4), marker).tag).toBeNull();
+  });
+
+  it("carries the marker number and color, and the anchor kind", () => {
+    const m = cardModel(annAt("a"), res("a", 4), marker);
+    expect(m).toMatchObject({ number: 2, color: MARKER_PALETTE[1], line: "L4", anchor: "exact", note: "n" });
+    expect(cardModel(annAt("a"), undefined, undefined)).toMatchObject({ number: null, color: null, anchor: "none" });
+  });
+
+  it("shows a dash for the line when unresolved", () => {
+    expect(cardModel(annAt("a"), undefined, undefined).line).toBe("—");
+    expect(cardModel(annAt("a"), res("a", null), undefined).line).toBe("—");
+  });
+
+  it("collapses whitespace in the quote and cuts it at 80 chars", () => {
+    const a = { ...annAt("a"), quote: "  one\n\n  two\tthree  " };
+    expect(cardModel(a, undefined, undefined).quote).toBe("one two three");
+    const long = { ...annAt("a"), quote: "x".repeat(100) };
+    expect(cardModel(long, undefined, undefined).quote).toBe("x".repeat(80) + "…");
+    const exact = { ...annAt("a"), quote: "y".repeat(80) };
+    expect(cardModel(exact, undefined, undefined).quote).toBe("y".repeat(80));
   });
 });
 

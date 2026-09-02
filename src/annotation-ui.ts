@@ -1,4 +1,4 @@
-import type { Annotation, Resolution } from "./annotations";
+import type { AnchorKind, Annotation, Resolution } from "./annotations";
 import { locateQuote } from "./annotation-highlight";
 import { toVisible } from "./markdown-visible";
 
@@ -63,8 +63,16 @@ export interface Grouped {
   orphaned: Annotation[];
 }
 
+function byCreatedThenId(x: Annotation, y: Annotation): number {
+  if (x.createdAt !== y.createdAt) return x.createdAt < y.createdAt ? -1 : 1;
+  if (x.id !== y.id) return x.id < y.id ? -1 : 1;
+  return 0;
+}
+
 /** Bucket annotations for the rail. An open annotation whose current
- *  resolution is "orphaned" is shown in the orphaned group. */
+ *  resolution is "orphaned" is shown in the orphaned group. Open is in
+ *  document order (unresolved lines last); orphaned and resolved are newest
+ *  first. */
 export function groupAnnotations(
   list: Annotation[],
   resolutions: Record<string, Resolution>,
@@ -78,7 +86,53 @@ export function groupAnnotations(
     }
     g.open.push(a);
   }
+  g.open.sort((x, y) => {
+    const lx = resolutions[x.id]?.startLine ?? null;
+    const ly = resolutions[y.id]?.startLine ?? null;
+    if (lx == null && ly != null) return 1;
+    if (lx != null && ly == null) return -1;
+    if (lx != null && ly != null && lx !== ly) return lx - ly;
+    return byCreatedThenId(x, y);
+  });
+  const newestFirst = (x: Annotation, y: Annotation) => -byCreatedThenId(x, y);
+  g.orphaned.sort(newestFirst);
+  g.resolved.sort(newestFirst); // will switch to resolvedAt once annotations carry it
   return g;
+}
+
+export interface CardModel {
+  number: number | null;
+  color: string | null;
+  line: string;
+  anchor: AnchorKind | "none";
+  tag: string | null;
+  note: string;
+  quote: string;
+}
+
+const QUOTE_MAX = 80;
+
+/** Everything a rail card displays, derived from the annotation, its current
+ *  resolution, and its marker (if any). Pure; `renderRail` builds DOM from it. */
+export function cardModel(
+  a: Annotation,
+  res: Resolution | undefined,
+  marker: Marker | undefined,
+): CardModel {
+  const anchor: AnchorKind | "none" = res?.anchor ?? "none";
+  const orphaned = anchor === "orphaned" || a.status === "orphaned";
+  const tag = anchor === "drifted" ? "moved" : orphaned ? "not found" : null;
+  const collapsed = a.quote.replace(/\s+/g, " ").trim();
+  const quote = collapsed.length > QUOTE_MAX ? collapsed.slice(0, QUOTE_MAX).trimEnd() + "…" : collapsed;
+  return {
+    number: marker?.number ?? null,
+    color: marker?.color ?? null,
+    line: res?.startLine != null ? `L${res.startLine}` : "—",
+    anchor,
+    tag,
+    note: a.note,
+    quote,
+  };
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string): HTMLElementTagNameMap[K] {
@@ -111,23 +165,38 @@ export function renderRail(
     if (!items.length) return;
     host.appendChild(el("div", "rail-head", `${title} (${items.length})`));
     for (const a of items) {
+      const m = cardModel(a, resolutions[a.id], markers.get(a.id));
       const card = el("div", `note-card ${cls}`);
+      if (m.anchor === "drifted") card.classList.add("drifted");
       card.dataset.annotationId = a.id;
-      const res = resolutions[a.id];
-      const marker = markers.get(a.id);
-      if (marker) {
-        const chip = el("span", "note-chip", String(marker.number));
-        chip.style.setProperty("--anno-color", marker.color);
-        card.appendChild(chip);
-      }
-      const line = res?.startLine != null ? `L${res.startLine}` : "—";
-      card.appendChild(el("span", "note-line", line));
-      card.appendChild(el("span", "note-text", a.note));
-      card.onclick = () => handlers.onScrollTo(a);
+      if (m.color) card.style.setProperty("--anno-color", m.color);
+
+      const head = el("div", "note-head");
+      if (m.number != null) head.appendChild(el("span", "note-chip", String(m.number)));
+      head.appendChild(el("span", "note-line", m.line));
+      if (m.tag) head.appendChild(el("span", "note-tag", m.tag));
+      head.appendChild(el("span", "note-spacer"));
       const del = el("span", "note-del", "×");
       del.onclick = (ev) => { ev.stopPropagation(); handlers.onRemove(a); };
-      card.appendChild(del);
+      head.appendChild(del);
+      card.appendChild(head);
+
+      const noteEl = el("div", "note-text", m.note);
+      card.appendChild(noteEl);
+      if (m.quote) card.appendChild(el("div", "note-quote", m.quote));
+      card.onclick = () => handlers.onScrollTo(a);
       host.appendChild(card);
+
+      // Clamp is CSS; only offer "more" when it actually cut something off.
+      if (noteEl.scrollHeight > noteEl.clientHeight + 1) {
+        const more = el("button", "note-more", "more");
+        more.onclick = (ev) => {
+          ev.stopPropagation();
+          const expanded = noteEl.classList.toggle("expanded");
+          more.textContent = expanded ? "less" : "more";
+        };
+        noteEl.insertAdjacentElement("afterend", more);
+      }
     }
   };
 
@@ -165,7 +234,7 @@ export function applyHighlights(
     if (!block) continue;
 
     const marks = highlightQuoteIn(block, a, marker.color);
-    placeGutterMarker(renderedEl, marks[0] ?? block, marker, id, placed);
+    placeGutterMarker(renderedEl, marks[0] ?? block, marker, id, r.anchor, placed);
   }
 }
 
@@ -265,6 +334,7 @@ function placeGutterMarker(
   anchorEl: HTMLElement,
   marker: Marker,
   id: string,
+  anchor: AnchorKind,
   placed: { top: number; lane: number }[],
 ): void {
   const top = anchorEl.getBoundingClientRect().top - renderedEl.getBoundingClientRect().top;
@@ -275,6 +345,7 @@ function placeGutterMarker(
   placed.push({ top, lane });
 
   const chip = el("span", "anno-gutter-marker", String(marker.number));
+  if (anchor === "drifted") chip.classList.add("drifted");
   chip.dataset.annotationId = id;
   chip.style.setProperty("--anno-color", marker.color);
   chip.style.top = `${top}px`;

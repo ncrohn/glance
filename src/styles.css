@@ -1133,6 +1133,14 @@ body {
   transition: transform 0.12s ease;
 }
 .anno-gutter-marker.anno-emphasis { transform: scale(1.18); }
+/* Drifted: the quote is gone but the line hint still lands. Hollow, dashed. */
+.anno-gutter-marker.drifted {
+  box-sizing: border-box;
+  background: transparent;
+  border: 2px dashed var(--anno-color, var(--accent));
+  color: var(--anno-color, var(--accent));
+  box-shadow: none;
+}
 
 /* Rail number chip mirrors the marker. */
 .note-chip {
@@ -1182,13 +1190,36 @@ body {
 #rail { width: 260px; overflow-y: auto; padding: 16px; border-left: 1px solid var(--border); }
 #rail.empty { display: none; }
 .rail-head { font: 600 11px/1 var(--font-mono, system-ui); text-transform: uppercase; color: var(--faint); margin: 14px 0 6px; }
-.note-card { display: flex; gap: 8px; align-items: baseline; padding: 8px; border-radius: 6px; cursor: pointer; }
+.note-card { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 6px; cursor: pointer; }
 .note-card:hover { background: var(--raised, #0001); }
 .note-card.orphaned { opacity: .6; }
 .note-card.resolved { opacity: .5; text-decoration: line-through; }
 .note-line { font: 600 11px/1 var(--font-mono); color: var(--accent); }
-.note-text { flex: 1; font-size: 13px; }
+.note-text {
+  font-size: 13px; line-height: 1.4;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+}
 .note-del { color: var(--faint); }
+.note-head { display: flex; align-items: center; gap: 8px; }
+.note-spacer { flex: 1; }
+.note-tag {
+  font: 600 9px/1 var(--font-mono, system-ui); text-transform: uppercase; letter-spacing: .04em;
+  color: var(--faint); border: 1px solid var(--faint); border-radius: 999px; padding: 2px 6px;
+}
+.note-quote {
+  font-size: 12px; color: var(--faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border-left: 2px solid var(--anno-color, var(--faint)); padding-left: 8px;
+}
+.note-text.expanded { -webkit-line-clamp: unset; }
+.note-more {
+  align-self: flex-start; font: 500 11px/1 var(--font-mono, system-ui); color: var(--muted);
+  background: none; border: 0; padding: 0; cursor: pointer;
+}
+.note-card.drifted .note-chip {
+  box-sizing: border-box; background: transparent;
+  border: 2px dashed var(--anno-color, var(--accent)); color: var(--anno-color, var(--accent));
+}
 
 /* Blocks changed on disk since the doc was last marked reviewed. A rounded
    accent pill sits in the left gutter (inset top/bottom, not flush against the
