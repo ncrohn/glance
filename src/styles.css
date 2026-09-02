@@ -1114,7 +1114,7 @@ body {
   padding: 0.06em 0.05em;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
-  cursor: default;
+  cursor: pointer;
   transition: background 0.12s ease;
 }
 .rendered .anno-highlight.anno-emphasis {
@@ -1158,6 +1158,11 @@ body {
   100% { box-shadow: 0 0 0 10px transparent; }
 }
 .rendered .anno-pulse { animation: anno-pulse 0.7s ease-out 1; }
+@keyframes anno-card-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--anno-color, var(--accent)) 55%, transparent); }
+  100% { box-shadow: 0 0 0 8px transparent; }
+}
+.note-card.anno-pulse-card { animation: anno-card-pulse 0.7s ease-out 1; }
 
 /* Inline popover composer. */
 .comment-composer {

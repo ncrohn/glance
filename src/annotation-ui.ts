@@ -215,6 +215,7 @@ export function applyHighlights(
   annotations: Annotation[],
   resolutions: Record<string, Resolution>,
   markers: Map<string, Marker>,
+  onActivate?: (id: string) => void,
 ): void {
   clearHighlights(renderedEl);
 
@@ -234,7 +235,16 @@ export function applyHighlights(
     if (!block) continue;
 
     const marks = highlightQuoteIn(block, a, marker.color);
-    placeGutterMarker(renderedEl, marks[0] ?? block, marker, id, r.anchor, placed);
+    for (const mark of marks) {
+      // A drag-selection that ends on a highlight is not a click.
+      mark.onclick = (e) => {
+        if (window.getSelection()?.isCollapsed) {
+          e.stopPropagation();
+          onActivate?.(id);
+        }
+      };
+    }
+    placeGutterMarker(renderedEl, marks[0] ?? block, marker, id, r.anchor, placed, onActivate);
   }
 }
 
@@ -336,6 +346,7 @@ function placeGutterMarker(
   id: string,
   anchor: AnchorKind,
   placed: { top: number; lane: number }[],
+  onActivate?: (id: string) => void,
 ): void {
   const top = anchorEl.getBoundingClientRect().top - renderedEl.getBoundingClientRect().top;
   let lane = 0;
@@ -350,6 +361,7 @@ function placeGutterMarker(
   chip.style.setProperty("--anno-color", marker.color);
   chip.style.top = `${top}px`;
   chip.style.left = `${GUTTER_LANE_X + lane * GUTTER_LANE_STEP}px`;
+  chip.onclick = (e) => { e.stopPropagation(); onActivate?.(id); };
   renderedEl.appendChild(chip);
 }
 
@@ -433,4 +445,19 @@ export function pulseBlock(node: Element | null): void {
   e.classList.remove("anno-pulse");
   void e.offsetWidth; // force reflow so the animation restarts
   e.classList.add("anno-pulse");
+}
+
+/** Scroll the rail to an annotation's card and pulse it (text → card). */
+export function focusRailCard(railEl: HTMLElement, id: string): void {
+  const card = railEl.querySelector<HTMLElement>(`.note-card[data-annotation-id="${id}"]`);
+  if (!card) return;
+  card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  card.classList.remove("anno-emphasis", "anno-pulse-card");
+  void card.offsetWidth; // force reflow so the animation restarts
+  card.classList.add("anno-emphasis", "anno-pulse-card");
+  if (card.dataset.emphasisTimer) clearTimeout(Number(card.dataset.emphasisTimer));
+  card.dataset.emphasisTimer = String(setTimeout(() => {
+    card.classList.remove("anno-emphasis", "anno-pulse-card");
+    delete card.dataset.emphasisTimer;
+  }, 1500));
 }
