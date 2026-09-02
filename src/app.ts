@@ -23,7 +23,7 @@ import { addAnnotation, removeAnnotation, genId, type Annotation } from "./annot
 import { captureSelection } from "./anchor-capture";
 import { showCommentComposer } from "./composer";
 import {
-  renderRail, applyHighlights, mountSelectionToolbar, assignMarkers, linkAnnotationHovers, pulseBlock,
+  renderRail, applyHighlights, mountSelectionToolbar, assignMarkers, linkAnnotationHovers, pulseBlock, focusRailCard,
 } from "./annotation-ui";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
@@ -418,7 +418,10 @@ function renderContent(): void {
     mountBlockExpanders(view); // code/tables + any synchronously-cached diagrams
     void mermaidDone.then(() => mountBlockExpanders(view)); // first-render diagrams
     const markers = assignMarkers(doc.annotations, doc.resolutions);
-    applyHighlights(view, doc.annotations, doc.resolutions, markers);
+    applyHighlights(view, doc.annotations, doc.resolutions, markers, (id) => {
+      const rail = document.getElementById("rail");
+      if (rail) focusRailCard(rail, id);
+    });
     teardownToolbar = mountSelectionToolbar(view, () => startComment(doc.absPath));
   }
 }
