@@ -100,6 +100,13 @@ export function groupAnnotations(
   return g;
 }
 
+export type RailPref = "open" | "collapsed";
+
+/** Parse the persisted rail preference; anything unrecognised is "open". */
+export function parseRailPref(raw: string | null): RailPref {
+  return raw === "collapsed" ? "collapsed" : "open";
+}
+
 export interface CardModel {
   number: number | null;
   color: string | null;
@@ -108,6 +115,7 @@ export interface CardModel {
   tag: string | null;
   note: string;
   quote: string;
+  done: boolean;
 }
 
 const QUOTE_MAX = 80;
@@ -120,18 +128,20 @@ export function cardModel(
   marker: Marker | undefined,
 ): CardModel {
   const anchor: AnchorKind | "none" = res?.anchor ?? "none";
+  const done = a.status === "resolved";
   const orphaned = anchor === "orphaned" || a.status === "orphaned";
-  const tag = anchor === "drifted" ? "moved" : orphaned ? "not found" : null;
+  const tag = done ? null : anchor === "drifted" ? "moved" : orphaned ? "not found" : null;
   const collapsed = a.quote.replace(/\s+/g, " ").trim();
   const quote = collapsed.length > QUOTE_MAX ? collapsed.slice(0, QUOTE_MAX).trimEnd() + "…" : collapsed;
   return {
-    number: marker?.number ?? null,
+    number: done ? null : marker?.number ?? null,
     color: marker?.color ?? null,
     line: res?.startLine != null ? `L${res.startLine}` : "—",
     anchor,
     tag,
     note: a.note,
     quote,
+    done,
   };
 }
 
@@ -145,6 +155,14 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
 export interface RailHandlers {
   onScrollTo: (a: Annotation) => void;
   onRemove: (a: Annotation) => void;
+  onClearResolved: (ids: string[]) => void;
+}
+
+export interface RailOpts {
+  pref: RailPref;
+  resolvedOpen: boolean;
+  onTogglePref: () => void;
+  onToggleResolved: () => void;
 }
 
 /** Render the annotations rail into `host`. Pure DOM construction. */
@@ -154,6 +172,7 @@ export function renderRail(
   resolutions: Record<string, Resolution>,
   markers: Map<string, Marker>,
   handlers: RailHandlers,
+  opts: RailOpts,
 ): void {
   host.innerHTML = "";
   const g = groupAnnotations(list, resolutions);
@@ -161,9 +180,24 @@ export function renderRail(
   if (total === 0) { host.classList.add("empty"); return; }
   host.classList.remove("empty");
 
-  const section = (title: string, items: Annotation[], cls: string) => {
+  const collapsed = opts.pref === "collapsed";
+  host.classList.toggle("collapsed", collapsed);
+
+  const bar = el("div", "rail-bar");
+  if (!collapsed) bar.appendChild(el("span", "rail-title", "Comments"));
+  bar.appendChild(el("span", "rail-count", `${g.open.length} open`));
+  if (!collapsed) bar.appendChild(el("span", "note-spacer"));
+  const toggle = el("button", "rail-collapse", collapsed ? "›" : "‹");
+  toggle.title = collapsed ? "Show comments" : "Hide comments";
+  toggle.onclick = (ev) => { ev.stopPropagation(); opts.onTogglePref(); };
+  bar.appendChild(toggle);
+  host.appendChild(bar);
+  if (collapsed) return;
+
+  // A null title means the caller already rendered the header (Resolved).
+  const section = (title: string | null, items: Annotation[], cls: string) => {
     if (!items.length) return;
-    host.appendChild(el("div", "rail-head", `${title} (${items.length})`));
+    if (title) host.appendChild(el("div", "rail-head", `${title} (${items.length})`));
     for (const a of items) {
       const m = cardModel(a, resolutions[a.id], markers.get(a.id));
       const card = el("div", `note-card ${cls}`);
@@ -172,13 +206,16 @@ export function renderRail(
       if (m.color) card.style.setProperty("--anno-color", m.color);
 
       const head = el("div", "note-head");
-      if (m.number != null) head.appendChild(el("span", "note-chip", String(m.number)));
+      if (m.done) head.appendChild(el("span", "note-chip done", "✓"));
+      else if (m.number != null) head.appendChild(el("span", "note-chip", String(m.number)));
       head.appendChild(el("span", "note-line", m.line));
       if (m.tag) head.appendChild(el("span", "note-tag", m.tag));
       head.appendChild(el("span", "note-spacer"));
-      const del = el("span", "note-del", "×");
-      del.onclick = (ev) => { ev.stopPropagation(); handlers.onRemove(a); };
-      head.appendChild(del);
+      if (!m.done) {
+        const del = el("span", "note-del", "×");
+        del.onclick = (ev) => { ev.stopPropagation(); handlers.onRemove(a); };
+        head.appendChild(del);
+      }
       card.appendChild(head);
 
       const noteEl = el("div", "note-text", m.note);
@@ -202,7 +239,22 @@ export function renderRail(
 
   section("Open", g.open, "open");
   section("Orphaned", g.orphaned, "orphaned");
-  section("Resolved", g.resolved, "resolved");
+
+  if (g.resolved.length) {
+    const row = el("div", "rail-head rail-toggle");
+    row.appendChild(el("span", "rail-glyph", opts.resolvedOpen ? "▾" : "▸"));
+    row.appendChild(el("span", undefined, `Resolved (${g.resolved.length})`));
+    row.appendChild(el("span", "note-spacer"));
+    const clear = el("button", "rail-clear", "Clear");
+    clear.onclick = (ev) => {
+      ev.stopPropagation();
+      handlers.onClearResolved(g.resolved.map((a) => a.id));
+    };
+    row.appendChild(clear);
+    row.onclick = () => opts.onToggleResolved();
+    host.appendChild(row);
+    if (opts.resolvedOpen) section(null, g.resolved, "resolved");
+  }
 }
 
 /** Highlight the exact quoted text of each open annotation (a tinted <mark>),

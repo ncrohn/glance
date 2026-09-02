@@ -24,6 +24,7 @@ import { captureSelection } from "./anchor-capture";
 import { showCommentComposer } from "./composer";
 import {
   renderRail, applyHighlights, mountSelectionToolbar, assignMarkers, linkAnnotationHovers, pulseBlock, focusRailCard,
+  parseRailPref,
 } from "./annotation-ui";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
@@ -38,6 +39,7 @@ import type { ClientInfo, IntegrationAction } from "./ipc";
 
 const LS_OPEN = "glance.openPaths";
 const LS_RECENT = "glance.recent";
+const LS_RAIL = "glance.rail";
 
 // absPath → annotation store path, so closeTab can release the store's file
 // watcher (keyed by store path, not doc path) instead of leaking it until exit.
@@ -139,11 +141,16 @@ function startComment(absPath: string): void {
   });
 }
 
+let railPref = parseRailPref(localStorage.getItem(LS_RAIL));
+let resolvedOpen = false;
+
 function renderRailFor(): void {
   const host = document.getElementById("rail");
   if (!host) return;
   const doc = getActive(state);
   if (!doc) { host.innerHTML = ""; return; }
+  // The rail's cards can't scroll-to or highlight anything in the editor.
+  if (doc.viewMode === "source") { host.classList.add("empty"); host.innerHTML = ""; return; }
   const markers = assignMarkers(doc.annotations, doc.resolutions);
   renderRail(host, doc.annotations, doc.resolutions, markers, {
     onScrollTo: (a) => {
@@ -162,6 +169,23 @@ function renderRailFor(): void {
       render();
       void removeStoredAnnotation(doc.absPath, a.id).then(() => loadAnnotations(doc.absPath));
     },
+    onClearResolved: (ids) => {
+      let cur = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? doc.annotations;
+      for (const id of ids) cur = removeAnnotation(cur, id);
+      state = setDocAnnotations(state, doc.absPath, cur);
+      render();
+      void Promise.all(ids.map((id) => removeStoredAnnotation(doc.absPath, id)))
+        .then(() => loadAnnotations(doc.absPath));
+    },
+  }, {
+    pref: railPref,
+    resolvedOpen,
+    onTogglePref: () => {
+      railPref = railPref === "collapsed" ? "open" : "collapsed";
+      localStorage.setItem(LS_RAIL, railPref);
+      render();
+    },
+    onToggleResolved: () => { resolvedOpen = !resolvedOpen; render(); },
   });
 }
 

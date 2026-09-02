@@ -1192,19 +1192,45 @@ body {
   border: 1px solid var(--border); background: transparent; color: var(--ink); cursor: pointer;
 }
 .composer-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
-#rail { width: 260px; overflow-y: auto; padding: 16px; border-left: 1px solid var(--border); }
+#rail { width: 260px; overflow-y: auto; padding: 16px; border-left: 1px solid var(--border); transition: width 0.15s ease; }
 #rail.empty { display: none; }
 .rail-head { font: 600 11px/1 var(--font-mono, system-ui); text-transform: uppercase; color: var(--faint); margin: 14px 0 6px; }
 .note-card { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 6px; cursor: pointer; }
 .note-card:hover { background: var(--raised, #0001); }
 .note-card.orphaned { opacity: .6; }
-.note-card.resolved { opacity: .5; text-decoration: line-through; }
+.note-card.resolved { opacity: .7; }
 .note-line { font: 600 11px/1 var(--font-mono); color: var(--accent); }
 .note-text {
   font-size: 13px; line-height: 1.4;
   display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
 }
 .note-del { color: var(--faint); }
+
+/* Rail header: title, open count, collapse toggle. */
+.rail-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding-bottom: 8px; border-bottom: 1px solid var(--border); margin-bottom: 4px;
+  font: 600 12px/1 var(--font-ui);
+}
+.rail-count { color: var(--faint); font-weight: 500; }
+.rail-collapse, .rail-clear {
+  border: 0; background: transparent; padding: 0; color: var(--faint); cursor: pointer;
+  font: inherit;
+}
+.rail-collapse { font-size: 16px; line-height: 1; }
+.rail-collapse:hover, .rail-clear:hover { color: var(--ink); }
+#rail.collapsed { width: 28px; padding: 8px 0; overflow: hidden; }
+#rail.collapsed .rail-bar {
+  flex-direction: column; gap: 10px; padding-bottom: 0; border-bottom: 0; margin-bottom: 0;
+}
+#rail.collapsed .rail-count { writing-mode: vertical-rl; font-size: 11px; white-space: nowrap; }
+
+/* Resolved section: toggle row with a Clear action. */
+.rail-toggle { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+.rail-toggle:hover { color: var(--ink); }
+.rail-glyph { width: 10px; display: inline-block; }
+.rail-clear { text-transform: none; }
+.note-chip.done { background: transparent; border: 1.5px solid var(--faint); color: var(--faint); }
 .note-head { display: flex; align-items: center; gap: 8px; }
 .note-spacer { flex: 1; }
 .note-tag {

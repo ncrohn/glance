@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { groupAnnotations, assignMarkers, annotationsForBlock, cardModel, MARKER_PALETTE } from "./annotation-ui";
+import { groupAnnotations, assignMarkers, annotationsForBlock, cardModel, parseRailPref, MARKER_PALETTE } from "./annotation-ui";
 import type { Annotation, Resolution } from "./annotations";
 
 function ann(id: string, status: Annotation["status"] = "open"): Annotation {
@@ -84,6 +84,24 @@ describe("cardModel", () => {
     expect(cardModel(long, undefined, undefined).quote).toBe("x".repeat(80) + "…");
     const exact = { ...annAt("a"), quote: "y".repeat(80) };
     expect(cardModel(exact, undefined, undefined).quote).toBe("y".repeat(80));
+  });
+
+  it("marks a resolved annotation done, with no number and no tag", () => {
+    const m = cardModel(annAt("a", "t", "resolved"), { id: "a", startLine: 4, endLine: 4, anchor: "drifted" }, marker);
+    expect(m).toMatchObject({ done: true, number: null, tag: null, line: "L4" });
+    expect(cardModel(annAt("a"), res("a", 4), marker).done).toBe(false);
+  });
+});
+
+describe("parseRailPref", () => {
+  it("returns collapsed only for the exact stored value", () => {
+    expect(parseRailPref("collapsed")).toBe("collapsed");
+  });
+  it("falls back to open for anything else", () => {
+    expect(parseRailPref("open")).toBe("open");
+    expect(parseRailPref(null)).toBe("open");
+    expect(parseRailPref("")).toBe("open");
+    expect(parseRailPref("garbage")).toBe("open");
   });
 });
 
