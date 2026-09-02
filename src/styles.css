@@ -954,6 +954,27 @@ body {
 }
 .setup-cta-btn:hover { filter: brightness(1.06); }
 
+/* First-run strip above the rendered text: says how to leave a comment */
+.comment-hint {
+  display: flex; align-items: center; gap: 10px;
+  /* .rendered is 47rem border-box with 56px side padding; span its text column */
+  width: calc(100% - 112px); max-width: calc(47rem - 112px);
+  margin: 12px auto 0; padding: 8px 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--raised); color: var(--muted);
+  font: 0.8rem/1.4 var(--font-ui);
+}
+.comment-hint kbd {
+  font-family: var(--font-mono); font-size: 0.72rem;
+  background: var(--surface); border: 1px solid var(--border); border-bottom-width: 2px;
+  border-radius: 5px; padding: 1px 5px; color: var(--ink-soft);
+}
+.comment-hint-close {
+  margin-left: auto; background: none; border: none;
+  color: var(--faint); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px;
+}
+.comment-hint-close:hover { color: var(--ink); }
+
 /* ---- Modal / notice --------------------------------------------------- */
 .modal {
   position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
