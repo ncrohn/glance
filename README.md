@@ -26,7 +26,7 @@ A lightweight macOS markdown viewer and editor. Defaults to formatted view. Desi
 brew install --cask ncrohn/glance/glance
 ```
 
-Apple Silicon only. Installs the notarized `Glance.app` into `/Applications`. Then open Glance and run **Glance ▸ Set up AI Integration…** to wire up the `mdview` CLI and Claude/Cursor integration.
+Apple Silicon only. Installs the notarized `Glance.app` into `/Applications`. Then open Glance and run **Glance ▸ Set up AI Integration…** to wire up the `mdview` CLI and Claude Code / Codex / Cursor integration.
 
 ### Manual (.dmg)
 
@@ -75,13 +75,15 @@ When creating or updating a markdown file that the user should review, open it w
 
 ## AI integration
 
-**Glance ▸ Set up AI Integration…** wires everything up in one click. It installs the shared `mdview` CLI once, then configures every supported client it detects on your machine (Claude Code today; Cursor gets the MCP server + a rules doc). For Claude Code:
+**Glance ▸ Set up AI Integration…** wires everything up in one click. It installs the shared `mdview` CLI once, then configures every supported client it detects on your machine (Claude Code and Codex CLI get everything below; Cursor gets the MCP server + a rules doc). For Claude Code:
 
 1. Installs the `~/.local/bin/mdview` CLI wrapper.
 2. Registers the bundled `glance-mcp` server into `~/.claude.json` under `mcpServers.glance`. The command path points to the binary inside the running `Glance.app`, so it works on any machine where Glance is installed and survives app updates.
 3. Appends a review guidance block to `~/.claude/CLAUDE.md` (idempotent — safe to run again).
 4. Installs a `glance` agent skill at `~/.claude/skills/glance/SKILL.md`. The skill teaches Claude the review-comment loop: open a file with `mdview`, read open comments with `list_annotations`, make the changes, then call `resolve_annotation` on each comment. It also describes how to interpret anchor states (`exact`, `quote-only`, `drifted`, `orphaned`) so Claude handles drifted or ambiguous annotations correctly.
 5. Installs an auto-open hook (`~/.claude/skills/glance/open-md-hook.sh`) and registers it as a `PostToolUse`/`Write` entry in `~/.claude/settings.json`. Whenever Claude writes a `.md` file inside the current project directory, the hook opens it in Glance automatically — so you see the document appear without running `mdview` yourself. The hook skips `node_modules`, dot-directories, and files outside the working directory, and always exits 0 so it can never block the agent. A second hook (`~/.claude/skills/glance/pending-hook.sh`, registered under `UserPromptSubmit`) runs `glance-mcp --pending` before each of your prompts and adds one line of context per project doc that has open review comments, so Claude reads them on your next message without being told. It prints nothing when there are none and always exits 0.
+
+Codex CLI gets the same four pieces in its own locations: `[mcp_servers.glance]` in `~/.codex/config.toml` (merged with `toml_edit`, so your comments and formatting survive), the guidance block in `~/.codex/AGENTS.md`, the skill at `~/.codex/skills/glance/SKILL.md`, and both hooks in `~/.codex/hooks.json`. Codex reports file edits as `apply_patch`, so the auto-open hook is registered with matcher `apply_patch|Write` and the shared script reads `*** Add File:` lines from the patch text.
 
 All paths are derived from the running app's binary location, not this source checkout. Re-running setup is idempotent, so it doubles as the upgrade path — no migration needed. **Glance ▸ Remove AI Integration…** reverses the per-client connectors (leaving the shared `mdview` CLI in place).
 
