@@ -25,6 +25,7 @@ import {
 import { captureSelection } from "./anchor-capture";
 import { showCommentComposer } from "./composer";
 import { showToast } from "./toast";
+import { applyRailWidth, mountRailResizer, parseRailWidth } from "./rail-resize";
 import { diffActivity, activityMessage } from "./activity";
 import {
   renderRail, applyHighlights, mountSelectionToolbar, assignMarkers, markerColor, linkAnnotationHovers, pulseBlock,
@@ -46,6 +47,7 @@ const LS_OPEN = "glance.openPaths";
 const LS_RECENT = "glance.recent";
 const LS_RAIL = "glance.rail";
 const LS_HINT = "glance.commentHintSeen";
+const LS_RAIL_W = "glance.railWidth";
 
 // absPath → annotation store path, so closeTab can release the store's file
 // watcher (keyed by store path, not doc path) instead of leaking it until exit.
@@ -707,6 +709,10 @@ export async function start(): Promise<void> {
   // this re-applies it and, for Auto, keeps it in sync with the OS.
   applyTheme(loadThemePref(), render);
   trackPaneWidth();
+  applyRailWidth(parseRailWidth(localStorage.getItem(LS_RAIL_W)));
+  const grip = document.getElementById("rail-grip");
+  const railEl = document.getElementById("rail");
+  if (grip && railEl) mountRailResizer(grip, railEl, (w) => localStorage.setItem(LS_RAIL_W, String(w)));
 
   await onOpenFile((absPath) => { void openPath(absPath); });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
