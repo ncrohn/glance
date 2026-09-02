@@ -99,7 +99,7 @@ All paths are derived from the running app's binary location, not this source ch
 | Tool | What it does |
 |---|---|
 | `list_annotations` | List annotations on a file, ordered by `number`; filters by status (default: `open`). |
-| `get_annotation` | Fetch one annotation by id with its current line range. |
+| `get_annotation` | Fetch one annotation by id with its current line range, quoted text, replies, and three lines of context before and after (`context.before` / `context.after`). |
 | `reply_annotation` | Append a Claude reply to an annotation's thread without resolving it. |
 | `resolve_annotation` | Mark an annotation resolved after applying the change; an optional `note` is appended to the thread as Claude's reply. |
 
