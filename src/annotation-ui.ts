@@ -20,26 +20,30 @@ export const MARKER_PALETTE = [
   "var(--anno-6)", // blue
 ];
 
-// Per-annotation number + color for open, anchored annotations, ordered by
-// document position. The rail and the highlights both consume this map.
+// Color for a stored number: 1 → first slot, wrapping. 0 (server add still
+// in flight) takes the first slot too.
+export function markerColor(number: number): string {
+  return MARKER_PALETTE[number > 0 ? (number - 1) % MARKER_PALETTE.length : 0];
+}
+
+// What a chip shows for a number; 0 is a placeholder until the store answers.
+export function markerLabel(number: number): string {
+  return number > 0 ? String(number) : "\u00b7";
+}
+
+// Per-annotation number + color for open, anchored annotations. The number is
+// the one the store assigned at creation and never changes, so adding a
+// comment above does not renumber the ones below. The rail and the
+// highlights both consume this map.
 export function assignMarkers(
   annotations: Annotation[],
   resolutions: Record<string, Resolution>,
 ): Map<string, Marker> {
-  const eligible = annotations.filter(
-    (a) => a.status === "open" && resolutions[a.id]?.startLine != null,
-  );
-  eligible.sort((x, y) => {
-    const lx = resolutions[x.id]!.startLine!;
-    const ly = resolutions[y.id]!.startLine!;
-    if (lx !== ly) return lx - ly;
-    if (x.createdAt !== y.createdAt) return x.createdAt < y.createdAt ? -1 : 1;
-    return x.id < y.id ? -1 : 1;
-  });
   const map = new Map<string, Marker>();
-  eligible.forEach((a, i) => {
-    map.set(a.id, { number: i + 1, color: MARKER_PALETTE[i % MARKER_PALETTE.length] });
-  });
+  for (const a of annotations) {
+    if (a.status !== "open" || resolutions[a.id]?.startLine == null) continue;
+    map.set(a.id, { number: a.number, color: markerColor(a.number) });
+  }
   return map;
 }
 
@@ -210,7 +214,7 @@ export function renderRail(
 
       const head = el("div", "note-head");
       if (m.done) head.appendChild(el("span", "note-chip done", "✓"));
-      else if (m.number != null) head.appendChild(el("span", "note-chip", String(m.number)));
+      else if (m.number != null) head.appendChild(el("span", "note-chip", markerLabel(m.number)));
       head.appendChild(el("span", "note-line", m.line));
       if (m.tag) head.appendChild(el("span", "note-tag", m.tag));
       head.appendChild(el("span", "note-spacer"));
@@ -410,7 +414,7 @@ function placeGutterMarker(
   }
   placed.push({ top, lane });
 
-  const chip = el("span", "anno-gutter-marker", String(marker.number));
+  const chip = el("span", "anno-gutter-marker", markerLabel(marker.number));
   if (anchor === "drifted") chip.classList.add("drifted");
   chip.dataset.annotationId = id;
   chip.style.setProperty("--anno-color", marker.color);

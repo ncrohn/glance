@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { groupAnnotations, assignMarkers, annotationsForBlock, cardModel, parseRailPref, MARKER_PALETTE, fabPosition } from "./annotation-ui";
+import { groupAnnotations, assignMarkers, annotationsForBlock, cardModel, parseRailPref, MARKER_PALETTE, fabPosition, markerColor, markerLabel } from "./annotation-ui";
 import type { Annotation, Resolution } from "./annotations";
 
 function ann(id: string, status: Annotation["status"] = "open"): Annotation {
-  return { id, quote: "q", prefix: "", suffix: "", lineHint: { start: 1, end: 1 }, note: "n", status, author: "user", createdAt: "t" };
+  return { id, number: 0, quote: "q", prefix: "", suffix: "", lineHint: { start: 1, end: 1 }, note: "n", status, author: "user", createdAt: "t" };
 }
 
 function res(id: string, startLine: number | null, endLine = startLine): Resolution {
@@ -11,7 +11,11 @@ function res(id: string, startLine: number | null, endLine = startLine): Resolut
 }
 
 function annAt(id: string, createdAt = "t", status: Annotation["status"] = "open"): Annotation {
-  return { id, quote: "q", prefix: "", suffix: "", lineHint: { start: 1, end: 1 }, note: "n", status, author: "user", createdAt };
+  return { id, number: 0, quote: "q", prefix: "", suffix: "", lineHint: { start: 1, end: 1 }, note: "n", status, author: "user", createdAt };
+}
+
+function numbered(id: string, number: number, status: Annotation["status"] = "open"): Annotation {
+  return { ...annAt(id, "t", status), number };
 }
 
 describe("groupAnnotations", () => {
@@ -72,6 +76,11 @@ describe("cardModel", () => {
     expect(cardModel(annAt("a"), undefined, undefined)).toMatchObject({ number: null, color: null, anchor: "none" });
   });
 
+  it("passes a pending (0) marker number through rather than dropping it", () => {
+    const m = cardModel(numbered("a", 0), res("a", 4), { number: 0, color: MARKER_PALETTE[0] });
+    expect(m.number).toBe(0);
+  });
+
   it("shows a dash for the line when unresolved", () => {
     expect(cardModel(annAt("a"), undefined, undefined).line).toBe("—");
     expect(cardModel(annAt("a"), res("a", null), undefined).line).toBe("—");
@@ -106,40 +115,44 @@ describe("parseRailPref", () => {
 });
 
 describe("assignMarkers", () => {
-  it("numbers open anchored annotations by startLine, recycling colors", () => {
-    const list = [annAt("a"), annAt("b"), annAt("c")];
+  it("uses the stored number, not document position", () => {
+    const list = [numbered("a", 1), numbered("b", 2), numbered("c", 3)];
     const r = { a: res("a", 20), b: res("b", 5), c: res("c", 12) };
     const m = assignMarkers(list, r);
-    expect(m.get("b")).toEqual({ number: 1, color: MARKER_PALETTE[0] });
-    expect(m.get("c")).toEqual({ number: 2, color: MARKER_PALETTE[1] });
-    expect(m.get("a")).toEqual({ number: 3, color: MARKER_PALETTE[2] });
+    expect(m.get("a")).toEqual({ number: 1, color: MARKER_PALETTE[0] });
+    expect(m.get("b")).toEqual({ number: 2, color: MARKER_PALETTE[1] });
+    expect(m.get("c")).toEqual({ number: 3, color: MARKER_PALETTE[2] });
+  });
+
+  it("does not renumber when a comment is added above an existing one", () => {
+    const before = assignMarkers([numbered("a", 1)], { a: res("a", 20) });
+    const after = assignMarkers([numbered("a", 1), numbered("b", 2)], { a: res("a", 20), b: res("b", 5) });
+    expect(after.get("a")).toEqual(before.get("a"));
+    expect(after.get("b")!.number).toBe(2);
   });
 
   it("excludes resolved and orphaned annotations", () => {
-    const list = [annAt("a", "t", "resolved"), annAt("b"), annAt("c")];
+    const list = [numbered("a", 1, "resolved"), numbered("b", 2), numbered("c", 3)];
     const r = { a: res("a", 3), b: res("b", 5), c: res("c", null) };
     const m = assignMarkers(list, r);
     expect([...m.keys()]).toEqual(["b"]);
-    expect(m.get("b")!.number).toBe(1);
+    expect(m.get("b")!.number).toBe(2);
   });
 
-  it("recycles the palette past its length", () => {
-    const n = MARKER_PALETTE.length + 1;
-    const list = Array.from({ length: n }, (_, i) => annAt(`x${i}`));
-    const r: Record<string, Resolution> = {};
-    list.forEach((a, i) => (r[a.id] = res(a.id, i + 1)));
-    const m = assignMarkers(list, r);
-    expect(m.get("x0")!.color).toBe(MARKER_PALETTE[0]);
-    expect(m.get(`x${n - 1}`)!.color).toBe(MARKER_PALETTE[0]); // wrapped
-    expect(m.get(`x${n - 1}`)!.number).toBe(n);
+  it("colors follow (number - 1) mod the palette length", () => {
+    const n = MARKER_PALETTE.length;
+    expect(markerColor(1)).toBe(MARKER_PALETTE[0]);
+    expect(markerColor(n)).toBe(MARKER_PALETTE[n - 1]);
+    expect(markerColor(n + 1)).toBe(MARKER_PALETTE[0]); // wrapped
+    const m = assignMarkers([numbered("x", n + 1)], { x: res("x", 1) });
+    expect(m.get("x")).toEqual({ number: n + 1, color: MARKER_PALETTE[0] });
   });
 
-  it("tie-breaks equal startLine by createdAt", () => {
-    const list = [annAt("late", "2026-02"), annAt("early", "2026-01")];
-    const r = { late: res("late", 5), early: res("early", 5) };
-    const m = assignMarkers(list, r);
-    expect(m.get("early")!.number).toBe(1);
-    expect(m.get("late")!.number).toBe(2);
+  it("keeps 0 for a comment whose server add is still pending, with the first color", () => {
+    const m = assignMarkers([numbered("p", 0)], { p: res("p", 1) });
+    expect(m.get("p")).toEqual({ number: 0, color: MARKER_PALETTE[0] });
+    expect(markerLabel(0)).toBe("\u00b7");
+    expect(markerLabel(7)).toBe("7");
   });
 });
 

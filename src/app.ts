@@ -127,7 +127,7 @@ function startComment(absPath: string): void {
     onSubmit: (note) => {
       localStorage.setItem(LS_HINT, "1");
       const annotation: Annotation = {
-        id: genId(), quote: cap.quote, prefix: cap.prefix, suffix: cap.suffix,
+        id: genId(), number: 0, quote: cap.quote, prefix: cap.prefix, suffix: cap.suffix,
         lineHint: cap.lineHint, note, status: "open", author: "user",
         createdAt: new Date().toISOString(),
       };

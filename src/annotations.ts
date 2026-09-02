@@ -8,6 +8,9 @@ export interface LineHint {
 
 export interface Annotation {
   id: string;
+  // Stable per-document number assigned by the store on add; 0 while the
+  // server add is still in flight.
+  number: number;
   quote: string;
   prefix: string;
   suffix: string;

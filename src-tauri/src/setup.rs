@@ -75,6 +75,7 @@ list_annotations(path: "<absolute-path>")
 ```
 
 Each comment has:
+- `number` — the comment's number as the user sees it in Glance. Use it when you talk to the user ("comment 3"), never the id.
 - `note` — what the user wants changed.
 - `lineStart` / `lineEnd` — its current location. Trust these; they are re-anchored live, not the line the user first selected.
 - `quote` — the text it is anchored to.
@@ -877,6 +878,9 @@ mod tests {
         assert!(s.contains("list_annotations"));
         assert!(s.contains("get_annotation"));
         assert!(s.contains("resolve_annotation"));
+        // tells the agent to talk in the user-visible comment number
+        assert!(s.contains("`number`"));
+        assert!(s.contains("never the id"));
         // names the anchor states the agent must interpret
         assert!(s.contains("orphaned"));
         assert!(s.contains("drifted"));
