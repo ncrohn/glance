@@ -387,17 +387,47 @@ export function showAbout(version: string): void {
   okBtn.focus();
 }
 
-/** Release notes for the running version, rendered from CHANGELOG.md. */
+/** Release notes for the running version, rendered from CHANGELOG.md. Styled
+ *  like the About dialog: icon + wordmark header, editorial body. */
 export function showWhatsNew(version: string, html: string, onClose: () => void): void {
   const done = () => { m.close(); onClose(); };
-  const m = openModal({ title: `What's new in ${version}`, onEscape: done });
+  const m = openModal({ title: "", onEscape: done });
   m.card.classList.add("whats-new");
+  m.card.querySelector(".modal-title")?.remove();
+
+  const head = document.createElement("div");
+  head.className = "whats-new-head";
+  const icon = document.createElement("img");
+  icon.className = "whats-new-icon";
+  icon.src = appIcon;
+  icon.alt = "";
+  const titles = document.createElement("div");
+  const name = document.createElement("div");
+  name.className = "whats-new-name";
+  name.append("Glance");
+  const dot = document.createElement("span");
+  dot.className = "dot";
+  dot.textContent = ".";
+  name.appendChild(dot);
+  const kicker = document.createElement("div");
+  kicker.className = "whats-new-kicker";
+  kicker.textContent = `What's new · ${version}`;
+  titles.append(name, kicker);
+  head.append(icon, titles);
+  m.card.insertBefore(head, m.body);
+
   const notes = document.createElement("div");
-  notes.className = "whats-new-notes rendered";
+  notes.className = "whats-new-notes";
   notes.innerHTML = html;
   m.body.appendChild(notes);
+
+  const link = document.createElement("a");
+  link.className = "about-link whats-new-link";
+  link.href = "https://github.com/ncrohn/glance/releases";
+  link.textContent = "Full changelog";
+  link.onclick = (e) => { e.preventDefault(); void openExternal(link.href); };
   const ok = button("Got it", true);
   ok.onclick = done;
-  m.footer.appendChild(ok);
+  m.footer.append(link, ok);
   ok.focus();
 }
