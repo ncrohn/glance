@@ -125,6 +125,7 @@ export interface CardModel {
   color: string | null;
   line: string;
   anchor: AnchorKind | "none";
+  author: Annotation["author"];
   tag: string | null;
   note: string;
   quote: string;
@@ -152,6 +153,7 @@ export function cardModel(
     color: marker?.color ?? null,
     line: res?.startLine != null ? `L${res.startLine}` : "—",
     anchor,
+    author: a.author,
     tag,
     note: a.note,
     quote,
@@ -222,6 +224,7 @@ export function renderRail(
       const m = cardModel(a, resolutions[a.id], markers.get(a.id));
       const card = el("div", `note-card ${cls}`);
       if (m.anchor === "drifted") card.classList.add("drifted");
+      if (m.author === "claude") card.classList.add("by-claude");
       card.dataset.annotationId = a.id;
       if (m.color) card.style.setProperty("--anno-color", m.color);
 
@@ -229,6 +232,7 @@ export function renderRail(
       if (m.done) head.appendChild(el("span", "note-chip done", "✓"));
       else if (m.number != null) head.appendChild(el("span", "note-chip", markerLabel(m.number)));
       head.appendChild(el("span", "note-line", m.line));
+      if (m.author === "claude") head.appendChild(el("span", "note-tag", "Claude"));
       const reanchorable = m.anchor === "drifted" || m.anchor === "orphaned";
       if (m.tag) {
         const tag = el("span", "note-tag", m.tag);
@@ -382,7 +386,7 @@ export function applyHighlights(
         }
       };
     }
-    placeGutterMarker(renderedEl, marks[0] ?? block, marker, id, r.anchor, placed, onActivate);
+    placeGutterMarker(renderedEl, marks[0] ?? block, marker, id, r.anchor, a.author, placed, onActivate);
   }
 }
 
@@ -483,6 +487,7 @@ function placeGutterMarker(
   marker: Marker,
   id: string,
   anchor: AnchorKind,
+  author: Annotation["author"],
   placed: { top: number; lane: number }[],
   onActivate?: (id: string) => void,
 ): void {
@@ -495,6 +500,7 @@ function placeGutterMarker(
 
   const chip = el("span", "anno-gutter-marker", markerLabel(marker.number));
   if (anchor === "drifted") chip.classList.add("drifted");
+  if (author === "claude") chip.classList.add("by-claude");
   chip.dataset.annotationId = id;
   chip.style.setProperty("--anno-color", marker.color);
   chip.style.top = `${top}px`;

@@ -1,8 +1,11 @@
 // Glance MCP server — stdio JSON-RPC. Lets a Claude session read the user's
-// anchored annotations on a markdown file: read, reply, resolve (with a note).
+// anchored annotations on a markdown file: read, reply, resolve (with a note),
+// and add its own pointers.
 
-use glance_lib::anchor::{resolve_anchor, Annotation, Reply};
-use glance_lib::annotations::{apply_reply, mutate_store, now_iso8601, read_store, AnnotationStore};
+use glance_lib::anchor::{resolve_anchor, Annotation, LineHint, Reply};
+use glance_lib::annotations::{
+    apply_reply, mutate_store, new_id, now_iso8601, push_annotation, read_store, AnnotationStore,
+};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -18,6 +21,7 @@ struct AnnotationView {
     #[serde(rename = "lineEnd")]
     line_end: Option<usize>,
     status: String,
+    author: String,
     anchor: String,
     #[serde(rename = "resolvedBy", skip_serializing_if = "Option::is_none")]
     resolved_by: Option<String>,
@@ -36,6 +40,7 @@ fn view_of(a: &Annotation, text: &str) -> AnnotationView {
         line_start: r.start_line,
         line_end: r.end_line,
         status: a.status.clone(),
+        author: a.author.clone(),
         anchor: r.anchor,
         resolved_by: a.resolved_by.clone(),
         resolved_at: a.resolved_at.clone(),
@@ -140,10 +145,38 @@ fn apply_claude_reply(store: &mut AnnotationStore, id: &str, text: &str) -> bool
     }
 }
 
+/// Build a Claude-authored annotation for `add_annotation`. `line_hint` falls
+/// back to the resolved location (filled in by the caller) so a later drift
+/// lands near the pointer rather than on line 1.
+fn claude_annotation(path: &str, quote: &str, note: &str, prefix: &str, suffix: &str, line_hint: Option<LineHint>) -> Annotation {
+    let now = now_iso8601();
+    Annotation {
+        id: new_id(&format!("{path}{quote}{note}{now}")),
+        quote: quote.to_string(),
+        prefix: prefix.to_string(),
+        suffix: suffix.to_string(),
+        line_hint: line_hint.unwrap_or(LineHint { start: 1, end: 1 }),
+        note: note.to_string(),
+        status: "open".to_string(),
+        author: "claude".to_string(),
+        created_at: now,
+        number: 0,
+        resolved_by: None,
+        resolved_at: None,
+        replies: Vec::new(),
+    }
+}
+
+fn line_hint_arg(v: Option<&Value>) -> Option<LineHint> {
+    let v = v?;
+    let start = v.get("start")?.as_u64()? as usize;
+    let end = v.get("end").and_then(|e| e.as_u64()).map(|e| e as usize).unwrap_or(start);
+    Some(LineHint { start, end })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glance_lib::anchor::LineHint;
 
     fn ann(id: &str, quote: &str, status: &str) -> Annotation {
         Annotation {
@@ -376,6 +409,52 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn add_annotation_tool_creates_claude_pointers_and_rejects_missing_quotes() {
+        let home = "/tmp/glance-test-mcp-add";
+        std::env::set_var("HOME", home);
+        std::fs::create_dir_all(home).unwrap();
+        let doc = format!("{home}/doc.md");
+        std::fs::write(&doc, NINE).unwrap();
+        let _ = std::fs::remove_file(glance_lib::annotations::store_path_for(&doc).unwrap());
+
+        let out = call_tool("add_annotation", &json!({ "path": doc, "quote": "l5", "note": "see here" })).unwrap();
+        let first: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(first["number"], 1);
+        assert_eq!(first["author"], "claude");
+        assert_eq!(first["note"], "see here");
+        assert_eq!(first["quote"], "l5");
+        assert_eq!(first["lineStart"], 5);
+        assert_eq!(first["anchor"], "exact");
+        assert_eq!(first["id"].as_str().unwrap().len(), 8);
+
+        let out = call_tool("add_annotation", &json!({ "path": doc, "quote": "l7", "note": "and here" })).unwrap();
+        let second: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(second["number"], 2);
+        assert_ne!(second["id"], first["id"]);
+
+        let store = read_store(&doc);
+        assert_eq!(store.annotations.len(), 2);
+        assert!(store.annotations.iter().all(|a| a.author == "claude" && a.status == "open"));
+        assert_eq!(store.annotations[0].line_hint, LineHint { start: 5, end: 5 });
+
+        // A quote not in the file errors and writes nothing (line hint in range → "drifted").
+        let err = call_tool("add_annotation", &json!({ "path": doc, "quote": "NOTINTEXTEVER", "note": "x" })).unwrap_err();
+        assert!(err.contains("quote not found"), "{err}");
+        assert_eq!(read_store(&doc).annotations.len(), 2);
+        // Same with a line hint out of range ("orphaned").
+        let err = call_tool("add_annotation", &json!({ "path": doc, "quote": "NOTINTEXTEVER", "note": "x", "lineHint": { "start": 99 } })).unwrap_err();
+        assert!(err.contains("quote not found"), "{err}");
+        assert_eq!(read_store(&doc).annotations.len(), 2);
+
+        // list_annotations shows both, numbered.
+        let out = call_tool("list_annotations", &json!({ "path": doc })).unwrap();
+        let list: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 2);
+        assert_eq!(list[1]["number"], 2);
+    }
+
+    #[test]
     fn build_views_orphaned_filter_returns_unresolvable() {
         // Quote absent from text AND line_hint out of range → resolve_anchor returns "orphaned".
         // (If line_hint were in range the fallback would be "drifted", not "orphaned".)
@@ -447,6 +526,27 @@ fn tool_schemas() -> Value {
             }
         },
         {
+            "name": "add_annotation",
+            "description": "Leave a pointer of your own on the file: a short note attached to a verbatim quote, shown in Glance as a Claude card. Use it for a 'look here' the user should see in the document; do not restate what you already said in chat.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to the markdown file." },
+                    "quote": { "type": "string", "description": "Text copied verbatim from the file. The call fails if it is not found." },
+                    "note": { "type": "string", "description": "One line saying what to look at and why." },
+                    "prefix": { "type": "string", "description": "Optional text immediately before the quote, to disambiguate repeated phrases." },
+                    "suffix": { "type": "string", "description": "Optional text immediately after the quote." },
+                    "lineHint": {
+                        "type": "object",
+                        "description": "Optional 1-based line range the quote sits on; defaults to where the quote resolves.",
+                        "properties": { "start": { "type": "integer" }, "end": { "type": "integer" } },
+                        "required": ["start"]
+                    }
+                },
+                "required": ["path", "quote", "note"]
+            }
+        },
+        {
             "name": "reply_annotation",
             "description": "Reply on an annotation without resolving it: ask what a drifted or orphaned comment meant, or say why you are not making the change. The comment stays open until the user answers.",
             "inputSchema": {
@@ -498,6 +598,30 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             } else {
                 Err(format!("no annotation '{id}'"))
             }
+        }
+        "add_annotation" => {
+            let quote = args.get("quote").and_then(|v| v.as_str()).filter(|q| !q.is_empty()).ok_or("missing 'quote'")?;
+            let note = args.get("note").and_then(|v| v.as_str()).map(str::trim).filter(|n| !n.is_empty()).ok_or("missing 'note'")?;
+            let prefix = args.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
+            let suffix = args.get("suffix").and_then(|v| v.as_str()).unwrap_or("");
+            let mut a = claude_annotation(path, quote, note, prefix, suffix, line_hint_arg(args.get("lineHint")));
+            let text = read_doc(path);
+            let r = resolve_anchor(&text, &a);
+            // A missing quote resolves to "drifted" when the line hint is in
+            // range and "orphaned" otherwise; neither means the text is there.
+            if r.anchor == "orphaned" || r.anchor == "drifted" {
+                return Err("quote not found in file; pass the exact text".to_string());
+            }
+            if args.get("lineHint").is_none() {
+                if let (Some(s), Some(e)) = (r.start_line, r.end_line) {
+                    a.line_hint = LineHint { start: s, end: e };
+                }
+            }
+            let stored = mutate_store(path, |store| {
+                push_annotation(store, a.clone());
+                store.annotations.last().cloned().unwrap()
+            })?;
+            Ok(text_result(serde_json::to_value(view_of(&stored, &text)).unwrap()))
         }
         "reply_annotation" => {
             let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing 'id'")?;

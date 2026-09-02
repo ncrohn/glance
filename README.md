@@ -92,7 +92,7 @@ All paths are derived from the running app's binary location, not this source ch
 3. In a Claude Code session, Claude calls `list_annotations` (MCP tool) to read your open comments with **current line numbers** — the server re-anchors every annotation against the live file on each read, so line numbers stay correct even after edits.
 4. Claude makes the requested changes, then calls `resolve_annotation` with a one-line `note` saying what changed. The comment flips to resolved live in Glance with the note on its card. When a comment is unclear or its text has moved, Claude calls `reply_annotation` instead and the comment stays open until you answer on the card.
 
-**v1 scope:** user ↔ Claude comments with replies (read, reply, resolve). Claude-authored highlights are still future work (v2).
+**v1 scope:** comments flow both ways. Claude can read, reply to, and resolve yours, and add pointers of its own (`add_annotation`), which show in Glance as Claude cards.
 
 ### MCP tools
 
@@ -102,6 +102,7 @@ All paths are derived from the running app's binary location, not this source ch
 | `get_annotation` | Fetch one annotation by id with its current line range, quoted text, replies, and three lines of context before and after (`context.before` / `context.after`). |
 | `reply_annotation` | Append a Claude reply to an annotation's thread without resolving it. |
 | `resolve_annotation` | Mark an annotation resolved after applying the change; an optional `note` is appended to the thread as Claude's reply. |
+| `add_annotation` | Attach a one-line note to a verbatim `quote` from the file as a Claude-authored pointer. Fails if the quote is not in the file; returns the stored view with its `number`. |
 
 Every view carries `number`, the stable number Glance shows in the rail and gutter, so Claude can say "comment 3" instead of quoting an id, and `replies`, the thread under the note.
 

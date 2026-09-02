@@ -93,6 +93,12 @@ describe("cardModel", () => {
     expect(m.number).toBe(0);
   });
 
+  it("passes the author through so Claude cards can be styled", () => {
+    expect(cardModel(annAt("a"), res("a", 4), marker).author).toBe("user");
+    const byClaude: Annotation = { ...annAt("c"), author: "claude" };
+    expect(cardModel(byClaude, res("c", 4), marker).author).toBe("claude");
+  });
+
   it("shows a dash for the line when unresolved", () => {
     expect(cardModel(annAt("a"), undefined, undefined).line).toBe("—");
     expect(cardModel(annAt("a"), res("a", null), undefined).line).toBe("—");

@@ -125,15 +125,24 @@ pub fn read_annotations(path: String) -> AnnotationStore {
 /// it. Replaces the old whole-store write so a concurrent `resolve_annotation`
 /// from glance-mcp can't be lost.
 #[tauri::command]
-pub fn add_annotation(doc_path: String, mut annotation: Annotation) -> Result<(), String> {
-    mutate_store(&doc_path, move |s| {
-        backfill_numbers(s);
-        if annotation.number == 0 {
-            annotation.number = s.next_number;
-        }
-        s.next_number = s.next_number.max(annotation.number + 1);
-        s.annotations.push(annotation);
-    })
+pub fn add_annotation(doc_path: String, annotation: Annotation) -> Result<(), String> {
+    mutate_store(&doc_path, move |s| push_annotation(s, annotation))
+}
+
+/// Body of `add_annotation`, shared with glance-mcp: backfill, assign the
+/// store's next number when the annotation has none, bump `next_number`, push.
+pub fn push_annotation(store: &mut AnnotationStore, mut a: Annotation) {
+    backfill_numbers(store);
+    if a.number == 0 {
+        a.number = store.next_number;
+    }
+    store.next_number = store.next_number.max(a.number + 1);
+    store.annotations.push(a);
+}
+
+/// Short annotation id: the first 8 hex chars of `sha1_hex(seed)`.
+pub fn new_id(seed: &str) -> String {
+    sha1_hex(seed)[..8].to_string()
 }
 
 /// Remove one annotation by id under lock.
@@ -413,6 +422,30 @@ mod tests {
         let nums: Vec<(String, u32)> = store.annotations.iter().map(|a| (a.id.clone(), a.number)).collect();
         assert_eq!(nums, vec![("late".into(), 2), ("early".into(), 1), ("new".into(), 3)]);
         assert!(std::fs::read_to_string(&path).unwrap().contains("\"nextNumber\": 4"));
+    }
+
+    #[test]
+    fn push_annotation_numbers_in_order_and_keeps_carried_numbers() {
+        let mut store = store_of(vec![]);
+        push_annotation(&mut store, ann("a"));
+        push_annotation(&mut store, ann("b"));
+        let mut carried = ann("c");
+        carried.number = 7;
+        push_annotation(&mut store, carried);
+        push_annotation(&mut store, ann("d"));
+        let nums: Vec<u32> = store.annotations.iter().map(|a| a.number).collect();
+        assert_eq!(nums, vec![1, 2, 7, 8]);
+        assert_eq!(store.next_number, 9);
+    }
+
+    #[test]
+    fn new_id_is_eight_hex_chars_and_seed_dependent() {
+        let a = new_id("/d.md quote note 2026-09-01T00:00:00Z");
+        let b = new_id("/d.md quote note 2026-09-01T00:00:01Z");
+        assert_eq!(a.len(), 8);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+        assert_eq!(a, new_id("/d.md quote note 2026-09-01T00:00:00Z"));
     }
 
     #[test]
