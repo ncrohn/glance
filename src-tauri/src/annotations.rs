@@ -1,4 +1,4 @@
-use crate::anchor::{resolve_anchor, Annotation, Reply, Resolution};
+use crate::anchor::{resolve_anchor, Annotation, LineHint, Reply, Resolution};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -144,7 +144,8 @@ pub fn remove_annotation(doc_path: String, id: String) -> Result<(), String> {
 
 /// Fields the GUI may change on a stored annotation. Every `Some` is applied;
 /// `clear_resolution` drops both resolved fields (a reopen), since a plain
-/// `Option` can't express "set to none" over IPC.
+/// `Option` can't express "set to none" over IPC. The anchor fields (`quote`,
+/// `prefix`, `suffix`, `line_hint`) are what a re-anchor rewrites.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct AnnotationPatch {
     #[serde(default)]
@@ -157,11 +158,31 @@ pub struct AnnotationPatch {
     pub resolved_at: Option<String>,
     #[serde(default, rename = "clearResolution")]
     pub clear_resolution: bool,
+    #[serde(default)]
+    pub quote: Option<String>,
+    #[serde(default)]
+    pub prefix: Option<String>,
+    #[serde(default)]
+    pub suffix: Option<String>,
+    #[serde(default, rename = "lineHint")]
+    pub line_hint: Option<LineHint>,
 }
 
 pub fn apply_patch(a: &mut Annotation, patch: &AnnotationPatch) {
     if let Some(note) = &patch.note {
         a.note = note.clone();
+    }
+    if let Some(quote) = &patch.quote {
+        a.quote = quote.clone();
+    }
+    if let Some(prefix) = &patch.prefix {
+        a.prefix = prefix.clone();
+    }
+    if let Some(suffix) = &patch.suffix {
+        a.suffix = suffix.clone();
+    }
+    if let Some(hint) = &patch.line_hint {
+        a.line_hint = hint.clone();
     }
     if let Some(status) = &patch.status {
         a.status = status.clone();
@@ -440,6 +461,43 @@ mod tests {
         assert_eq!(a.status, "open");
         assert_eq!(a.resolved_by, None);
         assert_eq!(a.resolved_at, None);
+    }
+
+    #[test]
+    fn apply_patch_reanchor_sets_anchor_fields_and_leaves_the_rest() {
+        let mut a = ann("a");
+        a.number = 7;
+        a.replies.push(Reply { author: "claude".into(), text: "r".into(), created_at: "t".into() });
+        apply_patch(&mut a, &AnnotationPatch {
+            quote: Some("new quote".into()),
+            prefix: Some("before ".into()),
+            suffix: Some(" after".into()),
+            line_hint: Some(LineHint { start: 12, end: 13 }),
+            status: Some("open".into()),
+            ..Default::default()
+        });
+        assert_eq!(a.quote, "new quote");
+        assert_eq!(a.prefix, "before ");
+        assert_eq!(a.suffix, " after");
+        assert_eq!(a.line_hint, LineHint { start: 12, end: 13 });
+        assert_eq!(a.status, "open");
+        assert_eq!(a.id, "a");
+        assert_eq!(a.number, 7);
+        assert_eq!(a.note, "n");
+        assert_eq!(a.replies.len(), 1);
+    }
+
+    #[test]
+    fn annotation_patch_deserializes_anchor_fields() {
+        let p: AnnotationPatch = serde_json::from_str(
+            r#"{"quote":"q2","prefix":"p","suffix":"s","lineHint":{"start":3,"end":4}}"#,
+        )
+        .unwrap();
+        assert_eq!(p.quote.as_deref(), Some("q2"));
+        assert_eq!(p.prefix.as_deref(), Some("p"));
+        assert_eq!(p.suffix.as_deref(), Some("s"));
+        assert_eq!(p.line_hint, Some(LineHint { start: 3, end: 4 }));
+        assert_eq!(p.note, None);
     }
 
     #[test]

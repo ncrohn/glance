@@ -172,6 +172,7 @@ export interface RailHandlers {
   onResolve: (a: Annotation) => void;
   onReopen: (a: Annotation) => void;
   onEdit: (a: Annotation) => void;
+  onReanchor: (a: Annotation) => void;
   onReply: (a: Annotation, text: string) => void;
   onRemove: (a: Annotation) => void;
   onClearResolved: (ids: string[]) => void;
@@ -228,7 +229,12 @@ export function renderRail(
       if (m.done) head.appendChild(el("span", "note-chip done", "✓"));
       else if (m.number != null) head.appendChild(el("span", "note-chip", markerLabel(m.number)));
       head.appendChild(el("span", "note-line", m.line));
-      if (m.tag) head.appendChild(el("span", "note-tag", m.tag));
+      const reanchorable = m.anchor === "drifted" || m.anchor === "orphaned";
+      if (m.tag) {
+        const tag = el("span", "note-tag", m.tag);
+        if (reanchorable) tag.title = "Select text in the document, then click ⌖ to re-anchor";
+        head.appendChild(tag);
+      }
       head.appendChild(el("span", "note-spacer"));
       const actions = el("div", "note-actions");
       const action = (glyph: string, title: string, run: () => void) => {
@@ -276,6 +282,7 @@ export function renderRail(
       if (m.done) {
         action("↺", "Reopen", () => handlers.onReopen(a));
       } else {
+        if (reanchorable) action("⌖", "Re-anchor to selection", () => handlers.onReanchor(a));
         action("✓", "Resolve", () => handlers.onResolve(a));
         action("✎", "Edit", () => handlers.onEdit(a));
         action("↩", "Reply", openReplyBox);

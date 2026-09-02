@@ -218,6 +218,15 @@ function renderRailFor(): void {
         onCancel: () => {},
       });
     },
+    onReanchor: (a) => {
+      // Re-capture the anchor from the current selection; the comment keeps its
+      // id, number, note, and replies and goes back to Open. refreshResolutions
+      // runs inside loadAnnotations, so the card regains its number and line.
+      const cap = captureSelection(doc.editorContent);
+      if (!cap) { showToast("Select text in the document first"); return; }
+      patch(a, { quote: cap.quote, prefix: cap.prefix, suffix: cap.suffix, lineHint: cap.lineHint, status: "open" });
+      showToast(a.number > 0 ? `Comment ${a.number} re-anchored` : "Comment re-anchored");
+    },
     onReply: (a, text) => {
       // Same shape as `patch`: optimistic append, then the locked server-side
       // add (which stamps its own time), then reconcile.

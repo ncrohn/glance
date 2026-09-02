@@ -33,7 +33,9 @@ export interface Reply {
   createdAt: string;
 }
 
-export type AnnotationPatch = Partial<Pick<Annotation, "note" | "status" | "resolvedBy" | "resolvedAt">>;
+export type AnnotationPatch = Partial<
+  Pick<Annotation, "note" | "status" | "resolvedBy" | "resolvedAt" | "quote" | "prefix" | "suffix" | "lineHint">
+>;
 
 export interface AnnotationStore {
   docPath: string;
