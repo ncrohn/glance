@@ -1194,7 +1194,7 @@ body {
    accent pill sits in the left gutter (inset top/bottom, not flush against the
    text), with a whisper of tint. Reads as an editorial change-bar, not a
    highlighter smear. */
-.rendered [data-changed] {
+.rendered [data-changed]:not(tr) {
   position: relative;
   padding: 0.22em 0 0.22em 1.1em;
   /* pull top back so the added top padding fills the gap above rather than
@@ -1204,7 +1204,7 @@ body {
   background: color-mix(in srgb, var(--accent-tint) 70%, transparent);
   border-radius: 4px;
 }
-.rendered [data-changed]::before {
+.rendered [data-changed]:not(tr)::before {
   content: "";
   position: absolute;
   left: 0;
@@ -1215,6 +1215,41 @@ body {
   background: var(--accent);
   opacity: 0.85;
 }
+
+/* A changed list item keeps its text where its siblings are: no gutter padding,
+   no negative margin; the bar sits in the list's marker gutter instead. */
+.rendered li[data-changed] {
+  margin-left: 0;
+  padding-left: 0;
+}
+.rendered li[data-changed]::before { left: -1.4em; }
+
+.rendered tr[data-changed] > th,
+.rendered tr[data-changed] > td {
+  background: color-mix(in srgb, var(--accent-tint) 70%, transparent);
+}
+.rendered tr[data-changed] > th:first-child,
+.rendered tr[data-changed] > td:first-child {
+  box-shadow: inset 4px 0 0 var(--accent);
+}
+
+.rendered [data-deleted-before],
+.rendered [data-deleted-after] {
+  position: relative;
+}
+.rendered [data-deleted-before]::after,
+.rendered [data-deleted-after]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  width: 24px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 99px;
+  opacity: 0.85;
+}
+.rendered [data-deleted-before]::after { top: 0; }
+.rendered [data-deleted-after]::after { bottom: 0; }
 
 /* Lists carry their own left padding for the bullet/number markers. The
    highlight rules above set `padding-left: 1.1em` (the gutter), which clobbers

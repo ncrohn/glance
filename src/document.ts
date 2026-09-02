@@ -1,4 +1,4 @@
-import { diffLines } from "./diff";
+import { diffLines, diffLinesDetailed } from "./diff";
 
 export type ViewMode = "rendered" | "source";
 
@@ -49,6 +49,10 @@ export function isDirty(doc: Doc): boolean {
 // Lines changed on screen since the last reviewed baseline (1-indexed).
 export function changedLines(doc: Doc): Set<number> {
   return diffLines(doc.reviewedContent, doc.editorContent);
+}
+
+export function deletedBefore(doc: Doc): Set<number> {
+  return diffLinesDetailed(doc.reviewedContent, doc.editorContent).deletedBefore;
 }
 
 // Whether the on-disk content has moved past what the user last reviewed.

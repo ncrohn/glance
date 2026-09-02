@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { diffLines } from "./diff";
+import { diffLines, diffLinesDetailed } from "./diff";
 
 const set = (...n: number[]) => new Set(n);
 
@@ -25,9 +25,8 @@ describe("diffLines", () => {
     expect(diffLines("a\nb\nc", "A\nb\nc")).toEqual(set(1));
   });
 
-  it("marks the adjacent surviving line for a deletion", () => {
-    // 'b' removed; surviving neighbor in new text is line 2 ('c')
-    expect(diffLines("a\nb\nc", "a\nc")).toEqual(set(2));
+  it("does not mark an adjacent surviving line for a deletion", () => {
+    expect(diffLines("a\nb\nc", "a\nc")).toEqual(set());
   });
 
   it("marks everything when growing from empty", () => {
@@ -37,5 +36,28 @@ describe("diffLines", () => {
   it("returns empty when shrinking to empty", () => {
     // nothing left in new text to highlight
     expect(diffLines("a\nb", "")).toEqual(set());
+  });
+});
+
+describe("diffLinesDetailed", () => {
+  it("places a middle deletion before the next surviving line", () => {
+    expect(diffLinesDetailed("a\nb\nc", "a\nc")).toEqual({
+      changed: set(),
+      deletedBefore: set(2),
+    });
+  });
+
+  it("places a trailing deletion after the last surviving line", () => {
+    expect(diffLinesDetailed("a\nb\nc", "a\nb")).toEqual({
+      changed: set(),
+      deletedBefore: set(3),
+    });
+  });
+
+  it("separates an adjacent edit from a deletion", () => {
+    expect(diffLinesDetailed("a\nb\nc\nd", "a\nB\nd")).toEqual({
+      changed: set(2),
+      deletedBefore: set(3),
+    });
   });
 });

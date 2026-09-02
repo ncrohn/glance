@@ -1,5 +1,72 @@
 import { describe, it, expect } from "vitest";
-import { renderMarkdown } from "./renderer";
+import { diffLinesDetailed } from "./diff";
+import { pickChangedTokens, renderMarkdown, stampable } from "./renderer";
+
+describe("stampable", () => {
+  const token = (type: string, level: number, map: [number, number] | null = [0, 1]) =>
+    ({ type, level, map });
+
+  it("accepts top-level opens and mapped leaf blocks", () => {
+    expect(stampable(token("paragraph_open", 0), [])).toBe(true);
+    expect(stampable(token("list_item_open", 2), [])).toBe(true);
+    expect(stampable(token("tr_open", 2), [])).toBe(true);
+    expect(stampable(token("fence", 0), [])).toBe(true);
+    expect(stampable(token("code_block", 1), [])).toBe(true);
+    expect(stampable(token("hr", 0), [])).toBe(true);
+    expect(stampable(token("html_block", 0), [])).toBe(true);
+  });
+
+  it("accepts selected nested blocks only inside a blockquote", () => {
+    const quote = [{ type: "blockquote_open" }];
+    expect(stampable(token("paragraph_open", 1), quote)).toBe(true);
+    expect(stampable(token("heading_open", 1), quote)).toBe(true);
+    expect(stampable(token("bullet_list_open", 1), quote)).toBe(true);
+    expect(stampable(token("ordered_list_open", 1), quote)).toBe(true);
+    expect(stampable(token("paragraph_open", 2), [{ type: "list_item_open" }])).toBe(false);
+  });
+
+  it("rejects unmapped tokens", () => {
+    expect(stampable(token("paragraph_open", 0, null), [])).toBe(false);
+  });
+});
+
+describe("pickChangedTokens", () => {
+  const listTokens = [
+    { idx: 0, start: 1, end: 3, level: 0 },
+    { idx: 1, start: 1, end: 1, level: 1 },
+    { idx: 6, start: 2, end: 2, level: 1 },
+    { idx: 11, start: 3, end: 3, level: 1 },
+  ];
+
+  it("picks one changed list item instead of its list", () => {
+    expect(pickChangedTokens(listTokens, new Set([2]))).toEqual([6]);
+  });
+
+  it("picks each changed list item instead of its list", () => {
+    expect(pickChangedTokens(listTokens, new Set([1, 3]))).toEqual([1, 11]);
+  });
+
+  it("picks a changed top-level heading", () => {
+    expect(
+      pickChangedTokens(
+        [{ idx: 4, start: 2, end: 2, level: 0 }],
+        new Set([2]),
+      ),
+    ).toEqual([4]);
+  });
+
+  it("picks a blockquote paragraph instead of the blockquote", () => {
+    expect(
+      pickChangedTokens(
+        [
+          { idx: 0, start: 1, end: 3, level: 0 },
+          { idx: 1, start: 1, end: 1, level: 1 },
+        ],
+        new Set([1]),
+      ),
+    ).toEqual([1]);
+  });
+});
 
 describe("renderMarkdown", () => {
   it("renders headings", () => {
@@ -21,6 +88,11 @@ describe("renderMarkdown", () => {
     expect(html).toContain("<td>1</td>");
   });
 
+  it("stamps source lines on table rows", () => {
+    const html = renderMarkdown("| a | b |\n|---|---|\n| 1 | 2 |");
+    expect(html).toMatch(/<tr[^>]*data-sourceline="3"/);
+  });
+
   it("renders task lists as checkboxes", () => {
     const html = renderMarkdown("- [x] done\n- [ ] todo");
     expect(html).toContain('type="checkbox"');
@@ -35,6 +107,12 @@ describe("renderMarkdown", () => {
     const html = renderMarkdown("```js\nconst x = 1;\n```");
     expect(html).toContain("hljs");
     expect(html).toContain("language-js");
+  });
+
+  it("stamps source lines on fenced code", () => {
+    const html = renderMarkdown("```js\nconst x = 1;\n```");
+    expect(html).toMatch(/<(?:pre|code)[^>]*data-sourceline="1"/);
+    expect(html).toContain('data-sourceline-end="3"');
   });
 
   it("emits a mermaid placeholder for mermaid fences", () => {
@@ -133,6 +211,53 @@ describe("renderMarkdown changed-line marking", () => {
   it("marks the heading when its source line changed", () => {
     const html = renderMarkdown(src, new Set([1]));
     expect(/<h1[^>]*data-changed[^>]*>/.test(html)).toBe(true);
+  });
+
+  it("marks only the changed list item", () => {
+    const html = renderMarkdown("- one\n- two\n- three", new Set([2]));
+    expect(html).toMatch(/<li[^>]*data-changed[^>]*>two<\/li>/);
+    expect(html).not.toMatch(/<ul[^>]*data-changed/);
+    expect(html.match(/data-changed/g)).toHaveLength(1);
+  });
+
+  it("marks only the changed table row", () => {
+    const html = renderMarkdown(
+      "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |",
+      new Set([4]),
+    );
+    expect(html).toMatch(/<tr[^>]*data-changed[^>]*>[\s\S]*?<td>3<\/td>/);
+    expect(html).not.toMatch(/<table[^>]*data-changed/);
+    expect(html.match(/data-changed/g)).toHaveLength(1);
+  });
+
+  it("marks a changed paragraph inside a blockquote", () => {
+    const html = renderMarkdown("> first\n>\n> second", new Set([3]));
+    expect(html).toMatch(/<p[^>]*data-changed[^>]*>second<\/p>/);
+    expect(html).not.toMatch(/<blockquote[^>]*data-changed/);
+    expect(html.match(/data-changed/g)).toHaveLength(1);
+  });
+});
+
+describe("renderMarkdown deletion marking", () => {
+  it("marks a deletion before the next block without marking it changed", () => {
+    const current = "first\n\nthird";
+    const diff = diffLinesDetailed("first\n\nsecond\n\nthird", current);
+    const html = renderMarkdown(
+      current,
+      diff.changed,
+      diff.deletedBefore,
+    );
+    expect(html).toMatch(/<p[^>]*data-deleted-before="true"[^>]*>third<\/p>/);
+    expect(html).not.toContain("data-changed");
+  });
+
+  it("marks a trailing deletion after the last top-level block", () => {
+    const html = renderMarkdown(
+      "first\n\nsecond",
+      new Set(),
+      new Set([4]),
+    );
+    expect(html).toMatch(/<p[^>]*data-deleted-after="true"[^>]*>second<\/p>/);
   });
 });
 

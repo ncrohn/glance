@@ -5,7 +5,7 @@ import {
   setDocAnnotations, setDocResolutions,
   markReviewed, setReviewedBaseline, canRevealActive,
 } from "./store";
-import { isDirty, basename, changedLines, hasUnreviewedChanges, type Doc } from "./document";
+import { isDirty, basename, changedLines, deletedBefore, hasUnreviewedChanges, type Doc } from "./document";
 import { parseFrontmatter } from "./frontmatter";
 import { renderMarkdown } from "./renderer";
 import { renderMermaidBlocks } from "./mermaid";
@@ -404,7 +404,11 @@ function renderContent(): void {
     }, currentAppearance() === "dark");
   } else {
     const view = el("div", "rendered");
-    view.innerHTML = renderMarkdown(doc.editorContent, changedLines(doc));
+    view.innerHTML = renderMarkdown(
+      doc.editorContent,
+      changedLines(doc),
+      deletedBefore(doc),
+    );
     host.appendChild(view);
     const mermaidDone = renderMermaidBlocks(view, currentThemeId(), currentAppearance());
     mountBlockExpanders(view); // code/tables + any synchronously-cached diagrams
