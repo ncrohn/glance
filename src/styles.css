@@ -1159,6 +1159,10 @@ body {
   box-shadow: 0 8px 30px rgba(0,0,0,.28);
   padding: 12px; display: flex; flex-direction: column; gap: 10px;
 }
+@keyframes composer-flash {
+  50% { border-color: var(--accent); }
+}
+.comment-composer.composer-flash { animation: composer-flash 300ms ease-out; }
 .composer-head { font: 600 12px/1 var(--font-mono, system-ui); text-transform: uppercase; color: var(--faint); }
 .composer-quote {
   margin: 0; padding: 6px 10px; border-left: 3px solid var(--accent-line, var(--accent));
@@ -1168,12 +1172,15 @@ body {
 }
 .composer-input {
   width: 100%; box-sizing: border-box; resize: vertical; min-height: 3.5em;
+  max-height: 14em; overflow-y: auto;
   font-family: var(--font-body); font-size: 14px; line-height: 1.5;
   color: var(--ink); background: var(--bg); border: 1px solid var(--border);
   border-radius: 6px; padding: 8px 10px;
 }
 .composer-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
-.composer-foot { display: flex; justify-content: flex-end; gap: 8px; }
+.composer-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.composer-keys { color: var(--faint); font: 11px/1 var(--font-mono, monospace); }
+.composer-actions { display: flex; gap: 8px; }
 .composer-btn {
   font: 500 13px/1 var(--font-body); padding: 6px 12px; border-radius: 6px;
   border: 1px solid var(--border); background: transparent; color: var(--ink); cursor: pointer;
