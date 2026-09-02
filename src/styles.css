@@ -1163,6 +1163,7 @@ body {
    the left gutter (absolutely positioned within .rendered), aligned to the mark
    and fanned into lanes when several land on the same row. */
 .rendered .anno-highlight {
+  color: inherit; /* <mark> defaults to black text; keep the theme ink */
   background: color-mix(in srgb, var(--anno-color, var(--accent)) var(--anno-tint, 22%), transparent);
   text-decoration: underline;
   text-decoration-color: var(--anno-color, var(--accent));

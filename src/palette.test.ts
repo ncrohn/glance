@@ -100,3 +100,11 @@ describe("annotation palette", () => {
     });
   }
 });
+
+// <mark> ships with a browser default of black text. Without this override,
+// highlighted text goes black on every dark theme regardless of the palette.
+it("highlight text inherits the theme ink instead of mark's default black", () => {
+  const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+  const block = css.match(/\.rendered \.anno-highlight \{[^}]*\}/)?.[0] ?? "";
+  expect(block).toContain("color: inherit");
+});
