@@ -15,7 +15,7 @@ import {
   readFile, writeFile, watchFile, unwatchFile, onOpenFile, onFileChanged, onFileRemoved, takeLaunchArgs,
   readAnnotations, addStoredAnnotation, removeStoredAnnotation, updateStoredAnnotation, addStoredReply, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
-  onShowAbout, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
+  onShowAbout, onShowWhatsNew, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
   onShowInFinder, revealInFinder, setShowInFinderEnabled,
   readReviewed, writeReviewed,
 } from "./ipc";
@@ -26,6 +26,8 @@ import { captureSelection } from "./anchor-capture";
 import { showCommentComposer } from "./composer";
 import { showToast } from "./toast";
 import { applyRailWidth, mountRailResizer, parseRailWidth } from "./rail-resize";
+import { sectionFor, shouldShowWhatsNew } from "./whats-new";
+import changelog from "../CHANGELOG.md?raw";
 import { diffActivity, activityMessage } from "./activity";
 import {
   renderRail, applyHighlights, mountSelectionToolbar, assignMarkers, markerColor, linkAnnotationHovers, pulseBlock,
@@ -34,7 +36,7 @@ import {
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
 import { restoreTarget } from "./scroll-restore";
-import { confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker } from "./modal";
+import { confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker, showWhatsNew } from "./modal";
 import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
 } from "./theme";
@@ -48,6 +50,7 @@ const LS_RECENT = "glance.recent";
 const LS_RAIL = "glance.rail";
 const LS_HINT = "glance.commentHintSeen";
 const LS_RAIL_W = "glance.railWidth";
+const LS_SEEN_VERSION = "glance.seenVersion";
 
 // absPath → annotation store path, so closeTab can release the store's file
 // watcher (keyed by store path, not doc path) instead of leaking it until exit.
@@ -731,6 +734,7 @@ export async function start(): Promise<void> {
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
   await onShowIntegrationPicker((action) => { void openIntegrationPicker(action); });
   await onShowAbout(async () => { showAbout(await appVersion()); });
+  await onShowWhatsNew(() => { void openWhatsNew(true); });
   await onShowTheme(() => {
     showThemePicker(loadThemePref(), {
       onPreview: (pref) => applyTheme(pref, render),
@@ -795,4 +799,18 @@ export async function start(): Promise<void> {
   }
   await refreshIntegration();
   render();
+  void openWhatsNew(false);
+}
+
+// Release notes for the running version. `force` (the menu item) always shows
+// them; otherwise only on the first launch of a version not yet seen. A version
+// with no changelog section is recorded silently so it never nags.
+async function openWhatsNew(force: boolean): Promise<void> {
+  let version = "";
+  try { version = await appVersion(); } catch { return; }
+  if (!force && !shouldShowWhatsNew(localStorage.getItem(LS_SEEN_VERSION), version)) return;
+  const markSeen = () => localStorage.setItem(LS_SEEN_VERSION, version);
+  const section = sectionFor(changelog, version);
+  if (!section) { markSeen(); return; }
+  showWhatsNew(version, renderMarkdown(section), markSeen);
 }

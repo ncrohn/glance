@@ -386,3 +386,18 @@ export function showAbout(version: string): void {
   m.footer.appendChild(okBtn);
   okBtn.focus();
 }
+
+/** Release notes for the running version, rendered from CHANGELOG.md. */
+export function showWhatsNew(version: string, html: string, onClose: () => void): void {
+  const done = () => { m.close(); onClose(); };
+  const m = openModal({ title: `What's new in ${version}`, onEscape: done });
+  m.card.classList.add("whats-new");
+  const notes = document.createElement("div");
+  notes.className = "whats-new-notes rendered";
+  notes.innerHTML = html;
+  m.body.appendChild(notes);
+  const ok = button("Got it", true);
+  ok.onclick = done;
+  m.footer.appendChild(ok);
+  ok.focus();
+}

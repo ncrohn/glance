@@ -152,6 +152,9 @@ export function onShowIntegrationPicker(cb: (action: IntegrationAction) => void)
 export function onShowAbout(cb: () => void): Promise<UnlistenFn> {
   return listen("show-about", () => cb());
 }
+export function onShowWhatsNew(cb: () => void): Promise<UnlistenFn> {
+  return listen("show-whats-new", () => cb());
+}
 
 export function onShowTheme(cb: () => void): Promise<UnlistenFn> {
   return listen("show-theme", () => cb());
