@@ -35,11 +35,13 @@ import {
 } from "./theme";
 import { openPaths, pushRecent } from "./session";
 import { needsSetup } from "./integration";
+import { shouldShowCommentHint } from "./hint";
 import type { ClientInfo, IntegrationAction } from "./ipc";
 
 const LS_OPEN = "glance.openPaths";
 const LS_RECENT = "glance.recent";
 const LS_RAIL = "glance.rail";
+const LS_HINT = "glance.commentHintSeen";
 
 // absPath → annotation store path, so closeTab can release the store's file
 // watcher (keyed by store path, not doc path) instead of leaking it until exit.
@@ -123,6 +125,7 @@ function startComment(absPath: string): void {
     quote: cap.displayQuote,
     anchor: { top: rect.top, bottom: rect.bottom, left: rect.left },
     onSubmit: (note) => {
+      localStorage.setItem(LS_HINT, "1");
       const annotation: Annotation = {
         id: genId(), quote: cap.quote, prefix: cap.prefix, suffix: cap.suffix,
         lineHint: cap.lineHint, note, status: "open", author: "user",
@@ -408,7 +411,8 @@ function renderContent(): void {
     const hint = el("div", "hint");
     hint.innerHTML =
       'Open files with <kbd>mdview &lt;file&gt;</kbd> &nbsp;·&nbsp; ' +
-      'toggle source <kbd>⌘E</kbd> &nbsp;·&nbsp; save <kbd>⌘S</kbd>';
+      'toggle source <kbd>⌘E</kbd> &nbsp;·&nbsp; save <kbd>⌘S</kbd> &nbsp;·&nbsp; ' +
+      'comment <kbd>⌘⇧M</kbd>';
     empty.appendChild(hint);
 
     // Prompt to wire Glance into a detected coding client, until they do.
@@ -437,6 +441,19 @@ function renderContent(): void {
   } else {
     const view = el("div", "rendered");
     view.innerHTML = renderMarkdown(doc.editorContent, changedLines(doc));
+    if (shouldShowCommentHint(localStorage.getItem(LS_HINT), doc.annotations.length)) {
+      const strip = el("div", "comment-hint");
+      const text = el("span", "comment-hint-text");
+      text.innerHTML = "Select any text and press <kbd>⌘⇧M</kbd> to leave a comment for Claude.";
+      const close = el("button", "comment-hint-close", "×");
+      close.title = "Dismiss";
+      close.onclick = () => {
+        localStorage.setItem(LS_HINT, "1");
+        strip.remove();
+      };
+      strip.append(text, close);
+      host.appendChild(strip);
+    }
     host.appendChild(view);
     const mermaidDone = renderMermaidBlocks(view, currentThemeId(), currentAppearance());
     mountBlockExpanders(view); // code/tables + any synchronously-cached diagrams
