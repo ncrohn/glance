@@ -27,6 +27,7 @@ import {
 } from "./annotation-ui";
 import { mountEditor } from "./editor";
 import { decideReload } from "./reload";
+import { restoreTarget } from "./scroll-restore";
 import { confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker } from "./modal";
 import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
@@ -53,6 +54,13 @@ let state: State = emptyState();
 let activeEditor: { destroy(): void; selectAll(): void } | null = null;
 let teardownToolbar: (() => void) | null = null;
 let teardownHovers: (() => void) | null = null;
+
+// #content is the scroll container and renderContent() wipes it on every state
+// change. Remember each doc's scrollTop (DOM state, so it lives here and not in
+// State) and put it back after the rebuild.
+const scrollPositions = new Map<string, number>();
+let lastRenderedId: string | null = null;
+let lastRenderedMode: string | null = null;
 
 // Integration targets, fetched at startup + after any setup/remove run, so the
 // empty-state "set up AI integration" prompt reflects current config.
@@ -437,10 +445,19 @@ export function render(): void {
   // so it would otherwise survive a tab switch / re-render on top of the new
   // content. Dismiss it here (same discipline as the selection toolbar).
   closeMermaidZoom();
+  const content = document.getElementById("content");
+  if (content && lastRenderedId) scrollPositions.set(lastRenderedId, content.scrollTop);
   renderTabBar();
   renderActions();
   renderContent();
   renderRailFor();
+  const active = getActive(state);
+  const next = { id: active?.id ?? null, mode: active?.viewMode ?? null };
+  const target = restoreTarget({ id: lastRenderedId, mode: lastRenderedMode }, next, scrollPositions);
+  // Mermaid blocks render async after renderContent(), so defer a frame.
+  if (content) requestAnimationFrame(() => { content.scrollTop = target; });
+  lastRenderedId = next.id;
+  lastRenderedMode = next.mode;
   syncShowInFinderMenu();
   if (teardownHovers) { teardownHovers(); teardownHovers = null; }
   const renderedView = document.querySelector<HTMLElement>(".rendered");
@@ -485,6 +502,7 @@ function closeTab(id: string): void {
   }
   state = closeDoc(state, id);
   render();
+  scrollPositions.delete(id); // after render(), which re-saves the outgoing doc's position
 }
 
 // Save the active doc to disk. Shared by the File▸Save menu item (⌘S). On
