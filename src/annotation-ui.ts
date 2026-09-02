@@ -420,46 +420,92 @@ function placeGutterMarker(
   renderedEl.appendChild(chip);
 }
 
-/** Show a floating "Comment" button when the user selects text in the view. */
+export interface Box { top: number; bottom: number; left: number; right: number }
+
+/**
+ * Where to put the floating Comment button for selection `sel` inside the
+ * scroller `clip`. Prefers above the selection; flips below when there is no
+ * room above. `left` is clamped so the button stays inside `clip`. Returns
+ * null when the selection has scrolled entirely out of `clip`.
+ */
+export function fabPosition(
+  sel: Box,
+  clip: Box,
+  size: { width: number; height: number },
+  gap = 8,
+): { top: number; left: number } | null {
+  if (sel.bottom < clip.top || sel.top > clip.bottom) return null;
+  const pad = 4;
+  let top = sel.top - size.height - gap;
+  if (top < clip.top + pad) top = sel.bottom + gap;
+  const minLeft = clip.left + pad;
+  const maxLeft = clip.right - size.width - pad;
+  const left = Math.max(minLeft, Math.min(sel.left, maxLeft));
+  return { top, left };
+}
+
+const FAB_FALLBACK_SIZE = { width: 96, height: 26 };
+
+/** Show a floating "Comment" button whenever the user has text selected in the view. */
 export function mountSelectionToolbar(
   renderedEl: HTMLElement,
   onComment: () => void,
-): () => void {
+): { hide(): void; destroy(): void } {
   const btn = el("button", "comment-fab", "Comment");
+  btn.appendChild(el("kbd", undefined, "\u2318\u21e7M"));
   btn.style.display = "none";
   document.body.appendChild(btn);
   btn.onmousedown = (e) => { e.preventDefault(); }; // keep selection alive
-  btn.onclick = () => { btn.style.display = "none"; onComment(); };
+  const hide = () => { btn.style.display = "none"; };
+  btn.onclick = () => { hide(); onComment(); };
 
   // The rendered view scrolls inside #content, not the window, so the button
   // (position: fixed) is placed in viewport coordinates and re-placed on scroll
   // so it tracks the selected text instead of sticking to the window. Hidden
   // when the selection is gone or has scrolled out of the scroller's viewport.
   const scroller = renderedEl.closest<HTMLElement>("#content");
+  const measure = (): { width: number; height: number } => {
+    if (btn.style.display !== "none") return { width: btn.offsetWidth, height: btn.offsetHeight };
+    btn.style.visibility = "hidden";
+    btn.style.display = "block";
+    const size = { width: btn.offsetWidth, height: btn.offsetHeight };
+    btn.style.display = "none";
+    btn.style.visibility = "";
+    return size.width > 0 && size.height > 0 ? size : FAB_FALLBACK_SIZE;
+  };
   const place = () => {
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0 || !renderedEl.contains(sel.anchorNode)) {
-      btn.style.display = "none";
+      hide();
       return;
     }
     const rect = sel.getRangeAt(0).getBoundingClientRect();
-    const clip = scroller?.getBoundingClientRect();
-    if (clip && (rect.bottom < clip.top || rect.top > clip.bottom)) {
-      btn.style.display = "none";
-      return;
-    }
+    const clip = scroller?.getBoundingClientRect() ?? {
+      top: 0, bottom: window.innerHeight, left: 0, right: window.innerWidth,
+    };
+    const pos = fabPosition(rect, clip, measure());
+    if (!pos) { hide(); return; }
     btn.style.display = "block";
-    btn.style.top = `${rect.top - 36}px`;
-    btn.style.left = `${rect.left}px`;
+    btn.style.top = `${pos.top}px`;
+    btn.style.left = `${pos.left}px`;
   };
-  document.addEventListener("mouseup", place);
+  let pending: ReturnType<typeof setTimeout> | null = null;
+  const onSelectionChange = () => {
+    if (pending) clearTimeout(pending);
+    pending = setTimeout(() => { pending = null; place(); }, 80);
+  };
+  document.addEventListener("selectionchange", onSelectionChange);
   scroller?.addEventListener("scroll", place, { passive: true });
   window.addEventListener("resize", place);
-  return () => {
-    document.removeEventListener("mouseup", place);
-    scroller?.removeEventListener("scroll", place);
-    window.removeEventListener("resize", place);
-    btn.remove();
+  return {
+    hide,
+    destroy() {
+      if (pending) { clearTimeout(pending); pending = null; }
+      document.removeEventListener("selectionchange", onSelectionChange);
+      scroller?.removeEventListener("scroll", place);
+      window.removeEventListener("resize", place);
+      btn.remove();
+    },
   };
 }
 
