@@ -14,6 +14,35 @@ export function clampPopover(anchor: Anchor, size: Size, viewport: Viewport, gap
   return { top, left };
 }
 
+export type ComposerEvent = "escape" | "click-outside" | "submit" | "confirm-discard" | "keep";
+export interface ComposerState { text: string; confirming: boolean }
+export type ComposerOutcome =
+  | { kind: "stay"; state: ComposerState; flash?: boolean }
+  | { kind: "close"; note: string | null };
+
+export function composerStep(state: ComposerState, ev: ComposerEvent): ComposerOutcome {
+  const note = state.text.trim();
+
+  if (ev === "submit") {
+    return note ? { kind: "close", note } : { kind: "stay", state };
+  }
+  if (state.confirming && ev === "confirm-discard") {
+    return { kind: "close", note: null };
+  }
+  if (state.confirming && ev === "keep") {
+    return { kind: "stay", state: { ...state, confirming: false } };
+  }
+  if (ev === "escape") {
+    if (!note || state.confirming) return { kind: "close", note: null };
+    return { kind: "stay", state: { ...state, confirming: true } };
+  }
+  if (ev === "click-outside") {
+    if (!note) return { kind: "close", note: null };
+    return { kind: "stay", state, flash: true };
+  }
+  return { kind: "stay", state };
+}
+
 export function showCommentComposer(opts: {
   quote: string;
   anchor: { top: number; bottom: number; left: number };
@@ -49,15 +78,76 @@ export function showCommentComposer(opts: {
 
   const foot = document.createElement("div");
   foot.className = "composer-foot";
-  const cancelBtn = document.createElement("button");
-  cancelBtn.className = "composer-btn";
-  cancelBtn.textContent = "Cancel";
-  const saveBtn = document.createElement("button");
-  saveBtn.className = "composer-btn primary";
-  saveBtn.textContent = editing ? "Save" : "Comment";
-  foot.append(cancelBtn, saveBtn);
+  const keys = document.createElement("span");
+  keys.className = "composer-keys";
+  keys.textContent = editing ? "⌘↩ save · esc cancel" : "⌘↩ comment · esc cancel";
+  const actions = document.createElement("div");
+  actions.className = "composer-actions";
+  foot.append(keys, actions);
 
   card.append(head, quoteEl, ta, foot);
+  let state: ComposerState = { text: initial, confirming: false };
+
+  const close = () => {
+    document.removeEventListener("mousedown", onDocDown, true);
+    card.remove();
+  };
+  const flash = () => {
+    card.classList.remove("composer-flash");
+    void card.offsetWidth;
+    card.classList.add("composer-flash");
+  };
+  const renderFooter = () => {
+    head.textContent = state.confirming ? "Discard this comment?" : editing ? "Edit comment" : "Add comment";
+    const firstBtn = document.createElement("button");
+    firstBtn.className = "composer-btn";
+    const secondBtn = document.createElement("button");
+    secondBtn.className = "composer-btn primary";
+    if (state.confirming) {
+      firstBtn.textContent = "Discard";
+      firstBtn.onclick = () => dispatch("confirm-discard");
+      secondBtn.textContent = "Keep";
+      secondBtn.onclick = () => dispatch("keep");
+    } else {
+      firstBtn.textContent = "Cancel";
+      firstBtn.onclick = () => dispatch("escape");
+      secondBtn.textContent = editing ? "Save" : "Comment";
+      secondBtn.onclick = () => dispatch("submit");
+    }
+    actions.replaceChildren(firstBtn, secondBtn);
+  };
+  const dispatch = (event: ComposerEvent) => {
+    const wasConfirming = state.confirming;
+    const outcome = composerStep(state, event);
+    if (outcome.kind === "close") {
+      close();
+      if (outcome.note === null) onCancel();
+      else onSubmit(outcome.note);
+      return;
+    }
+    state = outcome.state;
+    if (outcome.flash) flash();
+    if (state.confirming !== wasConfirming) {
+      renderFooter();
+      if (!state.confirming) ta.focus();
+    }
+  };
+
+  ta.oninput = () => {
+    state = { ...state, text: ta.value };
+    ta.style.height = "auto";
+    ta.style.height = `${ta.scrollHeight}px`;
+  };
+  ta.onkeydown = (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); dispatch("submit"); }
+    else if (e.key === "Escape") { e.preventDefault(); dispatch("escape"); }
+  };
+  const onDocDown = (e: MouseEvent) => {
+    if (!card.contains(e.target as Node)) dispatch("click-outside");
+  };
+  card.addEventListener("animationend", () => card.classList.remove("composer-flash"));
+
+  renderFooter();
   document.body.appendChild(card);
 
   const pos = clampPopover(anchor, { width: card.offsetWidth, height: card.offsetHeight },
@@ -65,16 +155,6 @@ export function showCommentComposer(opts: {
   card.style.top = `${pos.top}px`;
   card.style.left = `${pos.left}px`;
 
-  const close = () => { document.removeEventListener("mousedown", onDocDown, true); card.remove(); };
-  const submit = () => { const v = ta.value.trim(); close(); if (v) onSubmit(v); else onCancel(); };
-  const cancel = () => { close(); onCancel(); };
-  saveBtn.onclick = submit;
-  cancelBtn.onclick = cancel;
-  ta.onkeydown = (e) => {
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); }
-    else if (e.key === "Escape") { e.preventDefault(); cancel(); }
-  };
-  const onDocDown = (e: MouseEvent) => { if (!card.contains(e.target as Node)) cancel(); };
   document.addEventListener("mousedown", onDocDown, true);
   ta.focus();
   ta.setSelectionRange(ta.value.length, ta.value.length);
