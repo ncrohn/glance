@@ -38,22 +38,107 @@ md.renderer.rules.table_open = (tokens, idx, options, _env, self) =>
 md.renderer.rules.table_close = (tokens, idx, options, _env, self) =>
   `${self.renderToken(tokens, idx, options)}</div>`;
 
+const defaultFence = md.renderer.rules.fence!;
+md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+  const rendered = defaultFence(tokens, idx, options, env, self);
+  const attrs = self.renderAttrs(tokens[idx]);
+  if (!attrs) return rendered;
+  if (tokens[idx].info.trim().split(/\s+/, 1)[0] === "mermaid") {
+    return `<div${attrs}>${rendered}</div>`;
+  }
+  return rendered.replace(/^(<pre\b[^>]*)(>)/, `$1${attrs}$2`);
+};
+
+export interface SourceToken {
+  type: string;
+  level: number;
+  map: [number, number] | null;
+}
+
+interface ParentToken {
+  type: string;
+}
+
+const mappedLeafTypes = new Set([
+  "list_item_open",
+  "tr_open",
+  "fence",
+  "code_block",
+  "hr",
+  "html_block",
+]);
+const blockquoteChildTypes = new Set([
+  "paragraph_open",
+  "heading_open",
+  "bullet_list_open",
+  "ordered_list_open",
+  "fence",
+]);
+
+export function stampable(
+  token: SourceToken,
+  parents: readonly ParentToken[],
+): boolean {
+  if (!token.map) return false;
+  if (token.level === 0 && token.type.endsWith("_open")) return true;
+  if (mappedLeafTypes.has(token.type)) return true;
+  return (
+    blockquoteChildTypes.has(token.type) &&
+    parents.some((parent) => parent.type === "blockquote_open")
+  );
+}
+
+export interface ChangedToken {
+  idx: number;
+  start: number;
+  end: number;
+  level: number;
+}
+
+function intersects(token: ChangedToken, changed: Set<number>): boolean {
+  for (let line = token.start; line <= token.end; line++) {
+    if (changed.has(line)) return true;
+  }
+  return false;
+}
+
+function isDescendant(child: ChangedToken, parent: ChangedToken): boolean {
+  return (
+    child.idx > parent.idx &&
+    child.level > parent.level &&
+    child.start >= parent.start &&
+    child.end <= parent.end
+  );
+}
+
+export function pickChangedTokens(
+  tokens: ChangedToken[],
+  changed: Set<number>,
+): number[] {
+  const intersecting = tokens.filter((token) => intersects(token, changed));
+  return intersecting
+    .filter(
+      (token) =>
+        !intersecting.some((candidate) => isDescendant(candidate, token)),
+    )
+    .map((token) => token.idx);
+}
+
 // Stamp 1-based source line numbers onto top-level block-open tokens so the
 // annotation layer can map a rendered selection back to a source line. The body
 // may have had a frontmatter fence stripped, so add its line count back
 // (env.lineOffset) to keep these numbers aligned with the original file.
 md.core.ruler.push("source_lines", (state) => {
   const offset = (state.env?.lineOffset as number | undefined) ?? 0;
+  const parents: ParentToken[] = [];
   for (const token of state.tokens) {
-    // Top-level blocks, plus list items — the latter are nested (level > 0) but
-    // carry their own source range, so stamping them lets a selection inside a
-    // list anchor to the item, not the whole <ul> (annotation capture fallback +
-    // per-block highlighting both resolve to the nearest data-sourceline).
-    const stampable = token.level === 0 || token.type === "list_item_open";
-    if (stampable && token.map && token.type.endsWith("_open")) {
-      token.attrSet("data-sourceline", String(token.map[0] + 1 + offset));
-      token.attrSet("data-sourceline-end", String(token.map[1] + offset));
+    if (token.nesting === -1) parents.pop();
+    if (stampable(token, parents)) {
+      const [start, end] = token.map!;
+      token.attrSet("data-sourceline", String(start + 1 + offset));
+      token.attrSet("data-sourceline-end", String(end + offset));
     }
+    if (token.nesting === 1) parents.push(token);
   }
 });
 
@@ -95,31 +180,65 @@ function startsWithBoldLabel(
   );
 }
 
-// Mark top-level blocks whose source lines intersect the changed-line set
-// (passed in via env). token.map is [start,end) 0-indexed; the block covers
-// 1-indexed lines start+1 .. end inclusive.
 md.core.ruler.push("changed_lines", (state) => {
-  const changed = state.env?.changedLines as Set<number> | undefined;
-  if (!changed || changed.size === 0) return;
   const offset = (state.env?.lineOffset as number | undefined) ?? 0;
-  for (const token of state.tokens) {
-    if (token.level === 0 && token.map && token.type.endsWith("_open")) {
-      const start = token.map[0] + 1 + offset;
-      const end = token.map[1] + offset;
-      for (let ln = start; ln <= end; ln++) {
-        if (changed.has(ln)) {
-          token.attrSet("data-changed", "true");
-          break;
-        }
+  const stamped: ChangedToken[] = [];
+  for (let idx = 0; idx < state.tokens.length; idx++) {
+    const token = state.tokens[idx];
+    if (!token.map || token.attrGet("data-sourceline") === null) continue;
+    stamped.push({
+      idx,
+      start: token.map[0] + 1 + offset,
+      end: token.map[1] + offset,
+      level: token.level,
+    });
+  }
+
+  const changed = state.env?.changedLines as Set<number> | undefined;
+  if (changed?.size) {
+    for (const idx of pickChangedTokens(stamped, changed)) {
+      state.tokens[idx].attrSet("data-changed", "true");
+    }
+  }
+
+  const deletedBefore = state.env?.deletedBefore as Set<number> | undefined;
+  if (!deletedBefore?.size) return;
+  const startingAfterDeletion = stamped.filter((token) =>
+    deletedBefore.has(token.start),
+  );
+  for (const token of startingAfterDeletion) {
+    if (
+      !startingAfterDeletion.some((candidate) => isDescendant(candidate, token))
+    ) {
+      state.tokens[token.idx].attrSet("data-deleted-before", "true");
+    }
+  }
+
+  const sourceLineCount = state.env?.sourceLineCount as number | undefined;
+  if (sourceLineCount !== undefined && deletedBefore.has(sourceLineCount + 1)) {
+    for (let i = stamped.length - 1; i >= 0; i--) {
+      if (stamped[i].level === 0) {
+        state.tokens[stamped[i].idx].attrSet("data-deleted-after", "true");
+        break;
       }
     }
   }
 });
 
-export function renderMarkdown(src: string, changedLines?: Set<number>): string {
+export function renderMarkdown(
+  src: string,
+  changedLines?: Set<number>,
+  deletedBefore?: Set<number>,
+): string {
   const { entries, body, lineOffset } = parseFrontmatter(src);
   const card = entries.length ? frontmatterCard(entries) : "";
-  return card + md.render(body, { changedLines, lineOffset });
+  const sourceLineCount = src.length
+    ? src.replace(/\n$/, "").split("\n").length
+    : 0;
+  return (
+    card +
+    md.render(body, { changedLines, deletedBefore, lineOffset, sourceLineCount })
+  );
 }
 
 // Render parsed frontmatter as a compact key→value card. Labels are muted,

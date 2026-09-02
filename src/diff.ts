@@ -5,17 +5,21 @@ function splitLines(text: string): string[] {
   return text.replace(/\n$/, "").split("\n");
 }
 
-/**
- * Line-based LCS diff. Returns the 1-indexed line numbers in `newText` that
- * are added or modified relative to `oldText`. Deletions are attributed to the
- * adjacent surviving line in `newText` so a removed block stays discoverable.
- */
-export function diffLines(oldText: string, newText: string): Set<number> {
+export interface DetailedLineDiff {
+  changed: Set<number>;
+  deletedBefore: Set<number>;
+}
+
+export function diffLinesDetailed(
+  oldText: string,
+  newText: string,
+): DetailedLineDiff {
   const a = splitLines(oldText);
   const b = splitLines(newText);
   const m = a.length;
   const n = b.length;
   const changed = new Set<number>();
+  const deletedBefore = new Set<number>();
 
   // dp[i][j] = length of LCS of a[i..] and b[j..]
   const dp: number[][] = Array.from({ length: m + 1 }, () =>
@@ -30,27 +34,41 @@ export function diffLines(oldText: string, newText: string): Set<number> {
 
   let i = 0;
   let j = 0;
-  while (i < m && j < n) {
-    if (a[i] === b[j]) {
+  while (i < m || j < n) {
+    if (i < m && j < n && a[i] === b[j]) {
       i++;
       j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      // a[i] deleted — attribute to the surviving new line at position j
-      changed.add(j + 1);
-      i++;
-    } else {
-      // b[j] added
-      changed.add(j + 1);
-      j++;
+      continue;
+    }
+
+    const newStart = j;
+    let oldCount = 0;
+    let newCount = 0;
+    while (
+      (i < m || j < n) &&
+      !(i < m && j < n && a[i] === b[j])
+    ) {
+      if (j >= n || (i < m && dp[i + 1][j] >= dp[i][j + 1])) {
+        i++;
+        oldCount++;
+      } else {
+        j++;
+        newCount++;
+      }
+    }
+
+    for (let line = newStart + 1; line <= newStart + newCount; line++) {
+      changed.add(line);
+    }
+    if (oldCount > newCount) {
+      deletedBefore.add(newStart + newCount + 1);
     }
   }
-  // trailing additions in new text
-  while (j < n) {
-    changed.add(j + 1);
-    j++;
-  }
-  // trailing deletions: attribute to the last surviving new line, if any
-  if (i < m && n > 0) changed.add(n);
 
-  return changed;
+  return { changed, deletedBefore };
+}
+
+/** Returns 1-indexed added or modified line numbers in `newText`. */
+export function diffLines(oldText: string, newText: string): Set<number> {
+  return diffLinesDetailed(oldText, newText).changed;
 }

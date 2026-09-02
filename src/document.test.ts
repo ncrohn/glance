@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { createDoc, isDirty, basename, changedLines, hasUnreviewedChanges } from "./document";
+import {
+  createDoc,
+  isDirty,
+  basename,
+  changedLines,
+  deletedBefore,
+  hasUnreviewedChanges,
+} from "./document";
 
 describe("document", () => {
   it("createDoc starts clean, rendered, and exists", () => {
@@ -36,6 +43,12 @@ describe("changedLines / hasUnreviewedChanges", () => {
   it("changedLines diffs the reviewed baseline against editorContent", () => {
     const d = { ...createDoc("/x.md", "a\nb\nc"), editorContent: "a\nB\nc" };
     expect(changedLines(d)).toEqual(new Set([2]));
+  });
+
+  it("deletedBefore diffs the reviewed baseline against editorContent", () => {
+    const d = { ...createDoc("/x.md", "a\nb\nc"), editorContent: "a\nc" };
+    expect(deletedBefore(d)).toEqual(new Set([2]));
+    expect(changedLines(d)).toEqual(new Set());
   });
 
   it("hasUnreviewedChanges compares baseline against diskContent, not editor", () => {
