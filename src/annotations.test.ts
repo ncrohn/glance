@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  addAnnotation, resolveAnnotation, removeAnnotation, patchAnnotation,
+  addAnnotation, resolveAnnotation, removeAnnotation, patchAnnotation, appendReply,
   type Annotation,
 } from "./annotations";
 
@@ -60,6 +60,27 @@ describe("annotation reducers", () => {
     it("leaves the list unchanged for an unknown id", () => {
       const a = [ann("a")];
       expect(patchAnnotation(a, "zzz", { note: "x" })).toEqual(a);
+    });
+  });
+
+  describe("appendReply", () => {
+    it("starts a thread on an annotation without one, leaving others alone", () => {
+      const a = [ann("a"), ann("b")];
+      const reply = { author: "user" as const, text: "why?", createdAt: "2026-09-01T00:00:00Z" };
+      const b = appendReply(a, "a", reply);
+      expect(b[0].replies).toEqual([reply]);
+      expect(b[1].replies).toBeUndefined();
+      expect(a[0].replies).toBeUndefined(); // original untouched
+      expect(b[0].status).toBe("open");
+    });
+
+    it("appends in order to an existing thread", () => {
+      const first = { author: "claude" as const, text: "Cut the cap", createdAt: "t1" };
+      const second = { author: "user" as const, text: "thanks", createdAt: "t2" };
+      const a: Annotation = { ...ann("a"), replies: [first] };
+      const b = appendReply([a], "a", second);
+      expect(b[0].replies).toEqual([first, second]);
+      expect(a.replies).toEqual([first]);
     });
   });
 });

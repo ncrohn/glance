@@ -29,6 +29,19 @@ pub struct Annotation {
     pub resolved_by: Option<String>,
     #[serde(default, rename = "resolvedAt", skip_serializing_if = "Option::is_none")]
     pub resolved_at: Option<String>,
+    /// Thread under the note: Claude's resolution notes and questions, the
+    /// user's answers. Absent from stores written before replies existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replies: Vec<Reply>,
+}
+
+/// One message in an annotation's reply thread. `author` is "user" or "claude".
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Reply {
+    pub author: String,
+    pub text: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -138,6 +151,7 @@ mod tests {
             number: 0,
             resolved_by: None,
             resolved_at: None,
+            replies: Vec::new(),
         }
     }
 

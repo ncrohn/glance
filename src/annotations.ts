@@ -22,6 +22,15 @@ export interface Annotation {
   // Who resolved it and when; both absent while open.
   resolvedBy?: "user" | "claude";
   resolvedAt?: string;
+  // Thread under the note: Claude's resolution notes and questions, the
+  // user's answers. Stores written before replies existed omit the key.
+  replies?: Reply[];
+}
+
+export interface Reply {
+  author: "user" | "claude";
+  text: string;
+  createdAt: string;
 }
 
 export type AnnotationPatch = Partial<Pick<Annotation, "note" | "status" | "resolvedBy" | "resolvedAt">>;
@@ -58,4 +67,9 @@ export function removeAnnotation(list: Annotation[], id: string): Annotation[] {
  *  clears that field (how a reopen drops resolvedBy/resolvedAt). */
 export function patchAnnotation(list: Annotation[], id: string, patch: AnnotationPatch): Annotation[] {
   return list.map((a) => (a.id === id ? { ...a, ...patch } : a));
+}
+
+/** Append `reply` to the thread of the annotation with `id`. */
+export function appendReply(list: Annotation[], id: string, reply: Reply): Annotation[] {
+  return list.map((a) => (a.id === id ? { ...a, replies: [...(a.replies ?? []), reply] } : a));
 }
