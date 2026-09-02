@@ -58,6 +58,18 @@ describe("groupAnnotations", () => {
     expect(g.orphaned.map((x) => x.id)).toEqual(["o2", "o1"]);
     expect(g.resolved.map((x) => x.id)).toEqual(["r2", "r1"]);
   });
+
+  it("orders resolved by resolvedAt, falling back to createdAt", () => {
+    const list: Annotation[] = [
+      { ...annAt("old-late", "2026-01", "resolved"), resolvedAt: "2026-05" },
+      { ...annAt("new-early", "2026-03", "resolved"), resolvedAt: "2026-04" },
+      annAt("legacy", "2026-02", "resolved"), // pre-resolvedAt store
+      { ...annAt("tie-b", "2026-01", "resolved"), resolvedAt: "2026-06" },
+      { ...annAt("tie-a", "2026-02", "resolved"), resolvedAt: "2026-06" },
+    ];
+    const g = groupAnnotations(list, {});
+    expect(g.resolved.map((x) => x.id)).toEqual(["tie-a", "tie-b", "old-late", "new-early", "legacy"]);
+  });
 });
 
 describe("cardModel", () => {

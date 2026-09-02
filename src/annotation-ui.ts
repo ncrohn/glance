@@ -78,8 +78,9 @@ function byCreatedThenId(x: Annotation, y: Annotation): number {
 
 /** Bucket annotations for the rail. An open annotation whose current
  *  resolution is "orphaned" is shown in the orphaned group. Open is in
- *  document order (unresolved lines last); orphaned and resolved are newest
- *  first. */
+ *  document order (unresolved lines last); orphaned is newest first;
+ *  resolved is most recently resolved first (createdAt when resolvedAt is
+ *  missing, as on stores written before it existed). */
 export function groupAnnotations(
   list: Annotation[],
   resolutions: Record<string, Resolution>,
@@ -103,7 +104,12 @@ export function groupAnnotations(
   });
   const newestFirst = (x: Annotation, y: Annotation) => -byCreatedThenId(x, y);
   g.orphaned.sort(newestFirst);
-  g.resolved.sort(newestFirst); // will switch to resolvedAt once annotations carry it
+  g.resolved.sort((x, y) => {
+    const rx = x.resolvedAt ?? x.createdAt;
+    const ry = y.resolvedAt ?? y.createdAt;
+    if (rx !== ry) return rx < ry ? 1 : -1;
+    return newestFirst(x, y);
+  });
   return g;
 }
 
@@ -161,6 +167,9 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
 
 export interface RailHandlers {
   onScrollTo: (a: Annotation) => void;
+  onResolve: (a: Annotation) => void;
+  onReopen: (a: Annotation) => void;
+  onEdit: (a: Annotation) => void;
   onRemove: (a: Annotation) => void;
   onClearResolved: (ids: string[]) => void;
 }
@@ -218,11 +227,21 @@ export function renderRail(
       head.appendChild(el("span", "note-line", m.line));
       if (m.tag) head.appendChild(el("span", "note-tag", m.tag));
       head.appendChild(el("span", "note-spacer"));
-      if (!m.done) {
-        const del = el("span", "note-del", "×");
-        del.onclick = (ev) => { ev.stopPropagation(); handlers.onRemove(a); };
-        head.appendChild(del);
+      const actions = el("div", "note-actions");
+      const action = (glyph: string, title: string, run: () => void) => {
+        const btn = el("button", "note-action", glyph);
+        btn.title = title;
+        btn.onclick = (ev) => { ev.stopPropagation(); run(); };
+        actions.appendChild(btn);
+      };
+      if (m.done) {
+        action("↺", "Reopen", () => handlers.onReopen(a));
+      } else {
+        action("✓", "Resolve", () => handlers.onResolve(a));
+        action("✎", "Edit", () => handlers.onEdit(a));
+        action("×", "Delete", () => handlers.onRemove(a));
       }
+      head.appendChild(actions);
       card.appendChild(head);
 
       const noteEl = el("div", "note-text", m.note);

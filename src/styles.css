@@ -1285,7 +1285,6 @@ body {
   font-size: 13px; line-height: 1.4;
   display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
 }
-.note-del { color: var(--faint); }
 
 /* Rail header: title, open count, collapse toggle. */
 .rail-bar {
@@ -1314,6 +1313,28 @@ body {
 .note-chip.done { background: transparent; border: 1.5px solid var(--faint); color: var(--faint); }
 .note-head { display: flex; align-items: center; gap: 8px; }
 .note-spacer { flex: 1; }
+/* Card actions (Resolve / Edit / Delete, or Reopen): shown on hover or keyboard focus. */
+.note-actions { display: flex; align-items: center; gap: 2px; opacity: 0; transition: opacity .12s ease; }
+.note-card:hover .note-actions, .note-card:focus-within .note-actions { opacity: 1; }
+.note-action {
+  border: 0; background: transparent; padding: 0 3px; border-radius: 4px;
+  color: var(--faint); cursor: pointer; font: 500 13px/1 var(--font-ui);
+}
+.note-action:hover { color: var(--ink); }
+.note-action:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+/* Transient message with an optional action (delete → Undo). */
+.toast {
+  position: fixed; right: 16px; bottom: 16px; z-index: 70;
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 14px; border-radius: 8px;
+  background: var(--surface); border: 1px solid var(--border); color: var(--ink);
+  font: 500 13px/1 var(--font-ui); box-shadow: 0 4px 16px rgb(0 0 0 / .18);
+}
+.toast-action {
+  border: 0; background: transparent; padding: 0; color: var(--accent);
+  font: 600 13px/1 var(--font-ui); cursor: pointer;
+}
+.toast-action:hover { text-decoration: underline; }
 .note-tag {
   font: 600 9px/1 var(--font-mono, system-ui); text-transform: uppercase; letter-spacing: .04em;
   color: var(--faint); border: 1px solid var(--faint); border-radius: 999px; padding: 2px 6px;

@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { Annotation, AnnotationStore, Resolution } from "./annotations";
+import type { Annotation, AnnotationPatch, AnnotationStore, Resolution } from "./annotations";
 
 export function appVersion(): Promise<string> {
   return getVersion();
@@ -114,6 +114,14 @@ export function addStoredAnnotation(docPath: string, annotation: Annotation): Pr
 
 export function removeStoredAnnotation(docPath: string, id: string): Promise<void> {
   return invoke<void>("remove_annotation", { docPath, id });
+}
+
+/** `clearResolution` drops resolvedBy/resolvedAt on the server (a reopen);
+ *  an `undefined` field can't say that over JSON. */
+export type StoredAnnotationPatch = AnnotationPatch & { clearResolution?: boolean };
+
+export function updateStoredAnnotation(docPath: string, id: string, patch: StoredAnnotationPatch): Promise<void> {
+  return invoke<void>("update_annotation", { docPath, id, patch });
 }
 
 export function resolveAnchors(text: string, annotations: Annotation[]): Promise<Resolution[]> {

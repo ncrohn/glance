@@ -2,7 +2,7 @@
 // anchored annotations on a markdown file. v1: read + resolve only.
 
 use glance_lib::anchor::{resolve_anchor, Annotation};
-use glance_lib::annotations::{mutate_store, read_store, AnnotationStore};
+use glance_lib::annotations::{mutate_store, now_iso8601, read_store, AnnotationStore};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -19,6 +19,10 @@ struct AnnotationView {
     line_end: Option<usize>,
     status: String,
     anchor: String,
+    #[serde(rename = "resolvedBy", skip_serializing_if = "Option::is_none")]
+    resolved_by: Option<String>,
+    #[serde(rename = "resolvedAt", skip_serializing_if = "Option::is_none")]
+    resolved_at: Option<String>,
 }
 
 fn view_of(a: &Annotation, text: &str) -> AnnotationView {
@@ -32,6 +36,8 @@ fn view_of(a: &Annotation, text: &str) -> AnnotationView {
         line_end: r.end_line,
         status: a.status.clone(),
         anchor: r.anchor,
+        resolved_by: a.resolved_by.clone(),
+        resolved_at: a.resolved_at.clone(),
     }
 }
 
@@ -61,11 +67,14 @@ fn build_views(store: &AnnotationStore, text: &str, status_filter: Option<&str>)
     views
 }
 
-/// Mark one annotation resolved in-place. Returns true if it was found.
+/// Mark one annotation resolved in-place, recording that Claude did it and
+/// when. Returns true if it was found.
 fn apply_resolve(store: &mut AnnotationStore, id: &str) -> bool {
     for a in store.annotations.iter_mut() {
         if a.id == id {
             a.status = "resolved".to_string();
+            a.resolved_by = Some("claude".to_string());
+            a.resolved_at = Some(now_iso8601());
             return true;
         }
     }
@@ -89,6 +98,8 @@ mod tests {
             author: "user".into(),
             created_at: "t".into(),
             number: 0,
+            resolved_by: None,
+            resolved_at: None,
         }
     }
 
@@ -129,11 +140,28 @@ mod tests {
     }
 
     #[test]
-    fn apply_resolve_sets_status() {
+    fn apply_resolve_sets_status_and_records_claude() {
         let mut store = store_of(vec![ann("a", "hello", "open")]);
         assert!(apply_resolve(&mut store, "a"));
-        assert_eq!(store.annotations[0].status, "resolved");
+        let a = &store.annotations[0];
+        assert_eq!(a.status, "resolved");
+        assert_eq!(a.resolved_by.as_deref(), Some("claude"));
+        assert_eq!(a.resolved_at.as_ref().map(|t| t.len()), Some(20));
+        assert!(a.resolved_at.as_deref().unwrap().ends_with('Z'));
         assert!(!apply_resolve(&mut store, "missing"));
+    }
+
+    #[test]
+    fn view_carries_resolution_fields_only_when_present() {
+        let open = ann("a", "hello", "open");
+        let json = serde_json::to_value(view_of(&open, "hello\n")).unwrap();
+        assert!(json.get("resolvedBy").is_none());
+        let mut done = ann("b", "hello", "resolved");
+        done.resolved_by = Some("claude".into());
+        done.resolved_at = Some("2026-09-01T00:00:00Z".into());
+        let json = serde_json::to_value(view_of(&done, "hello\n")).unwrap();
+        assert_eq!(json["resolvedBy"], "claude");
+        assert_eq!(json["resolvedAt"], "2026-09-01T00:00:00Z");
     }
 
     #[test]
@@ -160,6 +188,8 @@ mod tests {
             author: "user".into(),
             created_at: "t".into(),
             number: 0,
+            resolved_by: None,
+            resolved_at: None,
         };
         let store = store_of(vec![a]);
         let text = "hello world\n"; // 1 line only, so line_hint 99 is out of range → orphaned

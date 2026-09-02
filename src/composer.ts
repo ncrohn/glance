@@ -19,8 +19,13 @@ export function showCommentComposer(opts: {
   anchor: { top: number; bottom: number; left: number };
   onSubmit: (note: string) => void;
   onCancel: () => void;
+  /** Prefilled note text (edit mode). */
+  initial?: string;
+  /** "edit" retitles the card and labels the primary button Save. */
+  mode?: "add" | "edit";
 }): void {
-  const { quote, anchor, onSubmit, onCancel } = opts;
+  const { quote, anchor, onSubmit, onCancel, initial = "", mode = "add" } = opts;
+  const editing = mode === "edit";
 
   const card = document.createElement("div");
   card.className = "comment-composer";
@@ -30,7 +35,7 @@ export function showCommentComposer(opts: {
 
   const head = document.createElement("div");
   head.className = "composer-head";
-  head.textContent = "Add comment";
+  head.textContent = editing ? "Edit comment" : "Add comment";
 
   const quoteEl = document.createElement("blockquote");
   quoteEl.className = "composer-quote";
@@ -40,6 +45,7 @@ export function showCommentComposer(opts: {
   ta.className = "composer-input";
   ta.placeholder = "Your note…";
   ta.rows = 3;
+  ta.value = initial;
 
   const foot = document.createElement("div");
   foot.className = "composer-foot";
@@ -48,7 +54,7 @@ export function showCommentComposer(opts: {
   cancelBtn.textContent = "Cancel";
   const saveBtn = document.createElement("button");
   saveBtn.className = "composer-btn primary";
-  saveBtn.textContent = "Comment";
+  saveBtn.textContent = editing ? "Save" : "Comment";
   foot.append(cancelBtn, saveBtn);
 
   card.append(head, quoteEl, ta, foot);
@@ -71,4 +77,5 @@ export function showCommentComposer(opts: {
   const onDocDown = (e: MouseEvent) => { if (!card.contains(e.target as Node)) cancel(); };
   document.addEventListener("mousedown", onDocDown, true);
   ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
 }

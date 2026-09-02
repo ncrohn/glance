@@ -76,6 +76,7 @@ pub fn run() {
             annotations::read_annotations,
             annotations::add_annotation,
             annotations::remove_annotation,
+            annotations::update_annotation,
             annotations::resolve_anchors,
             annotations::ensure_annotation_store,
             reviewed::read_reviewed,
