@@ -514,7 +514,7 @@ function renderContent(): void {
       const cta = el("div", "setup-cta");
       const body = el("div", "setup-cta-text");
       body.appendChild(el("div", "setup-cta-title", "Set up AI integration"));
-      body.appendChild(el("div", "setup-cta-sub", "Review your docs with Claude Code or Cursor — comments flow back as edits."));
+      body.appendChild(el("div", "setup-cta-sub", "Review your docs with Claude Code, Codex, or Cursor — comments flow back as edits."));
       const btn = el("button", "setup-cta-btn", "Set up");
       btn.onclick = () => { void openIntegrationPicker("setup"); };
       cta.append(body, btn);

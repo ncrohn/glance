@@ -17,11 +17,29 @@ fn read_existing(path: &Path) -> Result<String, String> {
 
 /// Write `contents` to `path` atomically (temp file in the same dir + rename),
 /// so a crash / disk-full / force-quit mid-write can't leave the user's global
-/// config truncated or corrupt.
+/// config truncated or corrupt. Writes *through* a symlink — dotfiles-managed
+/// configs are commonly linked, and renaming over the link would replace it
+/// with a detached copy — and carries the original file's mode over, so a 0600
+/// secrets file (Codex's config.toml holds MCP env tokens) stays 0600.
 fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    let target = if is_symlink(path) { std::fs::canonicalize(path)? } else { path.to_path_buf() };
+    let tmp = target.with_extension("tmp");
     std::fs::write(&tmp, contents)?;
-    std::fs::rename(&tmp, path)
+    if let Ok(meta) = std::fs::metadata(&target) {
+        std::fs::set_permissions(&tmp, meta.permissions())?;
+    }
+    std::fs::rename(&tmp, &target)
+}
+
+fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false)
+}
+
+/// Quote `s` for a POSIX `sh` script: single quotes, with any embedded single
+/// quote spliced in as `'\''`. Binary paths come from `current_exe()` and
+/// may hold spaces, quotes or `$`.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -159,91 +177,128 @@ fn parse_config_object(existing: &str, name: &str) -> Result<serde_json::Value, 
 /// The PostToolUse hook script. `app_bin` (absolute path to the Glance GUI
 /// binary) is interpolated via a placeholder so the embedded `python3` heredoc
 /// keeps its literal braces. Opens NEW project markdown; always exits 0.
+/// Understands both Claude Code's `Write` (`tool_input.file_path`) and Codex's
+/// `apply_patch` (`*** Add File:` lines in `tool_input.command`), so one script
+/// serves every client. Python launches the app itself (detached, all fds on
+/// /dev/null) so filenames never pass through shell word-splitting.
 pub fn hook_script(app_bin: &str) -> String {
     const TEMPLATE: &str = r#"#!/bin/sh
 # Glance auto-open hook (PostToolUse). Opens new project markdown in Glance.
-# Reads the Claude Code tool event JSON from stdin and prints the file to open
-# (a Write of a .md inside cwd, skipping node_modules and dotdirs); fires nothing
-# otherwise. Always exits 0 so it can never block the agent.
+# Reads the tool event JSON (Claude Code or Codex) from stdin and opens every
+# new .md inside cwd (a Write, or an apply_patch "*** Add File:"), skipping
+# node_modules and dotdirs. Always exits 0 so it can never block the agent.
 #
 # The Python code is captured into a variable first so that python3's stdin
 # remains the outer process's stdin (the JSON event). Using `python3 - <<HEREDOC`
-# would replace python3's stdin with the heredoc, losing the JSON.
+# would replace python3's stdin with the heredoc, losing the JSON. The app path
+# travels via the environment, so it is never quoted inside Python.
+GLANCE_APP=__APP_BIN__
+export GLANCE_APP
 _GLANCE_PY=$(cat <<'PY'
-import sys, json, os
+import sys, json, os, subprocess
 try:
     d = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
-if d.get("tool_name") != "Write":
-    sys.exit(0)
+tool = d.get("tool_name")
 ti = d.get("tool_input") or {}
-fp = ti.get("file_path") or ""
 cwd = d.get("cwd") or ""
-if not fp or not cwd:
+if not cwd:
     sys.exit(0)
 cwd = os.path.abspath(cwd)
-ap = fp if os.path.isabs(fp) else os.path.join(cwd, fp)
-ap = os.path.abspath(ap)
-if not (ap.endswith(".md") or ap.endswith(".markdown")):
-    sys.exit(0)
-try:
-    if os.path.commonpath([ap, cwd]) != cwd:
-        sys.exit(0)
-except ValueError:
-    sys.exit(0)
-rel = os.path.relpath(ap, cwd)
-parts = rel.split(os.sep)
-if any(p == "node_modules" or p.startswith(".") for p in parts):
-    sys.exit(0)
-print(ap)
+# Candidate paths. Claude Code's Write tool carries file_path; Codex's
+# apply_patch carries the patch text in tool_input.command — a string per the
+# hooks docs, or the ["apply_patch", "<patch>"] list its own prompt teaches —
+# where only "*** Add File:" entries are new documents.
+cands = []
+if tool == "Write":
+    fp = ti.get("file_path") or ""
+    if fp:
+        cands.append(fp)
+elif tool == "apply_patch":
+    cmd = ti.get("command")
+    if isinstance(cmd, list):
+        cmd = "\n".join(c for c in cmd if isinstance(c, str))
+    if isinstance(cmd, str):
+        for line in cmd.splitlines():
+            if line.startswith("*** Add File: "):
+                cands.append(line[len("*** Add File: "):].strip())
+def project_md(fp):
+    ap = fp if os.path.isabs(fp) else os.path.join(cwd, fp)
+    ap = os.path.abspath(ap)
+    if not (ap.endswith(".md") or ap.endswith(".markdown")):
+        return None
+    try:
+        if os.path.commonpath([ap, cwd]) != cwd:
+            return None
+    except ValueError:
+        return None
+    rel = os.path.relpath(ap, cwd)
+    parts = rel.split(os.sep)
+    if any(p == "node_modules" or p.startswith(".") for p in parts):
+        return None
+    return ap
+targets = []
+for fp in cands:
+    ap = project_md(fp)
+    if ap and ap not in targets:
+        targets.append(ap)
+if targets:
+    # One launch, every doc as an argument (Glance opens each as a tab).
+    # Detached with every fd on /dev/null: the agent reads this hook's stdout
+    # to EOF before continuing, so the GUI must not inherit it, and a new
+    # session keeps the GUI off the caller's terminal. Passing argv directly
+    # also means any byte in a filename survives.
+    try:
+        subprocess.Popen(
+            [os.environ["GLANCE_APP"]] + targets,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
 PY
 )
-TARGET=$(python3 -c "$_GLANCE_PY")
-# Launch detached. This MUST be a single backgrounded command inside `if`, not
-# `[ … ] && app &`: backgrounding an AND-list runs it in a subshell that keeps
-# the hook's inherited stdout/stderr open for the app's whole lifetime, so Claude
-# Code (which reads the hook's stdout to EOF) hangs until the user quits Glance.
-# A lone `app … & ` reparents to launchd immediately; </dev/null also severs
-# stdin so the GUI never holds the caller's terminal.
-if [ -n "$TARGET" ]; then
-  "__APP_BIN__" "$TARGET" >/dev/null 2>&1 </dev/null &
-fi
+python3 -c "$_GLANCE_PY" >/dev/null 2>&1 || true
 exit 0
 "#;
-    TEMPLATE.replace("__APP_BIN__", app_bin)
+    TEMPLATE.replace("__APP_BIN__", &sh_quote(app_bin))
 }
 
 /// The UserPromptSubmit hook script. Runs `glance-mcp --pending` with the hook
 /// event JSON passed through on stdin; whatever it prints becomes context for
-/// Claude's next turn. Guarded and `|| true` so a missing or broken binary can
+/// the agent's next turn. Guarded and `|| true` so a missing or broken binary can
 /// never block the prompt.
 pub fn pending_hook_script(mcp_bin: &str) -> String {
     const TEMPLATE: &str = r#"#!/bin/sh
 # Glance pending-comments hook (UserPromptSubmit). Prints one context line per
-# project doc that has open review comments, so Claude reads them without being
-# told. stdin (the hook event JSON, with cwd) is passed straight through to
+# project doc that has open review comments, so the agent reads them without
+# being told. stdin (the hook event JSON, with cwd) is passed straight through to
 # glance-mcp. Always exits 0 so it can never block the agent.
-if [ -x "__MCP_BIN__" ]; then
-  "__MCP_BIN__" --pending 2>/dev/null || true
+if [ -x __MCP_BIN__ ]; then
+  __MCP_BIN__ --pending 2>/dev/null || true
 fi
 exit 0
 "#;
-    TEMPLATE.replace("__MCP_BIN__", mcp_bin)
+    TEMPLATE.replace("__MCP_BIN__", &sh_quote(mcp_bin))
 }
 
-/// Add a hook entry running `command` under `hooks.<event>` in a settings.json
-/// string, preserving everything else. `matcher` is written only when given
-/// (`UserPromptSubmit` entries have none). Idempotent: no-op if `command`
-/// already appears under any entry of that event. Tolerates empty input,
-/// refuses non-object content.
-pub fn merge_settings_hook_for(
+/// Add a hook entry running `command` under `hooks.<event>` in a hooks file
+/// (Claude's settings.json, Codex's hooks.json — same layout; `file` is only
+/// used in error messages), preserving everything else. `matcher` is written
+/// only when given (`UserPromptSubmit` entries have none). Idempotent: no-op if
+/// `command` already appears under any entry of that event. Tolerates empty
+/// input, refuses non-object content.
+pub fn merge_settings_hook_in(
     existing: &str,
+    file: &str,
     event: &str,
     matcher: Option<&str>,
     command: &str,
 ) -> Result<String, String> {
-    let mut root = parse_config_object(existing, "~/.claude/settings.json")?;
+    let mut root = parse_config_object(existing, file)?;
     let obj = root.as_object_mut().unwrap();
     let hooks = obj.entry("hooks").or_insert_with(|| serde_json::json!({}));
     if !hooks.is_object() {
@@ -276,11 +331,6 @@ pub fn merge_settings_hook_for(
         arr.push(entry);
     }
     serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
-}
-
-/// Add a PostToolUse/Write hook running `command`. See [`merge_settings_hook_for`].
-pub fn merge_settings_hook(existing: &str, command: &str) -> Result<String, String> {
-    merge_settings_hook_for(existing, "PostToolUse", Some("Write"), command)
 }
 
 /// Remove the `mcpServers.<name>` entry from a config string, preserving every
@@ -374,6 +424,79 @@ pub fn mcp_config_has(existing: &str, name: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(existing)
         .ok()
         .and_then(|v| v.get("mcpServers")?.get(name).map(|_| true))
+        .unwrap_or(false)
+}
+
+/// Parse a TOML config into a format-preserving document. Empty/whitespace →
+/// a fresh document. Non-empty content that fails to parse is an error —
+/// same clobber-guard as [`parse_config_object`].
+fn parse_toml_doc(existing: &str, file: &str) -> Result<toml_edit::DocumentMut, String> {
+    if existing.trim().is_empty() {
+        return Ok(toml_edit::DocumentMut::new());
+    }
+    existing.parse::<toml_edit::DocumentMut>().map_err(|e| {
+        format!("{file} is not valid TOML ({e}); refusing to overwrite it. Fix or remove the file, then retry.")
+    })
+}
+
+/// Merge a `[mcp_servers.<name>]` table into a Codex `config.toml` string,
+/// preserving every other key, comment and the user's formatting.
+pub fn merge_mcp_toml(existing: &str, name: &str, command: &str, file: &str) -> Result<String, String> {
+    let mut doc = parse_toml_doc(existing, file)?;
+    let mut fresh = doc.get("mcp_servers").is_none();
+    let servers = doc.entry("mcp_servers").or_insert(toml_edit::table());
+    if !servers.is_table_like() {
+        *servers = toml_edit::table();
+        fresh = true;
+    }
+    if fresh {
+        // A table we created renders as `[mcp_servers.glance]` only, with no
+        // bare `[mcp_servers]` header. An existing header (and any comment on
+        // it) is the user's and stays as written.
+        if let Some(t) = servers.as_table_mut() {
+            t.set_implicit(true);
+        }
+    }
+    let servers = servers.as_table_like_mut().unwrap();
+    if servers.get(name).is_some_and(|e| e.is_table_like()) {
+        // Re-running setup is the upgrade path: refresh the binary path but
+        // keep whatever else the user put on the entry (env, enabled, timeouts).
+        servers.get_mut(name).unwrap().as_table_like_mut().unwrap().insert("command", toml_edit::value(command));
+    } else {
+        let mut server = toml_edit::Table::new();
+        server["command"] = toml_edit::value(command);
+        server["args"] = toml_edit::value(toml_edit::Array::new());
+        servers.insert(name, toml_edit::Item::Table(server));
+    }
+    Ok(doc.to_string())
+}
+
+/// Remove `[mcp_servers.<name>]` from a Codex `config.toml` string. Returns
+/// `None` when the file is empty or the entry is absent. An emptied parent
+/// table renders as nothing when it was implicit (ours), and keeps its header
+/// and comment when the user wrote `[mcp_servers]` themselves.
+pub fn remove_mcp_toml(existing: &str, name: &str, file: &str) -> Result<Option<String>, String> {
+    if existing.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut doc = parse_toml_doc(existing, file)?;
+    let removed = doc
+        .get_mut("mcp_servers")
+        .and_then(|s| s.as_table_like_mut())
+        .is_some_and(|t| t.remove(name).is_some());
+    if !removed {
+        return Ok(None);
+    }
+    Ok(Some(doc.to_string()))
+}
+
+/// Whether `[mcp_servers.<name>]` is present in a TOML config string. Read-only
+/// probe; any parse problem is "not present".
+pub fn mcp_toml_has(existing: &str, name: &str) -> bool {
+    existing
+        .parse::<toml_edit::DocumentMut>()
+        .ok()
+        .and_then(|d| d.get("mcp_servers")?.as_table_like()?.get(name).map(|_| true))
         .unwrap_or(false)
 }
 
@@ -517,6 +640,13 @@ pub trait ClientAdapter {
     /// drives the empty-state "set up AI integration" prompt.
     fn is_configured(&self, home: &Path) -> bool;
 
+    /// One sentence appended to a successful install row when the client needs
+    /// something from the user before the capability works (Codex's hook
+    /// trust prompt). Default: nothing.
+    fn install_note(&self, _c: Capability) -> Option<&'static str> {
+        None
+    }
+
     /// Register glance-mcp. The only required capability — it is the core loop.
     fn mcp(&self, home: &Path, mcp_bin: &str) -> Result<Plan, String>;
 
@@ -563,6 +693,79 @@ pub trait ClientAdapter {
     }
 }
 
+/// Guidance install plan: append the review block to a markdown file the
+/// client reads on every turn (Claude's CLAUDE.md, Codex's AGENTS.md, a Cursor
+/// rules file).
+fn guidance_plan(path: PathBuf) -> Result<Plan, String> {
+    match append_guidance(&read_existing(&path)?) {
+        None => Ok(Plan::AlreadyDone("Guidance already present — left unchanged.".to_string())),
+        Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
+    }
+}
+
+/// Reverse of [`guidance_plan`]: strip the block. Setup may have created the
+/// file, so delete it when stripping empties it; otherwise rewrite it with the
+/// user's own content intact.
+fn guidance_uninstall_plan(path: PathBuf) -> Result<Plan, String> {
+    match strip_guidance(&read_existing(&path)?) {
+        None => Ok(Plan::AlreadyDone("No guidance block to remove.".to_string())),
+        Some(next) if next.trim().is_empty() => Ok(Plan::Delete(vec![path])),
+        Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
+    }
+}
+
+/// Uninstall plan for a skill dir: the three files Glance wrote, then the dir
+/// itself — unless the dir is a symlink the user pointed somewhere else (a
+/// dotfiles tree, say). Then only our files inside it go; the link is theirs.
+fn skill_uninstall_plan(skill_dir: &Path) -> Plan {
+    let mut paths = vec![
+        skill_dir.join("SKILL.md"),
+        skill_dir.join("open-md-hook.sh"),
+        skill_dir.join("pending-hook.sh"),
+    ];
+    if !is_symlink(skill_dir) {
+        paths.push(skill_dir.to_path_buf());
+    }
+    Plan::Delete(paths)
+}
+
+/// Install plan for both hooks in a client whose hooks file uses the
+/// `hooks.<Event>[].hooks[]` layout (Claude's settings.json, Codex's
+/// hooks.json). Scripts land in `skill_dir`; `matcher` is the PostToolUse tool
+/// filter (`Write` for Claude, `apply_patch` for Codex). `file` names the
+/// hooks file in error messages.
+fn hooks_install_plan(
+    skill_dir: &Path,
+    hooks_path: PathBuf,
+    file: &str,
+    matcher: &str,
+    bins: &Binaries,
+) -> Result<Plan, String> {
+    let open_path = skill_dir.join("open-md-hook.sh");
+    let pending_path = skill_dir.join("pending-hook.sh");
+    let existing = read_existing(&hooks_path)?;
+    let merged = merge_settings_hook_in(&existing, file, "PostToolUse", Some(matcher), open_path.to_string_lossy().as_ref())?;
+    let merged = merge_settings_hook_in(&merged, file, "UserPromptSubmit", None, pending_path.to_string_lossy().as_ref())?;
+    Ok(Plan::Write(vec![
+        FileWrite { path: open_path, contents: hook_script(&bins.app_bin), executable: true },
+        FileWrite { path: pending_path, contents: pending_hook_script(&bins.mcp_bin), executable: true },
+        FileWrite { path: hooks_path, contents: merged, executable: false },
+    ]))
+}
+
+/// Reverse of [`hooks_install_plan`]: the hooks file with both entries
+/// withdrawn, or `None` when neither was present. The scripts themselves are
+/// deleted with the skill dir, not here.
+fn hooks_uninstall_contents(skill_dir: &Path, hooks_path: &Path, file: &str) -> Result<Option<String>, String> {
+    let open_path = skill_dir.join("open-md-hook.sh");
+    let pending_path = skill_dir.join("pending-hook.sh");
+    let existing = read_existing(hooks_path)?;
+    let after_open = remove_settings_hook(&existing, open_path.to_string_lossy().as_ref(), file)?;
+    let base = after_open.as_deref().unwrap_or(&existing);
+    let after_pending = remove_settings_hook_for(base, "UserPromptSubmit", pending_path.to_string_lossy().as_ref(), file)?;
+    Ok(after_pending.or(after_open))
+}
+
 /// Claude Code — the original integration, now expressed as an adapter. Wraps
 /// the pure merge helpers above unchanged.
 pub struct ClaudeAdapter;
@@ -596,11 +799,7 @@ impl ClientAdapter for ClaudeAdapter {
     }
 
     fn guidance(&self, home: &Path) -> Result<Plan, String> {
-        let path = home.join(".claude").join("CLAUDE.md");
-        match append_guidance(&read_existing(&path)?) {
-            None => Ok(Plan::AlreadyDone("Guidance already present — left unchanged.".to_string())),
-            Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
-        }
+        guidance_plan(home.join(".claude").join("CLAUDE.md"))
     }
 
     fn skill(&self, home: &Path) -> Result<Plan, String> {
@@ -610,16 +809,8 @@ impl ClientAdapter for ClaudeAdapter {
 
     fn open_hook(&self, home: &Path, bins: &Binaries) -> Result<Plan, String> {
         let skill_dir = home.join(".claude").join("skills").join("glance");
-        let open_path = skill_dir.join("open-md-hook.sh");
-        let pending_path = skill_dir.join("pending-hook.sh");
         let settings_path = home.join(".claude").join("settings.json");
-        let merged = merge_settings_hook(&read_existing(&settings_path)?, open_path.to_string_lossy().as_ref())?;
-        let merged = merge_settings_hook_for(&merged, "UserPromptSubmit", None, pending_path.to_string_lossy().as_ref())?;
-        Ok(Plan::Write(vec![
-            FileWrite { path: open_path, contents: hook_script(&bins.app_bin), executable: true },
-            FileWrite { path: pending_path, contents: pending_hook_script(&bins.mcp_bin), executable: true },
-            FileWrite { path: settings_path, contents: merged, executable: false },
-        ]))
+        hooks_install_plan(&skill_dir, settings_path, "~/.claude/settings.json", "Write", bins)
     }
 
     fn mcp_uninstall(&self, home: &Path) -> Result<Plan, String> {
@@ -631,33 +822,117 @@ impl ClientAdapter for ClaudeAdapter {
     }
 
     fn guidance_uninstall(&self, home: &Path) -> Result<Plan, String> {
-        let path = home.join(".claude").join("CLAUDE.md");
-        match strip_guidance(&read_existing(&path)?) {
-            None => Ok(Plan::AlreadyDone("No guidance block to remove.".to_string())),
-            Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
-        }
+        guidance_uninstall_plan(home.join(".claude").join("CLAUDE.md"))
     }
 
     fn skill_uninstall(&self, home: &Path) -> Result<Plan, String> {
-        // The skill dir holds SKILL.md and both hook scripts — remove it whole.
-        Ok(Plan::Delete(vec![home.join(".claude").join("skills").join("glance")]))
+        // The skill dir holds SKILL.md and both hook scripts.
+        Ok(skill_uninstall_plan(&home.join(".claude").join("skills").join("glance")))
     }
 
     fn open_hook_uninstall(&self, home: &Path) -> Result<Plan, String> {
         // Both hook scripts are deleted with the skill dir above; here we only
         // withdraw their references from settings.json.
         let skill_dir = home.join(".claude").join("skills").join("glance");
-        let open_path = skill_dir.join("open-md-hook.sh");
-        let pending_path = skill_dir.join("pending-hook.sh");
         let settings_path = home.join(".claude").join("settings.json");
-        const FILE: &str = "~/.claude/settings.json";
-        let existing = read_existing(&settings_path)?;
-        let after_open = remove_settings_hook(&existing, open_path.to_string_lossy().as_ref(), FILE)?;
-        let base = after_open.as_deref().unwrap_or(&existing);
-        let after_pending = remove_settings_hook_for(base, "UserPromptSubmit", pending_path.to_string_lossy().as_ref(), FILE)?;
-        match after_pending.or(after_open) {
+        match hooks_uninstall_contents(&skill_dir, &settings_path, "~/.claude/settings.json")? {
             None => Ok(Plan::AlreadyDone("No Glance hook entries to remove.".to_string())),
             Some(next) => Ok(Plan::Write(vec![FileWrite { path: settings_path, contents: next, executable: false }])),
+        }
+    }
+}
+
+/// Codex CLI — MCP in `~/.codex/config.toml` (TOML, so it has its own merge
+/// helpers), guidance in `~/.codex/AGENTS.md`, the skill under
+/// `~/.codex/skills/glance/`, and both hooks in `~/.codex/hooks.json`, which
+/// uses the same `hooks.<Event>[].hooks[]` layout as Claude's settings.json.
+/// Codex reports file edits as `apply_patch`, so the auto-open matcher targets
+/// that tool and the shared [`hook_script`] parses its `*** Add File:` lines.
+pub struct CodexAdapter;
+
+const CODEX_CONFIG_FILE: &str = "~/.codex/config.toml";
+const CODEX_HOOKS_FILE: &str = "~/.codex/hooks.json";
+
+impl CodexAdapter {
+    fn dir(home: &Path) -> PathBuf {
+        home.join(".codex")
+    }
+    fn skill_dir(home: &Path) -> PathBuf {
+        Self::dir(home).join("skills").join("glance")
+    }
+}
+
+impl ClientAdapter for CodexAdapter {
+    fn id(&self) -> &'static str {
+        "codex"
+    }
+    fn display_name(&self) -> &'static str {
+        "Codex CLI"
+    }
+
+    fn is_present(&self, home: &Path) -> bool {
+        Self::dir(home).is_dir()
+    }
+
+    fn supports(&self, _c: Capability) -> bool {
+        true // Codex has MCP, a global AGENTS.md, skills and hooks.
+    }
+
+    fn is_configured(&self, home: &Path) -> bool {
+        read_existing(&Self::dir(home).join("config.toml"))
+            .map(|s| mcp_toml_has(&s, "glance"))
+            .unwrap_or(false)
+    }
+
+    fn install_note(&self, c: Capability) -> Option<&'static str> {
+        // Codex holds new or changed hooks behind a trust review on its next
+        // start; until accepted they do not run.
+        (c == Capability::Hook).then_some("Codex will ask you to trust these hooks the next time it starts.")
+    }
+
+    fn mcp(&self, home: &Path, mcp_bin: &str) -> Result<Plan, String> {
+        let path = Self::dir(home).join("config.toml");
+        let merged = merge_mcp_toml(&read_existing(&path)?, "glance", mcp_bin, CODEX_CONFIG_FILE)?;
+        Ok(Plan::Write(vec![FileWrite { path, contents: merged, executable: false }]))
+    }
+
+    fn guidance(&self, home: &Path) -> Result<Plan, String> {
+        guidance_plan(Self::dir(home).join("AGENTS.md"))
+    }
+
+    fn skill(&self, home: &Path) -> Result<Plan, String> {
+        let path = Self::skill_dir(home).join("SKILL.md");
+        Ok(Plan::Write(vec![FileWrite { path, contents: skill_doc(), executable: false }]))
+    }
+
+    fn open_hook(&self, home: &Path, bins: &Binaries) -> Result<Plan, String> {
+        let hooks_path = Self::dir(home).join("hooks.json");
+        hooks_install_plan(&Self::skill_dir(home), hooks_path, CODEX_HOOKS_FILE, "apply_patch", bins)
+    }
+
+    fn mcp_uninstall(&self, home: &Path) -> Result<Plan, String> {
+        let path = Self::dir(home).join("config.toml");
+        match remove_mcp_toml(&read_existing(&path)?, "glance", CODEX_CONFIG_FILE)? {
+            None => Ok(Plan::AlreadyDone("glance-mcp was not registered.".to_string())),
+            Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
+        }
+    }
+
+    fn guidance_uninstall(&self, home: &Path) -> Result<Plan, String> {
+        guidance_uninstall_plan(Self::dir(home).join("AGENTS.md"))
+    }
+
+    fn skill_uninstall(&self, home: &Path) -> Result<Plan, String> {
+        Ok(skill_uninstall_plan(&Self::skill_dir(home)))
+    }
+
+    fn open_hook_uninstall(&self, home: &Path) -> Result<Plan, String> {
+        // Like Claude's settings.json, hooks.json is left in place with our
+        // entries withdrawn — there is no record of who created the file.
+        let hooks_path = Self::dir(home).join("hooks.json");
+        match hooks_uninstall_contents(&Self::skill_dir(home), &hooks_path, CODEX_HOOKS_FILE)? {
+            None => Ok(Plan::AlreadyDone("No Glance hook entries to remove.".to_string())),
+            Some(next) => Ok(Plan::Write(vec![FileWrite { path: hooks_path, contents: next, executable: false }])),
         }
     }
 }
@@ -698,11 +973,7 @@ impl ClientAdapter for CursorAdapter {
 
     fn guidance(&self, home: &Path) -> Result<Plan, String> {
         // Cursor reads per-topic rule files from ~/.cursor/rules/.
-        let path = home.join(".cursor").join("rules").join("glance.md");
-        match append_guidance(&read_existing(&path)?) {
-            None => Ok(Plan::AlreadyDone("Guidance already present — left unchanged.".to_string())),
-            Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
-        }
+        guidance_plan(home.join(".cursor").join("rules").join("glance.md"))
     }
 
     fn mcp_uninstall(&self, home: &Path) -> Result<Plan, String> {
@@ -714,16 +985,9 @@ impl ClientAdapter for CursorAdapter {
     }
 
     fn guidance_uninstall(&self, home: &Path) -> Result<Plan, String> {
-        // `guidance()` uses append_guidance (a merge), because ~/.cursor/rules/
-        // files are user-editable and glance.md may accumulate their own content.
-        // So reverse it with the same strip helper, not a blunt whole-file delete
-        // — only remove the file if stripping our block empties it.
-        let path = home.join(".cursor").join("rules").join("glance.md");
-        match strip_guidance(&read_existing(&path)?) {
-            None => Ok(Plan::AlreadyDone("No guidance block to remove.".to_string())),
-            Some(next) if next.trim().is_empty() => Ok(Plan::Delete(vec![path])),
-            Some(next) => Ok(Plan::Write(vec![FileWrite { path, contents: next, executable: false }])),
-        }
+        // ~/.cursor/rules/ files are user-editable and glance.md may have
+        // accumulated their own content, so strip rather than delete outright.
+        guidance_uninstall_plan(home.join(".cursor").join("rules").join("glance.md"))
     }
 }
 
@@ -785,7 +1049,7 @@ fn run_step(group: &str, label: &str, plan: Result<Plan, String>) -> StepResult 
 
 /// Every client Glance knows how to integrate with.
 fn all_adapters() -> Vec<Box<dyn ClientAdapter>> {
-    vec![Box::new(ClaudeAdapter), Box::new(CursorAdapter)]
+    vec![Box::new(ClaudeAdapter), Box::new(CodexAdapter), Box::new(CursorAdapter)]
 }
 
 fn install_plan(adapter: &dyn ClientAdapter, c: Capability, bins: &Binaries, home: &Path) -> Result<Plan, String> {
@@ -814,7 +1078,15 @@ pub fn setup_adapter(adapter: &dyn ClientAdapter, bins: &Binaries, home: &Path) 
     Capability::ALL
         .into_iter()
         .filter(|&c| adapter.supports(c))
-        .map(|c| run_step(name, c.label(), install_plan(adapter, c, bins, home)))
+        .map(|c| {
+            let mut r = run_step(name, c.label(), install_plan(adapter, c, bins, home));
+            if r.ok {
+                if let Some(note) = adapter.install_note(c) {
+                    r.message = format!("{} {note}", r.message);
+                }
+            }
+            r
+        })
         .collect()
 }
 
@@ -896,6 +1168,13 @@ pub fn run_integration(action: String, ids: Vec<String>) -> Vec<StepResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn merge_settings_hook(existing: &str, command: &str) -> Result<String, String> {
+        merge_settings_hook_in(existing, "~/.claude/settings.json", "PostToolUse", Some("Write"), command)
+    }
+    fn merge_settings_hook_for(existing: &str, event: &str, matcher: Option<&str>, command: &str) -> Result<String, String> {
+        merge_settings_hook_in(existing, "~/.claude/settings.json", event, matcher, command)
+    }
 
     #[test]
     fn append_guidance_adds_block_once() {
@@ -1070,10 +1349,10 @@ mod tests {
         assert_eq!(writes.len(), 3);
         let open = writes.iter().find(|w| w.path.ends_with("open-md-hook.sh")).expect("open-md-hook.sh write");
         assert!(open.executable);
-        assert!(open.contents.contains("/Applications/Glance.app/Contents/MacOS/glance\""));
+        assert!(open.contents.contains("GLANCE_APP='/Applications/Glance.app/Contents/MacOS/glance'"));
         let pending = writes.iter().find(|w| w.path.ends_with("pending-hook.sh")).expect("pending-hook.sh write");
         assert!(pending.executable);
-        assert!(pending.contents.contains("/Applications/Glance.app/Contents/MacOS/glance-mcp\" --pending"));
+        assert!(pending.contents.contains("'/Applications/Glance.app/Contents/MacOS/glance-mcp' --pending"));
         let settings = writes.iter().find(|w| w.path.ends_with("settings.json")).expect("a settings write");
         let v: serde_json::Value = serde_json::from_str(&settings.contents).unwrap();
         assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], "Write");
@@ -1088,7 +1367,7 @@ mod tests {
     fn pending_hook_script_runs_mcp_pending_and_never_fails() {
         let s = pending_hook_script("/Applications/Glance.app/Contents/MacOS/glance-mcp");
         assert!(s.starts_with("#!/bin/sh\n"));
-        assert!(s.contains("\"/Applications/Glance.app/Contents/MacOS/glance-mcp\" --pending"));
+        assert!(s.contains("'/Applications/Glance.app/Contents/MacOS/glance-mcp' --pending"));
         assert!(s.contains("|| true"));
         assert!(s.trim_end().ends_with("exit 0"));
         // With a missing binary the script must still exit 0 and print nothing.
@@ -1176,10 +1455,13 @@ mod tests {
         let home = tmp_home("present");
         // nothing yet
         assert!(!ClaudeAdapter.is_present(&home));
+        assert!(!CodexAdapter.is_present(&home));
         assert!(!CursorAdapter.is_present(&home));
         std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
         std::fs::create_dir_all(home.join(".cursor")).unwrap();
         assert!(ClaudeAdapter.is_present(&home));
+        assert!(CodexAdapter.is_present(&home));
         assert!(CursorAdapter.is_present(&home));
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -1261,9 +1543,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&w[0].contents).unwrap();
         assert!(v["mcpServers"].get("glance").is_none());
         assert_eq!(v["mcpServers"]["keep"]["command"], "k");
-        // Skill: deletes the whole skills/glance dir
+        // Skill: deletes our three files, then the skills/glance dir itself
+        let dir = home.join(".claude").join("skills").join("glance");
         let del = plan_deletes(ClaudeAdapter.skill_uninstall(&home).unwrap());
-        assert_eq!(del, vec![home.join(".claude").join("skills").join("glance")]);
+        assert_eq!(del, vec![dir.join("SKILL.md"), dir.join("open-md-hook.sh"), dir.join("pending-hook.sh"), dir]);
         // Nothing installed → AlreadyDone, not an error
         assert!(matches!(ClaudeAdapter.mcp_uninstall(&tmp_home("empty1")).unwrap(), Plan::AlreadyDone(_)));
         assert!(matches!(ClaudeAdapter.open_hook_uninstall(&tmp_home("empty2")).unwrap(), Plan::AlreadyDone(_)));
@@ -1318,6 +1601,8 @@ mod tests {
         let settings: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join(".claude").join("settings.json")).unwrap()).unwrap();
         assert!(settings["hooks"]["PostToolUse"].as_array().unwrap().is_empty());
         assert!(settings["hooks"]["UserPromptSubmit"].as_array().unwrap().is_empty());
+        // setup created CLAUDE.md on this fresh home, so uninstall removes it
+        assert!(!home.join(".claude").join("CLAUDE.md").exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1341,6 +1626,7 @@ mod tests {
     fn supports_reflects_each_client() {
         for c in Capability::ALL {
             assert!(ClaudeAdapter.supports(c), "Claude should support {c:?}");
+            assert!(CodexAdapter.supports(c), "Codex should support {c:?}");
         }
         assert!(CursorAdapter.supports(Capability::Mcp));
         assert!(CursorAdapter.supports(Capability::Guidance));
@@ -1361,6 +1647,9 @@ mod tests {
         assert!(!sup("hook"));
         let claude = targets.iter().find(|c| c.id == "claude").expect("claude listed");
         assert!(claude.capabilities.iter().all(|c| c.supported));
+        let codex = targets.iter().find(|c| c.id == "codex").expect("codex listed");
+        assert_eq!(codex.display_name, "Codex CLI");
+        assert!(codex.capabilities.iter().all(|c| c.supported));
     }
 
     #[test]
@@ -1529,6 +1818,302 @@ mod tests {
         // does NOT fire: under a dotdir
         assert!(!run_hook(&base, &stub, &marker, &json("Write", proj.join(".hidden").join("x.md").to_string_lossy().to_string())));
 
+        // Codex: apply_patch carries the patch text in tool_input.command, with
+        // paths relative to cwd. (Raw strings keep the `\n` as JSON escapes.)
+        let patch = |body: &str| format!(r#"{{"tool_name":"apply_patch","cwd":"{cwd}","tool_input":{{"command":"{body}"}}}}"#);
+        // FIRES: adds a .md
+        assert!(run_hook(&base, &stub, &marker, &patch(r"*** Begin Patch\n*** Add File: notes.md\n+hi\n*** End Patch\n")));
+        // FIRES: the ["apply_patch", "<patch>"] list form Codex's prompt teaches
+        let list = format!(r#"{{"tool_name":"apply_patch","cwd":"{cwd}","tool_input":{{"command":["apply_patch","*** Begin Patch\n*** Add File: docs/plan.md\n+x\n*** End Patch\n"]}}}}"#);
+        assert!(run_hook(&base, &stub, &marker, &list));
+        // does NOT fire: updates an existing .md
+        assert!(!run_hook(&base, &stub, &marker, &patch(r"*** Begin Patch\n*** Update File: notes.md\n@@\n-a\n+b\n*** End Patch\n")));
+        // does NOT fire: adds a non-markdown file
+        assert!(!run_hook(&base, &stub, &marker, &patch(r"*** Begin Patch\n*** Add File: main.rs\n+fn main() {}\n*** End Patch\n")));
+        // does NOT fire: adds a .md under node_modules
+        assert!(!run_hook(&base, &stub, &marker, &patch(r"*** Begin Patch\n*** Add File: node_modules/x.md\n+x\n*** End Patch\n")));
+
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn hook_opens_every_added_markdown_in_one_launch() {
+        if !python3_available() {
+            eprintln!("skipping hook_opens_every_added_markdown_in_one_launch: python3 not available");
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("glance-hook-multi-{}", std::process::id()));
+        let proj = base.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let marker = base.join("marker");
+        // stub records its argv, one per line
+        let stub = base.join("stub.sh");
+        std::fs::write(&stub, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{}\"\n", marker.display())).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let cwd = proj.to_string_lossy().to_string();
+        let json = format!(
+            r#"{{"tool_name":"apply_patch","cwd":"{cwd}","tool_input":{{"command":"*** Begin Patch\n*** Add File: a.md\n+a\n*** Add File: src/main.rs\n+x\n*** Add File: my notes.md\n+b\n*** End Patch\n"}}}}"#
+        );
+        assert!(run_hook(&base, &stub, &marker, &json));
+        let got = std::fs::read_to_string(&marker).unwrap();
+        let lines: Vec<&str> = got.lines().collect();
+        assert_eq!(lines, vec![proj.join("a.md").to_string_lossy().to_string(), proj.join("my notes.md").to_string_lossy().to_string()]);
+
+        // A Write whose path contains a newline reaches argv as one argument.
+        let odd = proj.join("line1\nline2.md").to_string_lossy().to_string();
+        let json = format!(r#"{{"tool_name":"Write","cwd":"{cwd}","tool_input":{{"file_path":"{}"}}}}"#, odd.replace('\n', "\\n"));
+        assert!(run_hook(&base, &stub, &marker, &json));
+        let got = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(got, format!("{odd}\n"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // --- symlinks, modes, quoting -------------------------------------------
+
+    #[test]
+    fn atomic_write_goes_through_symlinks_and_keeps_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tmp_home("atomic-symlink");
+        let real = home.join("dotfiles").join("AGENTS.md");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "# mine\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = home.join("AGENTS.md");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        atomic_write(&link, "# mine\nplus\n").unwrap();
+        assert!(is_symlink(&link), "the symlink must survive");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "# mine\nplus\n");
+        assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_setup_writes_through_symlinked_agents_and_skill_dir() {
+        let home = tmp_home("codex-symlinks");
+        let dot = home.join("dotfiles");
+        std::fs::create_dir_all(dot.join("skills").join("glance")).unwrap();
+        std::fs::write(dot.join("AGENTS.md"), "# Mine\n").unwrap();
+        std::fs::write(dot.join("skills").join("glance").join("SKILL.md"), "old\n").unwrap();
+        std::fs::create_dir_all(home.join(".codex").join("skills")).unwrap();
+        std::os::unix::fs::symlink(dot.join("AGENTS.md"), home.join(".codex").join("AGENTS.md")).unwrap();
+        std::os::unix::fs::symlink(dot.join("skills").join("glance"), home.join(".codex").join("skills").join("glance")).unwrap();
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        for r in setup_adapter(&CodexAdapter, &bins, &home) {
+            assert!(r.ok, "{}", r.message);
+        }
+        // guidance landed in the real file, link intact
+        assert!(is_symlink(&home.join(".codex").join("AGENTS.md")));
+        let agents = std::fs::read_to_string(dot.join("AGENTS.md")).unwrap();
+        assert!(agents.starts_with("# Mine\n") && agents.contains(GUIDANCE_MARKER));
+        assert!(std::fs::read_to_string(dot.join("skills").join("glance").join("SKILL.md")).unwrap().starts_with("---\nname: glance"));
+
+        for r in remove_adapter(&CodexAdapter, &home) {
+            assert!(r.ok, "{}", r.message);
+        }
+        // user's link and dir kept; our files gone; guidance stripped in place
+        assert!(is_symlink(&home.join(".codex").join("skills").join("glance")));
+        assert!(dot.join("skills").join("glance").is_dir());
+        assert!(!dot.join("skills").join("glance").join("SKILL.md").exists());
+        assert!(!dot.join("skills").join("glance").join("open-md-hook.sh").exists());
+        assert!(is_symlink(&home.join(".codex").join("AGENTS.md")));
+        assert_eq!(std::fs::read_to_string(dot.join("AGENTS.md")).unwrap(), "# Mine\n");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn sh_quote_handles_quotes_and_dollars() {
+        assert_eq!(sh_quote("/a b/c"), "'/a b/c'");
+        assert_eq!(sh_quote("it's $x"), "'it'\\''s $x'");
+    }
+
+    #[test]
+    fn hook_scripts_survive_metachar_binary_paths() {
+        if !python3_available() {
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("glance-hook-quote-{}", std::process::id()));
+        let proj = base.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let odd_dir = base.join("it's $HOME \"dir\"");
+        std::fs::create_dir_all(&odd_dir).unwrap();
+        let marker = base.join("marker");
+        let stub = odd_dir.join("stub.sh");
+        std::fs::write(&stub, format!("#!/bin/sh\nprintf 'x' >> \"{}\"\n", marker.display())).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let cwd = proj.to_string_lossy().to_string();
+        let json = format!(r#"{{"tool_name":"Write","cwd":"{cwd}","tool_input":{{"file_path":"{}"}}}}"#, proj.join("n.md").display());
+        assert!(run_hook(&base, &stub, &marker, &json));
+        // pending hook: the quoted path is executable and runs
+        let script = base.join("pending-hook.sh");
+        std::fs::write(&script, pending_hook_script(&stub.to_string_lossy())).unwrap();
+        let _ = std::fs::remove_file(&marker);
+        let out = std::process::Command::new("sh").arg(&script).stdin(std::process::Stdio::null()).output().unwrap();
+        assert!(out.status.success());
+        assert!(marker.exists(), "pending hook did not run the quoted binary");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // --- Codex ------------------------------------------------------------
+
+    #[test]
+    fn merge_mcp_toml_rerun_keeps_user_keys_on_the_entry() {
+        let existing = "[mcp_servers.glance]\ncommand = \"/old/glance-mcp\"\nenabled = false\nstartup_timeout_sec = 120\n\n[mcp_servers.glance.env]\nTOKEN = \"t\"\n";
+        let out = merge_mcp_toml(existing, "glance", "/new/glance-mcp", "f").unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        let g = &doc["mcp_servers"]["glance"];
+        assert_eq!(g["command"].as_str(), Some("/new/glance-mcp"));
+        assert_eq!(g["enabled"].as_bool(), Some(false));
+        assert_eq!(g["startup_timeout_sec"].as_integer(), Some(120));
+        assert_eq!(g["env"]["TOKEN"].as_str(), Some("t"));
+        assert!(g.get("args").is_none(), "must not add args to an entry the user shaped");
+    }
+
+    #[test]
+    fn remove_mcp_toml_keeps_a_user_written_header() {
+        let existing = "# MCP servers I trust\n[mcp_servers]\n";
+        let with = merge_mcp_toml(existing, "glance", "/p", "f").unwrap();
+        let out = remove_mcp_toml(&with, "glance", "f").unwrap().unwrap();
+        assert!(out.contains("# MCP servers I trust\n[mcp_servers]\n"), "{out}");
+        assert!(!mcp_toml_has(&out, "glance"));
+    }
+
+    #[test]
+    fn merge_mcp_toml_creates_and_preserves() {
+        let out = merge_mcp_toml("", "glance", "/p/glance-mcp", "f").unwrap();
+        assert!(mcp_toml_has(&out, "glance"));
+        assert!(out.contains("[mcp_servers.glance]"));
+        assert!(!out.contains("[mcp_servers]\n"));
+        let existing = "# my config\nmodel = \"o3\"\n\n[mcp_servers.other]\ncommand = \"x\"\nargs = [\"-v\"]\n";
+        let out = merge_mcp_toml(existing, "glance", "/p/glance-mcp", "f").unwrap();
+        assert!(out.starts_with("# my config\nmodel = \"o3\"\n"));
+        assert!(out.contains("[mcp_servers.other]\ncommand = \"x\"\nargs = [\"-v\"]\n"));
+        assert!(mcp_toml_has(&out, "other"));
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        assert_eq!(doc["mcp_servers"]["glance"]["command"].as_str(), Some("/p/glance-mcp"));
+        assert!(doc["mcp_servers"]["glance"]["args"].as_array().unwrap().is_empty());
+        // idempotent
+        assert_eq!(merge_mcp_toml(&out, "glance", "/p/glance-mcp", "f").unwrap(), out);
+    }
+
+    #[test]
+    fn merge_mcp_toml_keeps_an_existing_header_and_its_comment() {
+        let existing = "# MCP servers I trust\n[mcp_servers]\n\n[mcp_servers.other]\ncommand = \"x\"\n";
+        let out = merge_mcp_toml(existing, "glance", "/p", "f").unwrap();
+        assert!(out.starts_with("# MCP servers I trust\n[mcp_servers]\n"), "{out}");
+        assert!(mcp_toml_has(&out, "other"));
+        assert!(mcp_toml_has(&out, "glance"));
+    }
+
+    #[test]
+    fn merge_mcp_toml_refuses_invalid() {
+        assert!(merge_mcp_toml("model = [unclosed", "glance", "/p", "f").is_err());
+        assert!(merge_mcp_toml("  \n", "glance", "/p", "f").is_ok());
+    }
+
+    #[test]
+    fn remove_mcp_toml_strips_entry_and_empty_parent() {
+        let with = merge_mcp_toml("model = \"o3\"\n", "glance", "/p", "f").unwrap();
+        let out = remove_mcp_toml(&with, "glance", "f").unwrap().unwrap();
+        assert!(!mcp_toml_has(&out, "glance"));
+        assert!(!out.contains("mcp_servers"));
+        assert!(out.contains("model = \"o3\""));
+        // other servers survive
+        let two = merge_mcp_toml(&with, "other", "/o", "f").unwrap();
+        let out = remove_mcp_toml(&two, "glance", "f").unwrap().unwrap();
+        assert!(mcp_toml_has(&out, "other"));
+        assert!(!mcp_toml_has(&out, "glance"));
+        // absent / empty → None
+        assert!(remove_mcp_toml("model = \"o3\"\n", "glance", "f").unwrap().is_none());
+        assert!(remove_mcp_toml("", "glance", "f").unwrap().is_none());
+        assert!(remove_mcp_toml("model = [bad", "glance", "f").is_err());
+    }
+
+    #[test]
+    fn mcp_toml_has_tolerates_garbage() {
+        assert!(!mcp_toml_has("not = [toml", "glance"));
+        assert!(!mcp_toml_has("", "glance"));
+        assert!(mcp_toml_has("mcp_servers = { glance = { command = \"g\" } }", "glance"));
+    }
+
+    #[test]
+    fn codex_install_then_uninstall_leaves_home_clean() {
+        let home = tmp_home("codex-roundtrip");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex").join("config.toml"), "model = \"o3\"\n").unwrap();
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        assert!(!CodexAdapter.is_configured(&home));
+        for r in setup_adapter(&CodexAdapter, &bins, &home) {
+            assert!(r.ok, "install step failed: {}", r.message);
+        }
+        assert!(CodexAdapter.is_configured(&home));
+        let hook_row = setup_adapter(&CodexAdapter, &bins, &home).into_iter().find(|r| r.label == Capability::Hook.label()).unwrap();
+        assert!(hook_row.message.contains("trust these hooks"), "{}", hook_row.message);
+        let cfg = std::fs::read_to_string(home.join(".codex").join("config.toml")).unwrap();
+        assert!(cfg.starts_with("model = \"o3\"\n"), "{cfg}");
+        assert!(cfg.contains("[mcp_servers.glance]"));
+        assert!(std::fs::read_to_string(home.join(".codex").join("AGENTS.md")).unwrap().contains(GUIDANCE_MARKER));
+        let skill = home.join(".codex").join("skills").join("glance");
+        assert!(skill.join("SKILL.md").exists());
+        assert!(skill.join("open-md-hook.sh").exists());
+        assert!(skill.join("pending-hook.sh").exists());
+        let read_hooks = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(home.join(".codex").join("hooks.json")).unwrap()).unwrap()
+        };
+        let hooks = read_hooks();
+        assert_eq!(hooks["hooks"]["PostToolUse"][0]["matcher"], "apply_patch");
+        assert!(hooks["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap().ends_with("open-md-hook.sh"));
+        assert!(hooks["hooks"]["UserPromptSubmit"][0].get("matcher").is_none());
+        assert!(hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str().unwrap().ends_with("pending-hook.sh"));
+        // re-run is idempotent: still one entry per event
+        for r in setup_adapter(&CodexAdapter, &bins, &home) {
+            assert!(r.ok, "{}", r.message);
+        }
+        let hooks = read_hooks();
+        assert_eq!(hooks["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
+        assert_eq!(hooks["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1);
+
+        for r in remove_adapter(&CodexAdapter, &home) {
+            assert!(r.ok, "uninstall step failed: {}", r.message);
+        }
+        assert_eq!(std::fs::read_to_string(home.join(".codex").join("config.toml")).unwrap(), "model = \"o3\"\n");
+        assert!(!home.join(".codex").join("AGENTS.md").exists());
+        assert!(!skill.exists());
+        let hooks = read_hooks();
+        assert!(hooks["hooks"]["PostToolUse"].as_array().unwrap().is_empty());
+        assert!(hooks["hooks"]["UserPromptSubmit"].as_array().unwrap().is_empty());
+        assert!(!CodexAdapter.is_configured(&home));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_uninstall_keeps_user_hooks_and_agents_content() {
+        let home = tmp_home("codex-keep");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex").join("AGENTS.md"), "# Mine\n").unwrap();
+        std::fs::write(
+            home.join(".codex").join("hooks.json"),
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/me/start.sh"}]}]}}"#,
+        )
+        .unwrap();
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        for r in setup_adapter(&CodexAdapter, &bins, &home) {
+            assert!(r.ok, "{}", r.message);
+        }
+        for r in remove_adapter(&CodexAdapter, &home) {
+            assert!(r.ok, "{}", r.message);
+        }
+        assert_eq!(std::fs::read_to_string(home.join(".codex").join("AGENTS.md")).unwrap(), "# Mine\n");
+        let hooks: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join(".codex").join("hooks.json")).unwrap()).unwrap();
+        assert_eq!(hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"], "/me/start.sh");
+        assert!(hooks["hooks"]["PostToolUse"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
