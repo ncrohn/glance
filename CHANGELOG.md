@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.1
+
+Codex CLI joins Claude Code and Cursor in **Glance ▸ Set up AI Integration…**.
+
+### Codex CLI
+
+- Registers `glance-mcp` in `~/.codex/config.toml`, adds the review guidance to `~/.codex/AGENTS.md`, installs the `glance` skill, and wires both hooks into `~/.codex/hooks.json`.
+- New markdown files Codex creates with `apply_patch` open in Glance automatically, and open comments in the project reach Codex before each of your prompts.
+- Codex asks you to trust the new hooks the next time it starts. Accept the prompt or they will not run.
+
+### Setup, for every client
+
+- Config files that are symlinks (a dotfiles-managed `AGENTS.md` or `CLAUDE.md`) are written through, so the link stays.
+- File modes are kept. A `0600` config stays `0600`.
+- Re-running setup refreshes the `glance-mcp` path and keeps anything else you added to the entry.
+- Remove AI Integration deletes a guidance file it created rather than leaving it empty, and leaves a skill directory you symlinked in place.
+
 ## 0.8.0
 
 The annotation workflow, rebuilt end to end.
