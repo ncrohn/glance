@@ -161,19 +161,23 @@ fn parse_config_object(existing: &str, name: &str) -> Result<serde_json::Value, 
 /// keeps its literal braces. Opens NEW project markdown; always exits 0.
 /// Understands both Claude Code's `Write` (`tool_input.file_path`) and Codex's
 /// `apply_patch` (`*** Add File:` lines in `tool_input.command`), so one script
-/// serves every client.
+/// serves every client. Python launches the app itself (detached, all fds on
+/// /dev/null) so filenames never pass through shell word-splitting.
 pub fn hook_script(app_bin: &str) -> String {
     const TEMPLATE: &str = r#"#!/bin/sh
 # Glance auto-open hook (PostToolUse). Opens new project markdown in Glance.
-# Reads the tool event JSON (Claude Code or Codex) from stdin and prints the
-# files to open (a Write / apply_patch Add File of a .md inside cwd, skipping
-# node_modules and dotdirs); fires nothing otherwise. Always exits 0 so it can never block the agent.
+# Reads the tool event JSON (Claude Code or Codex) from stdin and opens every
+# new .md inside cwd (a Write, or an apply_patch "*** Add File:"), skipping
+# node_modules and dotdirs. Always exits 0 so it can never block the agent.
 #
 # The Python code is captured into a variable first so that python3's stdin
 # remains the outer process's stdin (the JSON event). Using `python3 - <<HEREDOC`
-# would replace python3's stdin with the heredoc, losing the JSON.
+# would replace python3's stdin with the heredoc, losing the JSON. The app path
+# travels via the environment, so it is never quoted inside Python.
+GLANCE_APP="__APP_BIN__"
+export GLANCE_APP
 _GLANCE_PY=$(cat <<'PY'
-import sys, json, os
+import sys, json, os, subprocess
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -185,9 +189,8 @@ if not cwd:
     sys.exit(0)
 cwd = os.path.abspath(cwd)
 # Candidate paths. Claude Code's Write tool carries file_path; Codex's
-# apply_patch carries the patch text in tool_input.command (a string, or a
-# ["apply_patch", "<patch>"] list when routed through its shell tool), and
-# only "*** Add File:" entries are new documents.
+# apply_patch carries the patch text in tool_input.command, where only
+# "*** Add File:" entries are new documents.
 cands = []
 if tool == "Write":
     fp = ti.get("file_path") or ""
@@ -195,15 +198,10 @@ if tool == "Write":
         cands.append(fp)
 elif tool == "apply_patch":
     cmd = ti.get("command")
-    if isinstance(cmd, list):
-        cmd = "\n".join(str(c) for c in cmd)
-    if not isinstance(cmd, str):
-        cmd = ""
-    for line in cmd.splitlines():
-        if line.startswith("*** Add File: "):
-            cands.append(line[len("*** Add File: "):].strip())
-if not cands:
-    sys.exit(0)
+    if isinstance(cmd, str):
+        for line in cmd.splitlines():
+            if line.startswith("*** Add File: "):
+                cands.append(line[len("*** Add File: "):].strip())
 def project_md(fp):
     ap = fp if os.path.isabs(fp) else os.path.join(cwd, fp)
     ap = os.path.abspath(ap)
@@ -219,30 +217,30 @@ def project_md(fp):
     if any(p == "node_modules" or p.startswith(".") for p in parts):
         return None
     return ap
-seen = set()
+targets = []
 for fp in cands:
     ap = project_md(fp)
-    if ap and ap not in seen:
-        seen.add(ap)
-        print(ap)
+    if ap and ap not in targets:
+        targets.append(ap)
+if targets:
+    # One launch, every doc as an argument (Glance opens each as a tab).
+    # Detached with every fd on /dev/null: the agent reads this hook's stdout
+    # to EOF before continuing, so the GUI must not inherit it, and a new
+    # session keeps the GUI off the caller's terminal. Passing argv directly
+    # also means any byte in a filename survives.
+    try:
+        subprocess.Popen(
+            [os.environ["GLANCE_APP"]] + targets,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
 PY
 )
-TARGETS=$(python3 -c "$_GLANCE_PY")
-# Launch detached, one invocation with every target as an argument (Glance
-# opens each as a tab). This MUST be a single backgrounded command inside `if`, not
-# `[ … ] && app &`: backgrounding an AND-list runs it in a subshell that keeps
-# the hook's inherited stdout/stderr open for the app's whole lifetime, so Claude
-# Code (which reads the hook's stdout to EOF) hangs until the user quits Glance.
-# A lone `app … & ` reparents to launchd immediately; </dev/null also severs
-# stdin so the GUI never holds the caller's terminal.
-if [ -n "$TARGETS" ]; then
-  set -f
-  IFS='
-'
-  set -- $TARGETS
-  unset IFS
-  "__APP_BIN__" "$@" >/dev/null 2>&1 </dev/null &
-fi
+python3 -c "$_GLANCE_PY" >/dev/null 2>&1 || true
 exit 0
 "#;
     TEMPLATE.replace("__APP_BIN__", app_bin)
@@ -250,13 +248,13 @@ exit 0
 
 /// The UserPromptSubmit hook script. Runs `glance-mcp --pending` with the hook
 /// event JSON passed through on stdin; whatever it prints becomes context for
-/// Claude's next turn. Guarded and `|| true` so a missing or broken binary can
+/// the agent's next turn. Guarded and `|| true` so a missing or broken binary can
 /// never block the prompt.
 pub fn pending_hook_script(mcp_bin: &str) -> String {
     const TEMPLATE: &str = r#"#!/bin/sh
 # Glance pending-comments hook (UserPromptSubmit). Prints one context line per
-# project doc that has open review comments, so Claude reads them without being
-# told. stdin (the hook event JSON, with cwd) is passed straight through to
+# project doc that has open review comments, so the agent reads them without
+# being told. stdin (the hook event JSON, with cwd) is passed straight through to
 # glance-mcp. Always exits 0 so it can never block the agent.
 if [ -x "__MCP_BIN__" ]; then
   "__MCP_BIN__" --pending 2>/dev/null || true
@@ -439,13 +437,19 @@ fn parse_toml_doc(existing: &str, file: &str) -> Result<toml_edit::DocumentMut, 
 /// preserving every other key, comment and the user's formatting.
 pub fn merge_mcp_toml(existing: &str, name: &str, command: &str, file: &str) -> Result<String, String> {
     let mut doc = parse_toml_doc(existing, file)?;
+    let mut fresh = doc.get("mcp_servers").is_none();
     let servers = doc.entry("mcp_servers").or_insert(toml_edit::table());
     if !servers.is_table_like() {
         *servers = toml_edit::table();
+        fresh = true;
     }
-    if let Some(t) = servers.as_table_mut() {
-        // Render as `[mcp_servers.glance]` only — no bare `[mcp_servers]` header.
-        t.set_implicit(true);
+    if fresh {
+        // A table we created renders as `[mcp_servers.glance]` only, with no
+        // bare `[mcp_servers]` header. An existing header (and any comment on
+        // it) is the user's and stays as written.
+        if let Some(t) = servers.as_table_mut() {
+            t.set_implicit(true);
+        }
     }
     let mut server = toml_edit::Table::new();
     server["command"] = toml_edit::value(command);
@@ -488,17 +492,21 @@ pub fn mcp_toml_has(existing: &str, name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Whether a hooks.json holds nothing but empty event lists (plus an optional
-/// `description`) — i.e. removing our entries left a stub worth deleting.
-fn hooks_file_is_empty(json: &str) -> bool {
+/// Whether a hooks.json is exactly what uninstall leaves behind when Glance
+/// created the file: a lone `hooks` key holding only our two events, both
+/// empty. Anything else (a description, another event, even an empty one) is
+/// the user's and must not be deleted.
+fn hooks_file_is_our_stub(json: &str) -> bool {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return false };
     let Some(obj) = v.as_object() else { return false };
-    obj.iter().all(|(k, v)| match k.as_str() {
-        "description" => true,
-        "hooks" => v
-            .as_object()
-            .is_some_and(|h| h.values().all(|l| l.as_array().is_some_and(|a| a.is_empty()))),
-        _ => false,
+    if obj.len() != 1 {
+        return false;
+    }
+    obj.get("hooks").and_then(|h| h.as_object()).is_some_and(|h| {
+        h.iter().all(|(event, list)| {
+            matches!(event.as_str(), "PostToolUse" | "UserPromptSubmit")
+                && list.as_array().is_some_and(|a| a.is_empty())
+        })
     })
 }
 
@@ -688,6 +696,43 @@ pub trait ClientAdapter {
     }
 }
 
+/// Install plan for both hooks in a client whose hooks file uses the
+/// `hooks.<Event>[].hooks[]` layout (Claude's settings.json, Codex's
+/// hooks.json). Scripts land in `skill_dir`; `matcher` is the PostToolUse tool
+/// filter (`Write` for Claude, `apply_patch` for Codex). `file` names the
+/// hooks file in error messages.
+fn hooks_install_plan(
+    skill_dir: &Path,
+    hooks_path: PathBuf,
+    file: &str,
+    matcher: &str,
+    bins: &Binaries,
+) -> Result<Plan, String> {
+    let open_path = skill_dir.join("open-md-hook.sh");
+    let pending_path = skill_dir.join("pending-hook.sh");
+    let existing = read_existing(&hooks_path)?;
+    let merged = merge_settings_hook_in(&existing, file, "PostToolUse", Some(matcher), open_path.to_string_lossy().as_ref())?;
+    let merged = merge_settings_hook_in(&merged, file, "UserPromptSubmit", None, pending_path.to_string_lossy().as_ref())?;
+    Ok(Plan::Write(vec![
+        FileWrite { path: open_path, contents: hook_script(&bins.app_bin), executable: true },
+        FileWrite { path: pending_path, contents: pending_hook_script(&bins.mcp_bin), executable: true },
+        FileWrite { path: hooks_path, contents: merged, executable: false },
+    ]))
+}
+
+/// Reverse of [`hooks_install_plan`]: the hooks file with both entries
+/// withdrawn, or `None` when neither was present. The scripts themselves are
+/// deleted with the skill dir, not here.
+fn hooks_uninstall_contents(skill_dir: &Path, hooks_path: &Path, file: &str) -> Result<Option<String>, String> {
+    let open_path = skill_dir.join("open-md-hook.sh");
+    let pending_path = skill_dir.join("pending-hook.sh");
+    let existing = read_existing(hooks_path)?;
+    let after_open = remove_settings_hook(&existing, open_path.to_string_lossy().as_ref(), file)?;
+    let base = after_open.as_deref().unwrap_or(&existing);
+    let after_pending = remove_settings_hook_for(base, "UserPromptSubmit", pending_path.to_string_lossy().as_ref(), file)?;
+    Ok(after_pending.or(after_open))
+}
+
 /// Claude Code — the original integration, now expressed as an adapter. Wraps
 /// the pure merge helpers above unchanged.
 pub struct ClaudeAdapter;
@@ -735,16 +780,8 @@ impl ClientAdapter for ClaudeAdapter {
 
     fn open_hook(&self, home: &Path, bins: &Binaries) -> Result<Plan, String> {
         let skill_dir = home.join(".claude").join("skills").join("glance");
-        let open_path = skill_dir.join("open-md-hook.sh");
-        let pending_path = skill_dir.join("pending-hook.sh");
         let settings_path = home.join(".claude").join("settings.json");
-        let merged = merge_settings_hook(&read_existing(&settings_path)?, open_path.to_string_lossy().as_ref())?;
-        let merged = merge_settings_hook_for(&merged, "UserPromptSubmit", None, pending_path.to_string_lossy().as_ref())?;
-        Ok(Plan::Write(vec![
-            FileWrite { path: open_path, contents: hook_script(&bins.app_bin), executable: true },
-            FileWrite { path: pending_path, contents: pending_hook_script(&bins.mcp_bin), executable: true },
-            FileWrite { path: settings_path, contents: merged, executable: false },
-        ]))
+        hooks_install_plan(&skill_dir, settings_path, "~/.claude/settings.json", "Write", bins)
     }
 
     fn mcp_uninstall(&self, home: &Path) -> Result<Plan, String> {
@@ -772,15 +809,8 @@ impl ClientAdapter for ClaudeAdapter {
         // Both hook scripts are deleted with the skill dir above; here we only
         // withdraw their references from settings.json.
         let skill_dir = home.join(".claude").join("skills").join("glance");
-        let open_path = skill_dir.join("open-md-hook.sh");
-        let pending_path = skill_dir.join("pending-hook.sh");
         let settings_path = home.join(".claude").join("settings.json");
-        const FILE: &str = "~/.claude/settings.json";
-        let existing = read_existing(&settings_path)?;
-        let after_open = remove_settings_hook(&existing, open_path.to_string_lossy().as_ref(), FILE)?;
-        let base = after_open.as_deref().unwrap_or(&existing);
-        let after_pending = remove_settings_hook_for(base, "UserPromptSubmit", pending_path.to_string_lossy().as_ref(), FILE)?;
-        match after_pending.or(after_open) {
+        match hooks_uninstall_contents(&skill_dir, &settings_path, "~/.claude/settings.json")? {
             None => Ok(Plan::AlreadyDone("No Glance hook entries to remove.".to_string())),
             Some(next) => Ok(Plan::Write(vec![FileWrite { path: settings_path, contents: next, executable: false }])),
         }
@@ -792,7 +822,7 @@ impl ClientAdapter for ClaudeAdapter {
 /// `~/.codex/skills/glance/`, and both hooks in `~/.codex/hooks.json`, which
 /// uses the same `hooks.<Event>[].hooks[]` layout as Claude's settings.json.
 /// Codex reports file edits as `apply_patch`, so the auto-open matcher targets
-/// that tool; the shared [`hook_script`] parses its `*** Add File:` lines.
+/// that tool and the shared [`hook_script`] parses its `*** Add File:` lines.
 pub struct CodexAdapter;
 
 const CODEX_CONFIG_FILE: &str = "~/.codex/config.toml";
@@ -846,30 +876,8 @@ impl ClientAdapter for CodexAdapter {
     }
 
     fn open_hook(&self, home: &Path, bins: &Binaries) -> Result<Plan, String> {
-        let skill_dir = Self::skill_dir(home);
-        let open_path = skill_dir.join("open-md-hook.sh");
-        let pending_path = skill_dir.join("pending-hook.sh");
         let hooks_path = home.join(".codex").join("hooks.json");
-        let existing = read_existing(&hooks_path)?;
-        let merged = merge_settings_hook_in(
-            &existing,
-            CODEX_HOOKS_FILE,
-            "PostToolUse",
-            Some("apply_patch|Write"),
-            open_path.to_string_lossy().as_ref(),
-        )?;
-        let merged = merge_settings_hook_in(
-            &merged,
-            CODEX_HOOKS_FILE,
-            "UserPromptSubmit",
-            None,
-            pending_path.to_string_lossy().as_ref(),
-        )?;
-        Ok(Plan::Write(vec![
-            FileWrite { path: open_path, contents: hook_script(&bins.app_bin), executable: true },
-            FileWrite { path: pending_path, contents: pending_hook_script(&bins.mcp_bin), executable: true },
-            FileWrite { path: hooks_path, contents: merged, executable: false },
-        ]))
+        hooks_install_plan(&Self::skill_dir(home), hooks_path, CODEX_HOOKS_FILE, "apply_patch", bins)
     }
 
     fn mcp_uninstall(&self, home: &Path) -> Result<Plan, String> {
@@ -897,19 +905,12 @@ impl ClientAdapter for CodexAdapter {
     }
 
     fn open_hook_uninstall(&self, home: &Path) -> Result<Plan, String> {
-        let skill_dir = Self::skill_dir(home);
-        let open_path = skill_dir.join("open-md-hook.sh");
-        let pending_path = skill_dir.join("pending-hook.sh");
         let hooks_path = home.join(".codex").join("hooks.json");
-        let existing = read_existing(&hooks_path)?;
-        let after_open = remove_settings_hook(&existing, open_path.to_string_lossy().as_ref(), CODEX_HOOKS_FILE)?;
-        let base = after_open.as_deref().unwrap_or(&existing);
-        let after_pending =
-            remove_settings_hook_for(base, "UserPromptSubmit", pending_path.to_string_lossy().as_ref(), CODEX_HOOKS_FILE)?;
-        match after_pending.or(after_open) {
+        match hooks_uninstall_contents(&Self::skill_dir(home), &hooks_path, CODEX_HOOKS_FILE)? {
             None => Ok(Plan::AlreadyDone("No Glance hook entries to remove.".to_string())),
-            // hooks.json is ours to create, so drop it rather than leave a stub.
-            Some(next) if hooks_file_is_empty(&next) => Ok(Plan::Delete(vec![hooks_path])),
+            // When setup created hooks.json, uninstall removes it rather than
+            // leaving a stub. A file with anything of the user's in it is kept.
+            Some(next) if hooks_file_is_our_stub(&next) => Ok(Plan::Delete(vec![hooks_path])),
             Some(next) => Ok(Plan::Write(vec![FileWrite { path: hooks_path, contents: next, executable: false }])),
         }
     }
@@ -1794,9 +1795,9 @@ mod tests {
         let patch = |body: &str| format!(r#"{{"tool_name":"apply_patch","cwd":"{cwd}","tool_input":{{"command":"{body}"}}}}"#);
         // FIRES: adds a .md
         assert!(run_hook(&base, &stub, &marker, &patch(r"*** Begin Patch\n*** Add File: notes.md\n+hi\n*** End Patch\n")));
-        // FIRES: shell-routed ["apply_patch", "<patch>"] list form
+        // does NOT fire: a non-string command (nothing to parse)
         let list = format!(r#"{{"tool_name":"apply_patch","cwd":"{cwd}","tool_input":{{"command":["apply_patch","*** Begin Patch\n*** Add File: docs/plan.md\n+x\n*** End Patch\n"]}}}}"#);
-        assert!(run_hook(&base, &stub, &marker, &list));
+        assert!(!run_hook(&base, &stub, &marker, &list));
         // does NOT fire: updates an existing .md
         assert!(!run_hook(&base, &stub, &marker, &patch(r"*** Begin Patch\n*** Update File: notes.md\n@@\n-a\n+b\n*** End Patch\n")));
         // does NOT fire: adds a non-markdown file
@@ -1826,12 +1827,19 @@ mod tests {
         }
         let cwd = proj.to_string_lossy().to_string();
         let json = format!(
-            r#"{{"tool_name":"apply_patch","cwd":"{cwd}","tool_input":{{"command":"*** Begin Patch\n*** Add File: a.md\n+a\n*** Add File: src/main.rs\n+x\n*** Add File: b.md\n+b\n*** End Patch\n"}}}}"#
+            r#"{{"tool_name":"apply_patch","cwd":"{cwd}","tool_input":{{"command":"*** Begin Patch\n*** Add File: a.md\n+a\n*** Add File: src/main.rs\n+x\n*** Add File: my notes.md\n+b\n*** End Patch\n"}}}}"#
         );
         assert!(run_hook(&base, &stub, &marker, &json));
         let got = std::fs::read_to_string(&marker).unwrap();
         let lines: Vec<&str> = got.lines().collect();
-        assert_eq!(lines, vec![proj.join("a.md").to_string_lossy().to_string(), proj.join("b.md").to_string_lossy().to_string()]);
+        assert_eq!(lines, vec![proj.join("a.md").to_string_lossy().to_string(), proj.join("my notes.md").to_string_lossy().to_string()]);
+
+        // A Write whose path contains a newline reaches argv as one argument.
+        let odd = proj.join("line1\nline2.md").to_string_lossy().to_string();
+        let json = format!(r#"{{"tool_name":"Write","cwd":"{cwd}","tool_input":{{"file_path":"{}"}}}}"#, odd.replace('\n', "\\n"));
+        assert!(run_hook(&base, &stub, &marker, &json));
+        let got = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(got, format!("{odd}\n"));
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1853,6 +1861,15 @@ mod tests {
         assert!(doc["mcp_servers"]["glance"]["args"].as_array().unwrap().is_empty());
         // idempotent
         assert_eq!(merge_mcp_toml(&out, "glance", "/p/glance-mcp", "f").unwrap(), out);
+    }
+
+    #[test]
+    fn merge_mcp_toml_keeps_an_existing_header_and_its_comment() {
+        let existing = "# MCP servers I trust\n[mcp_servers]\n\n[mcp_servers.other]\ncommand = \"x\"\n";
+        let out = merge_mcp_toml(existing, "glance", "/p", "f").unwrap();
+        assert!(out.starts_with("# MCP servers I trust\n[mcp_servers]\n"), "{out}");
+        assert!(mcp_toml_has(&out, "other"));
+        assert!(mcp_toml_has(&out, "glance"));
     }
 
     #[test]
@@ -1887,12 +1904,34 @@ mod tests {
     }
 
     #[test]
-    fn hooks_file_is_empty_detects_stub() {
-        assert!(hooks_file_is_empty(r#"{"hooks":{"PostToolUse":[],"UserPromptSubmit":[]}}"#));
-        assert!(hooks_file_is_empty(r#"{"description":"x","hooks":{}}"#));
-        assert!(!hooks_file_is_empty(r#"{"hooks":{"PostToolUse":[{"hooks":[]}]}}"#));
-        assert!(!hooks_file_is_empty(r#"{"other":1,"hooks":{}}"#));
-        assert!(!hooks_file_is_empty("garbage"));
+    fn hooks_file_is_our_stub_matches_only_glance_leftovers() {
+        assert!(hooks_file_is_our_stub(r#"{"hooks":{"PostToolUse":[],"UserPromptSubmit":[]}}"#));
+        assert!(hooks_file_is_our_stub(r#"{"hooks":{"PostToolUse":[]}}"#));
+        // the user's, even when empty: a description, or another event
+        assert!(!hooks_file_is_our_stub(r#"{"description":"x","hooks":{"PostToolUse":[],"UserPromptSubmit":[]}}"#));
+        assert!(!hooks_file_is_our_stub(r#"{"hooks":{"SessionStart":[],"PostToolUse":[]}}"#));
+        assert!(!hooks_file_is_our_stub(r#"{"hooks":{"PostToolUse":[{"hooks":[]}]}}"#));
+        assert!(!hooks_file_is_our_stub(r#"{"other":1,"hooks":{}}"#));
+        assert!(!hooks_file_is_our_stub("garbage"));
+    }
+
+    #[test]
+    fn codex_uninstall_keeps_a_user_hooks_file_with_empty_events() {
+        let home = tmp_home("codex-user-stub");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex").join("hooks.json"), r#"{"description":"mine","hooks":{"SessionStart":[]}}"#).unwrap();
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        for r in setup_adapter(&CodexAdapter, &bins, &home) {
+            assert!(r.ok, "{}", r.message);
+        }
+        for r in remove_adapter(&CodexAdapter, &home) {
+            assert!(r.ok, "{}", r.message);
+        }
+        let hooks: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join(".codex").join("hooks.json")).unwrap()).unwrap();
+        assert_eq!(hooks["description"], "mine");
+        assert!(hooks["hooks"]["SessionStart"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -1918,7 +1957,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(home.join(".codex").join("hooks.json")).unwrap()).unwrap()
         };
         let hooks = read_hooks();
-        assert_eq!(hooks["hooks"]["PostToolUse"][0]["matcher"], "apply_patch|Write");
+        assert_eq!(hooks["hooks"]["PostToolUse"][0]["matcher"], "apply_patch");
         assert!(hooks["hooks"]["PostToolUse"][0]["hooks"][0]["command"].as_str().unwrap().ends_with("open-md-hook.sh"));
         assert!(hooks["hooks"]["UserPromptSubmit"][0].get("matcher").is_none());
         assert!(hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"].as_str().unwrap().ends_with("pending-hook.sh"));
