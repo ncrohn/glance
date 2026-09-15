@@ -1308,7 +1308,7 @@ dependencies = [
 
 [[package]]
 name = "glance"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "fs2",
  "notify",
