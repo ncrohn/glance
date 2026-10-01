@@ -38,6 +38,19 @@ md.renderer.rules.table_open = (tokens, idx, options, _env, self) =>
 md.renderer.rules.table_close = (tokens, idx, options, _env, self) =>
   `${self.renderToken(tokens, idx, options)}</div>`;
 
+// Local image paths are rewritten through env.resolveImage (the app maps them
+// onto the asset protocol); remote and data: URLs pass through untouched.
+const defaultImage = md.renderer.rules.image!;
+md.renderer.rules.image = (tokens, idx, options, env, self) => {
+  const resolve = env?.resolveImage as ((src: string) => string | null) | undefined;
+  const src = tokens[idx].attrGet("src");
+  if (resolve && src) {
+    const next = resolve(src);
+    if (next) tokens[idx].attrSet("src", next);
+  }
+  return defaultImage(tokens, idx, options, env, self);
+};
+
 const defaultFence = md.renderer.rules.fence!;
 md.renderer.rules.fence = (tokens, idx, options, env, self) => {
   const rendered = defaultFence(tokens, idx, options, env, self);
@@ -229,6 +242,7 @@ export function renderMarkdown(
   src: string,
   changedLines?: Set<number>,
   deletedBefore?: Set<number>,
+  resolveImage?: (src: string) => string | null,
 ): string {
   const { entries, body, lineOffset } = parseFrontmatter(src);
   const card = entries.length ? frontmatterCard(entries) : "";
@@ -237,7 +251,7 @@ export function renderMarkdown(
     : 0;
   return (
     card +
-    md.render(body, { changedLines, deletedBefore, lineOffset, sourceLineCount })
+    md.render(body, { changedLines, deletedBefore, lineOffset, sourceLineCount, resolveImage })
   );
 }
 

@@ -1,6 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl, openPath as openWithDefaultApp, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { Annotation, AnnotationPatch, AnnotationStore, Resolution } from "./annotations";
 
@@ -11,6 +11,16 @@ export function appVersion(): Promise<string> {
 // Open a URL in the user's default browser (never in the app webview).
 export function openExternal(url: string): Promise<void> {
   return openUrl(url);
+}
+
+// Open a local file in its default macOS app (Preview for a PDF, etc.).
+export function openFileExternal(path: string): Promise<void> {
+  return openWithDefaultApp(path);
+}
+
+// A URL the webview can load a local file from, via Tauri's asset protocol.
+export function localFileUrl(path: string): string {
+  return convertFileSrc(path);
 }
 
 // Grey out / re-enable File → Show in Finder. Only the frontend knows whether

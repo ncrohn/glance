@@ -17,8 +17,9 @@ import {
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
   onShowAbout, onShowWhatsNew, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
   onShowInFinder, revealInFinder, setShowInFinderEnabled,
-  readReviewed, writeReviewed,
+  readReviewed, writeReviewed, openExternal, openFileExternal, localFileUrl,
 } from "./ipc";
+import { classifyLink, dirname, resolveLocalPath, slugify } from "./links";
 import {
   addAnnotation, removeAnnotation, patchAnnotation, appendReply, genId, type Annotation, type AnnotationPatch,
 } from "./annotations";
@@ -538,6 +539,10 @@ function renderContent(): void {
       doc.editorContent,
       changedLines(doc),
       deletedBefore(doc),
+      (src) => {
+        const path = resolveLocalPath(dirname(doc.absPath), src);
+        return path ? localFileUrl(path) : null;
+      },
     );
     if (shouldShowCommentHint(localStorage.getItem(LS_HINT), doc.annotations.length)) {
       const strip = el("div", "comment-hint");
@@ -700,6 +705,38 @@ export async function openPath(absPath: string): Promise<void> {
   await loadAnnotations(absPath);
 }
 
+// Every link click is routed here: the webview must never navigate away from
+// the app. Web links go to the default browser, .md links open as Glance tabs,
+// other local files open in their default app, and #fragments scroll in place.
+function handleLinkClick(ev: MouseEvent): void {
+  if (ev.defaultPrevented || ev.button !== 0) return;
+  const a = (ev.target as Element | null)?.closest?.("a[href]");
+  if (!a) return;
+  ev.preventDefault();
+  const doc = getActive(state);
+  const target = classifyLink(a.getAttribute("href") ?? "", doc ? dirname(doc.absPath) : null);
+  switch (target.kind) {
+    case "external":
+      void openExternal(target.url).catch(() => showNotice(`Couldn't open ${target.url}.`, false));
+      break;
+    case "markdown":
+      void openPath(target.path).catch(() => showNotice(`Couldn't open ${target.path}.`, false));
+      break;
+    case "file":
+      void openFileExternal(target.path).catch(() => showNotice(`Couldn't open ${target.path}.`, false));
+      break;
+    case "anchor": {
+      const view = document.querySelector("#content .rendered");
+      const byId = view?.querySelector(`[id="${CSS.escape(target.id)}"]`);
+      const slug = slugify(target.id);
+      const heading = byId ?? Array.from(view?.querySelectorAll("h1, h2, h3, h4, h5, h6") ?? [])
+        .find((h) => slugify(h.textContent ?? "") === slug);
+      heading?.scrollIntoView({ behavior: "smooth", block: "start" });
+      break;
+    }
+  }
+}
+
 function changeTheme(pref: ThemePref): void {
   saveThemePref(pref);
   applyTheme(pref, render);
@@ -730,6 +767,7 @@ export async function start(): Promise<void> {
   const railEl = document.getElementById("rail");
   if (grip && railEl) mountRailResizer(grip, railEl, (w) => localStorage.setItem(LS_RAIL_W, String(w)));
 
+  document.addEventListener("click", handleLinkClick);
   await onOpenFile((absPath) => { void openPath(absPath); });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
   await onShowIntegrationPicker((action) => { void openIntegrationPicker(action); });
