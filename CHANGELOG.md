@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.2
+
+Images show up, and links leave Glance.
+
+- Images with relative paths, like `![](img/diagram.png)`, now load from the document's folder.
+- Web links open in your default browser instead of inside the Glance window.
+- Links to other markdown files open as Glance tabs. Links to other files, like a PDF, open in their default app.
+- `#heading` links scroll to that heading.
+
 ## 0.8.1
 
 Codex CLI joins Claude Code and Cursor in **Glance ▸ Set up AI Integration…**.
