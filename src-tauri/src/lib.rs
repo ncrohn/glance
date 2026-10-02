@@ -6,6 +6,7 @@ mod cli_install;
 mod commands;
 mod setup;
 mod watcher;
+mod wikilink;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,6 +87,7 @@ pub fn run() {
             setup::run_integration,
             set_show_in_finder_enabled,
             take_launch_args,
+            wikilink::resolve_wikilink,
         ])
         .on_menu_event(|app, event| {
             match event.id().as_ref() {

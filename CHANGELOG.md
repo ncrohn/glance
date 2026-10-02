@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.3
+
+Obsidian-style links, and Glance keeps your place.
+
+- `[[note]]`, `[[note|label]]` and `[[note#Heading]]` links work. Glance looks for the note next to the document, then at the root of your Obsidian vault, then anywhere in the vault by name.
+- Switching between Read and Edit keeps the same part of the document on screen instead of jumping to the top.
+- HTML comments like `<!-- note -->` are hidden in Read mode, as on GitHub and in Obsidian. Comments inside code still show.
+
 ## 0.8.2
 
 Images show up, and links leave Glance.

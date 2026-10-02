@@ -2,6 +2,7 @@ import MarkdownIt from "markdown-it";
 import taskLists from "markdown-it-task-lists";
 import hljs from "highlight.js";
 import { parseFrontmatter, type FrontmatterEntry } from "./frontmatter";
+import { parseWikilink } from "./links";
 
 const md = new MarkdownIt({
   html: false,
@@ -29,6 +30,56 @@ const md = new MarkdownIt({
 });
 
 md.use(taskLists);
+
+// HTML comments are hidden, as on GitHub and in Obsidian. Raw HTML stays off,
+// so only comments get this treatment; code spans and fences run first and keep
+// any comment inside them visible.
+md.block.ruler.before(
+  "html_block",
+  "html_comment",
+  (state, startLine, endLine, silent) => {
+    if (state.sCount[startLine] - state.blkIndent >= 4) return false;
+    const start = state.bMarks[startLine] + state.tShift[startLine];
+    if (!state.src.startsWith("<!--", start)) return false;
+    for (let line = startLine; line < endLine; line++) {
+      const from = line === startLine ? start + 4 : state.bMarks[line];
+      const text = state.src.slice(from, state.eMarks[line]);
+      const close = text.indexOf("-->");
+      if (close === -1) continue;
+      if (text.slice(close + 3).trim() !== "") return false;
+      if (!silent) state.line = line + 1;
+      return true;
+    }
+    return false;
+  },
+  { alt: ["paragraph", "reference", "blockquote"] },
+);
+
+md.inline.ruler.before("html_inline", "html_comment", (state) => {
+  if (!state.src.startsWith("<!--", state.pos)) return false;
+  const end = state.src.indexOf("-->", state.pos + 4);
+  if (end === -1 || end + 3 > state.posMax) return false;
+  state.pos = end + 3;
+  return true;
+});
+
+// Obsidian-style [[note]], [[note|label]] and [[note#Heading]]. The link is
+// resolved on click (see app.ts), since finding the file needs the filesystem.
+md.inline.ruler.before("link", "wikilink", (state, silent) => {
+  if (!state.src.startsWith("[[", state.pos)) return false;
+  const end = state.src.indexOf("]]", state.pos + 2);
+  if (end === -1 || end > state.posMax) return false;
+  const link = parseWikilink(state.src.slice(state.pos + 2, end));
+  if (!link) return false;
+  if (!silent) {
+    const open = state.push("link_open", "a", 1);
+    open.attrs = [["class", "wikilink"], ["data-wikilink", link.raw]];
+    state.push("text", "", 0).content = link.label;
+    state.push("link_close", "a", -1);
+  }
+  state.pos = end + 2;
+  return true;
+});
 
 // Wrap every table in a horizontally-scrollable container so wide tables scroll
 // instead of crushing their columns into the fixed reading width. renderToken

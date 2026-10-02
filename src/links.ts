@@ -76,3 +76,24 @@ export function slugify(text: string): string {
     .replace(/[^\p{L}\p{N}\s_-]/gu, "")
     .replace(/\s/g, "-");
 }
+
+export interface Wikilink {
+  raw: string;
+  note: string;
+  heading: string;
+  label: string;
+}
+
+/** Parse the inside of `[[…]]`: `note`, `note|label`, `note#Heading`, `#Heading`. */
+export function parseWikilink(inner: string): Wikilink | null {
+  if (!inner.trim() || inner.includes("\n") || inner.includes("[")) return null;
+  const bar = inner.indexOf("|");
+  const raw = (bar === -1 ? inner : inner.slice(0, bar)).trim();
+  const alias = bar === -1 ? "" : inner.slice(bar + 1).trim();
+  const hash = raw.indexOf("#");
+  const note = (hash === -1 ? raw : raw.slice(0, hash)).trim();
+  const heading = hash === -1 ? "" : raw.slice(hash + 1).trim();
+  if (!note && !heading) return null;
+  const label = alias || (note ? (heading ? `${note} › ${heading}` : note) : heading);
+  return { raw, note, heading, label };
+}
