@@ -553,6 +553,7 @@ body {
   transition: background-size 0.15s ease, color 0.15s ease;
 }
 .rendered a:hover { color: var(--accent-bright); background-size: 100% 2px; }
+.rendered a.wikilink { cursor: pointer; }
 
 .rendered strong { font-weight: 600; color: var(--ink); }
 .rendered em { font-style: italic; }

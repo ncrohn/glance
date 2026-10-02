@@ -45,7 +45,7 @@ export function mountEditor(
   initial: string,
   onChange: (v: string) => void,
   dark = false,
-): { destroy(): void; selectAll(): void } {
+): EditorHandle {
   const view = new EditorView({
     parent: host,
     state: EditorState.create({
@@ -70,5 +70,23 @@ export function mountEditor(
     // the visible lines are in the DOM, so this beats the webview's native
     // selectAll: (which would grab only the rendered lines).
     selectAll: () => { view.focus(); selectAll(view); },
+    topLine: () => {
+      const height = view.scrollDOM.getBoundingClientRect().top - view.documentTop;
+      const block = view.lineBlockAtHeight(Math.max(height, 0));
+      return view.state.doc.lineAt(block.from).number;
+    },
+    scrollToLine: (line: number) => {
+      const doc = view.state.doc;
+      const target = doc.line(Math.min(Math.max(Math.round(line), 1), doc.lines));
+      view.dispatch({ effects: EditorView.scrollIntoView(target.from, { y: "start" }) });
+    },
   };
+}
+
+export interface EditorHandle {
+  destroy(): void;
+  selectAll(): void;
+  /** 1-based source line at the top of the visible area. */
+  topLine(): number;
+  scrollToLine(line: number): void;
 }

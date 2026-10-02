@@ -23,6 +23,11 @@ export function localFileUrl(path: string): string {
   return convertFileSrc(path);
 }
 
+// Find the file an Obsidian-style [[note]] points at, or null if none exists.
+export function resolveWikilink(docPath: string, target: string): Promise<string | null> {
+  return invoke<string | null>("resolve_wikilink", { docPath, target });
+}
+
 // Grey out / re-enable File → Show in Finder. Only the frontend knows whether
 // the active tab has a file to reveal, so it pushes the state to the native menu.
 export function setShowInFinderEnabled(enabled: boolean): Promise<void> {

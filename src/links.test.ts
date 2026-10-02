@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyLink, dirname, resolveLocalPath, slugify } from "./links";
+import { classifyLink, dirname, parseWikilink, resolveLocalPath, slugify } from "./links";
 import { renderMarkdown } from "./renderer";
 
 const base = "/Users/nick/notes";
@@ -68,5 +68,49 @@ describe("renderMarkdown image rewriting", () => {
     );
     expect(html).toContain('src="asset://img/a.png"');
     expect(html).toContain('src="https://x.com/b.png"');
+  });
+});
+
+describe("parseWikilink", () => {
+  it("reads note, heading and label", () => {
+    expect(parseWikilink("decisions")).toEqual({ raw: "decisions", note: "decisions", heading: "", label: "decisions" });
+    expect(parseWikilink("../onboarding-drip/index|onboarding-drip")).toMatchObject({
+      note: "../onboarding-drip/index", label: "onboarding-drip",
+    });
+    expect(parseWikilink("plan#Step 2")).toMatchObject({ note: "plan", heading: "Step 2", label: "plan › Step 2" });
+    expect(parseWikilink("#Step 2")).toMatchObject({ note: "", heading: "Step 2", label: "Step 2" });
+  });
+
+  it("rejects empty or nested brackets", () => {
+    expect(parseWikilink("")).toBeNull();
+    expect(parseWikilink("a[b")).toBeNull();
+  });
+});
+
+describe("renderMarkdown wikilinks and comments", () => {
+  it("renders [[links]] with their target", () => {
+    const html = renderMarkdown("See [[decisions]] and [[../x/index|X]].");
+    expect(html).toContain('<a class="wikilink" data-wikilink="decisions">decisions</a>');
+    expect(html).toContain('<a class="wikilink" data-wikilink="../x/index">X</a>');
+  });
+
+  it("leaves [[ ]] inside code alone", () => {
+    expect(renderMarkdown("`[[decisions]]`")).toContain("<code>[[decisions]]</code>");
+  });
+
+  it("hides block and inline HTML comments", () => {
+    const html = renderMarkdown("# Title\n\n<!-- shape: slug=x\nstage=scaffold -->\n\nBody <!-- note --> text\n");
+    expect(html).not.toContain("shape:");
+    expect(html).not.toContain("note");
+    expect(html).toContain("Body  text");
+  });
+
+  it("keeps comments inside code visible", () => {
+    expect(renderMarkdown("`<!-- x -->`")).toContain("&lt;!-- x --&gt;");
+    expect(renderMarkdown("```html\n<!-- x -->\n```")).toContain("&lt;!-- x --&gt;");
+  });
+
+  it("keeps source line stamps after a hidden comment", () => {
+    expect(renderMarkdown("<!-- c -->\n\nPara\n")).toContain('data-sourceline="3"');
   });
 });

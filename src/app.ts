@@ -17,9 +17,9 @@ import {
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
   onShowAbout, onShowWhatsNew, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
   onShowInFinder, revealInFinder, setShowInFinderEnabled,
-  readReviewed, writeReviewed, openExternal, openFileExternal, localFileUrl,
+  readReviewed, writeReviewed, openExternal, openFileExternal, localFileUrl, resolveWikilink,
 } from "./ipc";
-import { classifyLink, dirname, resolveLocalPath, slugify } from "./links";
+import { classifyLink, dirname, parseWikilink, resolveLocalPath, slugify } from "./links";
 import {
   addAnnotation, removeAnnotation, patchAnnotation, appendReply, genId, type Annotation, type AnnotationPatch,
 } from "./annotations";
@@ -34,9 +34,9 @@ import {
   renderRail, applyHighlights, mountSelectionToolbar, assignMarkers, markerColor, linkAnnotationHovers, pulseBlock,
   focusRailCard, parseRailPref,
 } from "./annotation-ui";
-import { mountEditor } from "./editor";
+import { mountEditor, type EditorHandle } from "./editor";
 import { decideReload } from "./reload";
-import { restoreTarget } from "./scroll-restore";
+import { restoreTarget, lineAtOffset, offsetForLine, type LineBlock } from "./scroll-restore";
 import { confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker, showWhatsNew } from "./modal";
 import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
@@ -65,7 +65,10 @@ function saveSession(): void {
 }
 
 let state: State = emptyState();
-let activeEditor: { destroy(): void; selectAll(): void } | null = null;
+let activeEditor: EditorHandle | null = null;
+// Source line at the top of the view when Read/Edit was toggled, so the other
+// mode opens at the same place instead of the top.
+let pendingTopLine: number | null = null;
 let toolbar: { hide(): void; destroy(): void } | null = null;
 let teardownHovers: (() => void) | null = null;
 
@@ -456,8 +459,8 @@ function renderActions(): void {
   const seg = el("div", "segmented");
   const read = el("button", doc.viewMode === "rendered" ? "on" : undefined, "Read");
   const edit = el("button", doc.viewMode === "source" ? "on" : undefined, "Edit");
-  read.onclick = () => { if (doc.viewMode !== "rendered") { state = toggleViewMode(state, doc.id); render(); } };
-  edit.onclick = () => { if (doc.viewMode !== "source") { state = toggleViewMode(state, doc.id); render(); } };
+  read.onclick = () => { if (doc.viewMode !== "rendered") switchViewMode(doc.id); };
+  edit.onclick = () => { if (doc.viewMode !== "source") switchViewMode(doc.id); };
   seg.appendChild(read);
   seg.appendChild(edit);
   host.appendChild(seg);
@@ -611,7 +614,12 @@ export function render(): void {
   const next = { id: active?.id ?? null, mode: active?.viewMode ?? null };
   const target = restoreTarget({ id: lastRenderedId, mode: lastRenderedMode }, next, scrollPositions);
   // Mermaid blocks render async after renderContent(), so defer a frame.
-  if (content) requestAnimationFrame(() => { content.scrollTop = target; });
+  const topLine = pendingTopLine;
+  pendingTopLine = null;
+  if (content) requestAnimationFrame(() => {
+    content.scrollTop = target;
+    if (topLine !== null) scrollToSourceLine(content, topLine);
+  });
   lastRenderedId = next.id;
   lastRenderedMode = next.mode;
   syncShowInFinderMenu();
@@ -710,10 +718,14 @@ export async function openPath(absPath: string): Promise<void> {
 // other local files open in their default app, and #fragments scroll in place.
 function handleLinkClick(ev: MouseEvent): void {
   if (ev.defaultPrevented || ev.button !== 0) return;
-  const a = (ev.target as Element | null)?.closest?.("a[href]");
+  const a = (ev.target as Element | null)?.closest?.<HTMLElement>("a[href], a[data-wikilink]");
   if (!a) return;
   ev.preventDefault();
   const doc = getActive(state);
+  if (a.dataset.wikilink !== undefined) {
+    if (doc) void followWikilink(doc.absPath, a.dataset.wikilink);
+    return;
+  }
   const target = classifyLink(a.getAttribute("href") ?? "", doc ? dirname(doc.absPath) : null);
   switch (target.kind) {
     case "external":
@@ -725,16 +737,59 @@ function handleLinkClick(ev: MouseEvent): void {
     case "file":
       void openFileExternal(target.path).catch(() => showNotice(`Couldn't open ${target.path}.`, false));
       break;
-    case "anchor": {
-      const view = document.querySelector("#content .rendered");
-      const byId = view?.querySelector(`[id="${CSS.escape(target.id)}"]`);
-      const slug = slugify(target.id);
-      const heading = byId ?? Array.from(view?.querySelectorAll("h1, h2, h3, h4, h5, h6") ?? [])
-        .find((h) => slugify(h.textContent ?? "") === slug);
-      heading?.scrollIntoView({ behavior: "smooth", block: "start" });
+    case "anchor":
+      scrollToHeading(target.id);
       break;
-    }
   }
+}
+
+function scrollToHeading(id: string): void {
+  const view = document.querySelector("#content .rendered");
+  const byId = view?.querySelector(`[id="${CSS.escape(id)}"]`);
+  const slug = slugify(id);
+  const heading = byId ?? Array.from(view?.querySelectorAll("h1, h2, h3, h4, h5, h6") ?? [])
+    .find((h) => slugify(h.textContent ?? "") === slug);
+  heading?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function followWikilink(docPath: string, raw: string): Promise<void> {
+  const link = parseWikilink(raw);
+  if (!link) return;
+  if (!link.note) { scrollToHeading(link.heading); return; }
+  const path = await resolveWikilink(docPath, link.note).catch(() => null);
+  if (!path) { showNotice(`No note named "${link.note}" was found.`, false); return; }
+  if (!/\.(md|markdown)$/i.test(path)) {
+    void openFileExternal(path).catch(() => showNotice(`Couldn't open ${path}.`, false));
+    return;
+  }
+  await openPath(path).catch(() => showNotice(`Couldn't open ${path}.`, false));
+  // render() restores scroll in a frame; land on the heading after that.
+  if (link.heading) requestAnimationFrame(() => requestAnimationFrame(() => scrollToHeading(link.heading)));
+}
+
+function renderedBlocks(content: HTMLElement): LineBlock[] {
+  const view = content.querySelector(".rendered");
+  if (!view) return [];
+  const origin = content.getBoundingClientRect().top - content.scrollTop;
+  return Array.from(view.querySelectorAll<HTMLElement>("[data-sourceline]")).map((el) => {
+    const r = el.getBoundingClientRect();
+    const start = Number(el.dataset.sourceline);
+    return { start, end: Number(el.dataset.sourcelineEnd ?? start), top: r.top - origin, height: r.height };
+  });
+}
+
+function switchViewMode(id: string): void {
+  const content = document.getElementById("content");
+  pendingTopLine = activeEditor
+    ? activeEditor.topLine()
+    : content ? lineAtOffset(renderedBlocks(content), content.scrollTop) : null;
+  state = toggleViewMode(state, id);
+  render();
+}
+
+function scrollToSourceLine(content: HTMLElement, line: number): void {
+  if (activeEditor) activeEditor.scrollToLine(line);
+  else content.scrollTop = offsetForLine(renderedBlocks(content), line);
 }
 
 function changeTheme(pref: ThemePref): void {
@@ -817,7 +872,7 @@ export async function start(): Promise<void> {
     if (e.metaKey && (e.key === "e" || e.key === "E")) {
       e.preventDefault();
       const doc = getActive(state);
-      if (doc) { state = toggleViewMode(state, doc.id); render(); }
+      if (doc) switchViewMode(doc.id);
       return;
     }
     if (e.metaKey && e.shiftKey && (e.key === "m" || e.key === "M")) {
