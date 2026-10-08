@@ -1,6 +1,6 @@
 [package]
 name = "glance"
-version = "0.8.3"
+version = "0.8.4"
 description = "Glance markdown companion"
 edition = "2021"
 # Two bins (glance GUI + glance-mcp). `cargo run` / `tauri dev` need to know
@@ -43,4 +43,7 @@ toml_edit = "0.25"
 notify = "6"
 sha1 = "0.10"
 fs2 = "0.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 

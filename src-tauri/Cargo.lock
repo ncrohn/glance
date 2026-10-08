@@ -1308,9 +1308,10 @@ dependencies = [
 
 [[package]]
 name = "glance"
-version = "0.8.3"
+version = "0.8.4"
 dependencies = [
  "fs2",
+ "libc",
  "notify",
  "serde",
  "serde_json",
