@@ -53,9 +53,28 @@ fn take_launch_args(
     std::mem::take(&mut *paths)
 }
 
+/// The single-instance plugin checks for a running Glance and claims the socket
+/// as two separate steps, so a burst of cold launches (an agent calling `mdview`
+/// in a loop) all see "none running" and each become a full app. Holding an
+/// exclusive lock across the plugin's setup makes that check-and-claim one step:
+/// later launches wait, then find the socket and forward their files.
+fn acquire_launch_lock(identifier: &str) -> Option<std::fs::File> {
+    use fs2::FileExt;
+    let name = identifier.replace(['.', '-'], "_");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(format!("/tmp/{name}_launch.lock"))
+        .ok()?;
+    file.lock_exclusive().ok()?;
+    Some(file)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let launch_lock = acquire_launch_lock(&context.config().identifier);
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
             let cwd_path = Path::new(&cwd);
             emit_open_files(app, &argv, cwd_path);
@@ -300,29 +319,32 @@ pub fn run() {
             }
             Ok(())
         })
-        .build(tauri::generate_context!())
-        .expect("error while running Glance")
-        .run(|app, event| {
-            // macOS delivers files opened from Finder ("Open With", double-click)
-            // as an Apple Event, not argv. If the frontend is already listening,
-            // emit straight to it; otherwise (cold launch) buffer into LaunchArgs
-            // so the frontend picks them up when it drains launch args on start.
-            #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Opened { urls } = event {
-                let paths: Vec<String> = urls
-                    .iter()
-                    .filter_map(|u| u.to_file_path().ok())
-                    .map(|p| p.to_string_lossy().to_string())
-                    .collect();
-                if app.state::<FrontendReady>().0.load(Ordering::SeqCst) {
-                    for p in paths {
-                        let _ = app.emit("open-file", p);
-                    }
-                } else {
-                    let buf = app.state::<LaunchArgs>();
-                    let mut stored = buf.0.lock().unwrap_or_else(|e| e.into_inner());
-                    stored.extend(paths);
+        .build(context)
+        .expect("error while running Glance");
+    // Plugins initialize inside build(): by now this process has either
+    // forwarded its files and exited, or bound the single-instance socket.
+    drop(launch_lock);
+    app.run(|app, event| {
+        // macOS delivers files opened from Finder ("Open With", double-click)
+        // as an Apple Event, not argv. If the frontend is already listening,
+        // emit straight to it; otherwise (cold launch) buffer into LaunchArgs
+        // so the frontend picks them up when it drains launch args on start.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Opened { urls } = event {
+            let paths: Vec<String> = urls
+                .iter()
+                .filter_map(|u| u.to_file_path().ok())
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            if app.state::<FrontendReady>().0.load(Ordering::SeqCst) {
+                for p in paths {
+                    let _ = app.emit("open-file", p);
                 }
+            } else {
+                let buf = app.state::<LaunchArgs>();
+                let mut stored = buf.0.lock().unwrap_or_else(|e| e.into_inner());
+                stored.extend(paths);
             }
-        });
+        }
+    });
 }
