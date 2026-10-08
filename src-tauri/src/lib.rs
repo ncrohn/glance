@@ -68,16 +68,59 @@ fn take_launch_args(
 /// in a loop) all see "none running" and each become a full app. Holding an
 /// exclusive lock across the plugin's setup makes that check-and-claim one step:
 /// later launches wait, then find the socket and forward their files.
+///
+/// Any failure launches without the lock (the old behavior) rather than not
+/// launching. The wait is bounded so a stuck holder can't block every launch.
+#[cfg(target_os = "macos")]
 fn acquire_launch_lock(identifier: &str) -> Option<std::fs::File> {
     use fs2::FileExt;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::time::{Duration, Instant};
+
+    const WAIT: Duration = Duration::from_secs(10);
     let name = identifier.replace(['.', '-'], "_");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(format!("/tmp/{name}_launch.lock"))
-        .ok()?;
-    file.lock_exclusive().ok()?;
-    Some(file)
+    let path = format!("/tmp/{name}_launch.lock");
+    // flock works on a read-only fd, so another user can share a lock file
+    // the first user created. O_NOFOLLOW refuses a planted symlink.
+    let open = |create: bool| {
+        let mut opts = std::fs::OpenOptions::new();
+        if create {
+            opts.write(true).create(true).mode(0o644);
+        } else {
+            opts.read(true);
+        }
+        opts.custom_flags(libc::O_NOFOLLOW).open(&path)
+    };
+    let file = match open(false) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => open(true),
+        other => other,
+    };
+    let file = match file {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("glance: can't open {path}, launching without it: {e}");
+            return None;
+        }
+    };
+    let contended = fs2::lock_contended_error().raw_os_error();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Some(file),
+            Err(e) if e.raw_os_error() == contended && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => {
+                eprintln!("glance: no launch lock on {path}, launching without it: {e}");
+                return None;
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn acquire_launch_lock(_identifier: &str) -> Option<std::fs::File> {
+    None
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
