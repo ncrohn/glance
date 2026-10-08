@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.4
+
+Opening many files at once no longer starts several copies of Glance.
+
+- When an agent opens a burst of files while Glance is closed, they all open as tabs in one window instead of each starting its own Glance.
+- If another Glance launch is stuck, a new one waits up to 10 seconds and then opens anyway.
+
 ## 0.8.3
 
 Obsidian-style links, and Glance keeps your place.
