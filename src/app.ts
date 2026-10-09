@@ -1116,13 +1116,15 @@ export async function start(): Promise<void> {
   }
   await refreshIntegration();
   render();
-  void openWhatsNew(false);
-  void checkForUpdates(false);
+  // The update toast would draw under the What's New modal, so wait for it.
+  void openWhatsNew(false).finally(() => checkForUpdates(false));
 }
 
 // Compare the running version with the latest GitHub release. The menu item
 // (`manual`) always checks and always answers; the launch check runs at most
-// once a day and stays silent unless a newer version exists.
+// once a day and stays silent unless a newer version exists. A newer-version
+// toast only counts as checked once it ran its full time or was clicked, so a
+// toast replaced by another one shows again next launch.
 async function checkForUpdates(manual: boolean): Promise<void> {
   if (!manual && !isCheckDue(localStorage.getItem(LS_UPDATE_CHECKED), Date.now())) return;
   let current = "";
@@ -1135,23 +1137,26 @@ async function checkForUpdates(manual: boolean): Promise<void> {
     if (manual) showNotice(`Couldn't check for updates. ${err instanceof Error ? err.message : err}`, false);
     return;
   }
-  localStorage.setItem(LS_UPDATE_CHECKED, String(Date.now()));
+  const markChecked = () => localStorage.setItem(LS_UPDATE_CHECKED, String(Date.now()));
   const { version, url } = release;
-  if (isNewer(version, current)) {
-    if (manual) { showUpdateAvailable(current, version, url); return; }
-    showToast(`Glance ${version} is available.`, {
-      actionLabel: "Details",
-      onAction: () => showUpdateAvailable(current, version, url),
-      ms: ERROR_TOAST_MS,
-    });
-  } else if (manual) {
-    showUpToDate(current);
+  if (!isNewer(version, current)) {
+    markChecked();
+    if (manual) showUpToDate(current);
+    return;
   }
+  if (manual) { markChecked(); showUpdateAvailable(current, version, url); return; }
+  showToast(`Glance ${version} is available.`, {
+    actionLabel: "Details",
+    onAction: () => { markChecked(); showUpdateAvailable(current, version, url); },
+    onExpire: markChecked,
+    ms: ERROR_TOAST_MS,
+  });
 }
 
 // Release notes for the running version. `force` (the menu item) always shows
 // them; otherwise only on the first launch of a version not yet seen. A version
-// with no changelog section is recorded silently so it never nags.
+// with no changelog section is recorded silently so it never nags. Resolves
+// once the modal closes, or right away when it isn't shown.
 async function openWhatsNew(force: boolean): Promise<void> {
   let version = "";
   try { version = await appVersion(); } catch { return; }
@@ -1159,5 +1164,6 @@ async function openWhatsNew(force: boolean): Promise<void> {
   const markSeen = () => localStorage.setItem(LS_SEEN_VERSION, version);
   const section = sectionFor(changelog, version);
   if (!section) { markSeen(); return; }
-  showWhatsNew(version, renderMarkdown(section), markSeen);
+  const html = renderMarkdown(section);
+  await new Promise<void>((resolve) => showWhatsNew(version, html, () => { markSeen(); resolve(); }));
 }

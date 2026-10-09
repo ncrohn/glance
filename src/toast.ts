@@ -4,6 +4,8 @@
 interface ToastOpts {
   actionLabel?: string;
   onAction?: () => void;
+  /** Called only when the toast times out, not when it is replaced or clicked. */
+  onExpire?: () => void;
   ms?: number;
 }
 
@@ -33,7 +35,7 @@ export function showToast(message: string, opts: ToastOpts = {}): () => void {
     el.remove();
     current = null;
   };
-  entry.timer = setTimeout(dismiss, opts.ms ?? DEFAULT_MS);
+  entry.timer = setTimeout(() => { dismiss(); opts.onExpire?.(); }, opts.ms ?? DEFAULT_MS);
 
   if (opts.actionLabel) {
     const btn = document.createElement("button");
