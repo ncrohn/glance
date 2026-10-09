@@ -782,6 +782,51 @@ mod tests {
     }
 
     #[test]
+    fn percent_decode_handles_escapes_and_rejects_bad_ones() {
+        assert_eq!(percent_decode("%2FUsers%2Fme%2Fmy%20doc.md").unwrap(), "/Users/me/my doc.md");
+        assert_eq!(percent_decode("/plain/path.md").unwrap(), "/plain/path.md");
+        assert_eq!(percent_decode("caf%C3%A9.md").unwrap(), "café.md");
+        for bad in ["%", "%2", "%zz", "%+1x", "%FF"] {
+            assert!(percent_decode(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resources_read_decodes_the_uri_and_rejects_other_schemes() {
+        let home = fresh_home("resources");
+        let doc = home.join("my doc.md").to_string_lossy().into_owned();
+        std::fs::write(&doc, NINE).unwrap();
+        mutate_store(&doc, |s| s.annotations.push(ann("a", "l2", "open"))).unwrap();
+        let encoded: String = doc.bytes().map(|b| match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b'_' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        }).collect();
+        for uri in [format!("glance://annotations/{doc}"), format!("glance://annotations/{encoded}")] {
+            let out = handle("resources/read", &json!({ "uri": uri })).unwrap().unwrap();
+            let views: Value = serde_json::from_str(out["contents"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(views.as_array().unwrap().len(), 1, "{uri}");
+            assert_eq!(out["contents"][0]["uri"], uri.as_str());
+        }
+        for uri in [
+            "file:///etc/hosts".to_string(),
+            "glance://other/x.md".to_string(),
+            format!("glance://annotations/{}%2", home.display()),
+        ] {
+            match handle("resources/read", &json!({ "uri": uri })) {
+                Some(Err((-32602, _))) => {}
+                other => panic!("{uri}: {other:?}"),
+            }
+        }
+        assert!(matches!(handle("resources/read", &json!({})), Some(Err((-32602, _)))));
+        // The path rules apply here too.
+        let env = home.join("x.env");
+        std::fs::write(&env, "k=v").unwrap();
+        let uri = format!("glance://annotations/{}", env.display());
+        assert!(matches!(handle("resources/read", &json!({ "uri": uri })), Some(Err(_))));
+    }
+
+    #[test]
     #[serial_test::serial]
     fn failed_resolve_or_reply_on_an_existing_doc_creates_nothing() {
         let home = fresh_home("noop");
@@ -1144,6 +1189,28 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
     }
 }
 
+const RESOURCE_PREFIX: &str = "glance://annotations/";
+
+/// Decode `%XX` escapes. A client that expands the `{path}` template the
+/// RFC 6570 way sends `/` as `%2F`; a raw path decodes to itself.
+fn percent_decode(s: &str) -> Result<String, String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3).filter(|h| h.iter().all(u8::is_ascii_hexdigit));
+            let hex = hex.ok_or("bad %-escape in resource URI")?;
+            out.push(u8::from_str_radix(std::str::from_utf8(hex).unwrap(), 16).unwrap());
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| "resource URI does not decode to UTF-8".to_string())
+}
+
 /// A failed tool call, reported the MCP way: a normal result the model can
 /// read and act on, flagged `isError`, rather than a JSON-RPC error.
 fn tool_error(message: &str) -> Value {
@@ -1184,9 +1251,17 @@ fn handle(method: &str, params: &Value) -> Option<Result<Value, (i64, String)>> 
             } ]
         }))),
         "resources/read" => {
-            let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
-            let raw = uri.strip_prefix("glance://annotations/").unwrap_or("");
-            let views = match resolve_doc_path(raw).and_then(|path| {
+            let Some(uri) = params.get("uri").and_then(|v| v.as_str()) else {
+                return Some(Err((-32602, "resources/read needs a 'uri'".to_string())));
+            };
+            let Some(encoded) = uri.strip_prefix(RESOURCE_PREFIX) else {
+                return Some(Err((-32602, format!("Unknown resource URI: {uri} (expected {RESOURCE_PREFIX}{{path}})"))));
+            };
+            let raw = match percent_decode(encoded) {
+                Ok(r) => r,
+                Err(e) => return Some(Err((-32602, format!("{e}: {uri}")))),
+            };
+            let views = match resolve_doc_path(&raw).and_then(|path| {
                 let text = read_doc(&path)?;
                 Ok(build_views(&read_store(&path)?, &text, Some("open")))
             }) {
