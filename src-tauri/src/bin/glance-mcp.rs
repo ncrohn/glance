@@ -692,6 +692,53 @@ mod tests {
         }
     }
 
+    fn tools_call(name: Value, arguments: Value) -> Option<Result<Value, (i64, String)>> {
+        handle("tools/call", &json!({ "name": name, "arguments": arguments }))
+    }
+
+    /// The text of a tool result that must be flagged `isError`.
+    fn tool_err(name: &str, arguments: Value) -> String {
+        match tools_call(json!(name), arguments) {
+            Some(Ok(v)) => {
+                assert_eq!(v["isError"], true, "{v}");
+                v["content"][0]["text"].as_str().unwrap().to_string()
+            }
+            other => panic!("expected an isError result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn tool_failures_are_is_error_results_with_accurate_messages() {
+        let home = fresh_home("errors");
+        let doc = home.join("doc.md").to_string_lossy().into_owned();
+        std::fs::write(&doc, NINE).unwrap();
+
+        assert!(tool_err("get_annotation", json!({ "path": doc, "id": "nope" })).contains("no annotation 'nope'"));
+        assert!(tool_err("list_annotations", json!({ "path": doc, "status": "Open" })).contains("must be one of open, resolved, orphaned, all"));
+        assert!(tool_err("list_annotations", json!({ "path": doc, "status": 5 })).contains("'status' must be a string"));
+        assert!(tool_err("list_annotations", json!({ "path": 5 })).contains("'path' must be a string"));
+        assert!(tool_err("list_annotations", json!({})).contains("missing 'path'"));
+        assert!(tool_err("resolve_annotation", json!({ "path": doc, "id": "x", "note": 5 })).contains("'note' must be a string"));
+        assert!(tool_err("add_annotation", json!({ "path": doc, "quote": "l1", "note": "n", "prefix": 1 })).contains("'prefix' must be a string"));
+        assert!(tool_err("reply_annotation", json!({ "path": doc, "id": "x", "text": "  " })).contains("missing 'text'"));
+        assert!(tool_err("list_annotations", json!("x")).contains("'arguments' must be an object"));
+
+        // An unknown tool is a protocol error, whether or not a path came with it.
+        for args in [json!({ "path": doc }), json!({})] {
+            match tools_call(json!("nope"), args) {
+                Some(Err((code, msg))) => assert_eq!((code, msg.as_str()), (-32602, "Unknown tool: nope")),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(matches!(handle("tools/call", &json!({ "arguments": {} })), Some(Err((-32602, _)))));
+
+        // Success carries no isError flag; a null status means the default.
+        let ok = tools_call(json!("list_annotations"), json!({ "path": doc, "status": null })).unwrap().unwrap();
+        assert!(ok.get("isError").is_none(), "{ok}");
+        assert!(handle("tools/call", &json!({ "name": "list_annotations" })).unwrap().unwrap()["isError"] == true);
+    }
+
     #[test]
     #[serial_test::serial]
     fn failed_resolve_or_reply_on_an_existing_doc_creates_nothing() {
@@ -943,20 +990,47 @@ fn text_result(value: Value) -> Value {
     json!({ "content": [ { "type": "text", "text": value.to_string() } ] })
 }
 
+const TOOL_NAMES: &[&str] = &["list_annotations", "get_annotation", "resolve_annotation", "add_annotation", "reply_annotation"];
+const STATUS_FILTERS: &[&str] = &["open", "resolved", "orphaned", "all"];
+
+/// A string argument, `None` when absent or null. Any other type is an error
+/// rather than being silently treated as absent.
+fn str_arg<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s)),
+        Some(_) => Err(format!("'{key}' must be a string")),
+    }
+}
+
+/// A required string argument; blank counts as missing when `trim` is set.
+fn required_str<'a>(args: &'a Value, key: &str, trim: bool) -> Result<&'a str, String> {
+    let v = str_arg(args, key)?.map(|s| if trim { s.trim() } else { s });
+    v.filter(|s| !s.is_empty()).ok_or_else(|| format!("missing '{key}'"))
+}
+
 fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
-    let raw_path = args.get("path").and_then(|v| v.as_str()).ok_or("missing 'path'")?;
-    let path = resolve_doc_path(raw_path)?;
+    if !TOOL_NAMES.contains(&name) {
+        return Err(format!("unknown tool '{name}'"));
+    }
+    if !args.is_object() {
+        return Err("'arguments' must be an object".to_string());
+    }
+    let path = resolve_doc_path(required_str(args, "path", false)?)?;
     let path = path.as_str();
     match name {
         "list_annotations" => {
-            let status = args.get("status").and_then(|v| v.as_str());
+            let status = str_arg(args, "status")?.unwrap_or("open");
+            if !STATUS_FILTERS.contains(&status) {
+                return Err(format!("'status' must be one of {}; got '{status}'", STATUS_FILTERS.join(", ")));
+            }
             let text = read_doc(path)?;
             let store = read_store(path)?;
-            let views = build_views(&store, &text, status);
+            let views = build_views(&store, &text, Some(status));
             Ok(text_result(serde_json::to_value(views).unwrap()))
         }
         "get_annotation" => {
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing 'id'")?;
+            let id = required_str(args, "id", false)?;
             let text = read_doc(path)?;
             let store = read_store(path)?;
             match store.annotations.iter().find(|a| a.id == id) {
@@ -965,8 +1039,8 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             }
         }
         "resolve_annotation" => {
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing 'id'")?;
-            let note = args.get("note").and_then(|v| v.as_str());
+            let id = required_str(args, "id", false)?;
+            let note = str_arg(args, "note")?;
             // Read-modify-write under the shared cross-process lock so a
             // concurrent add/remove from the GUI isn't clobbered.
             if mutate_store(path, |store| apply_resolve(store, id, note))? {
@@ -976,10 +1050,10 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             }
         }
         "add_annotation" => {
-            let quote = args.get("quote").and_then(|v| v.as_str()).filter(|q| !q.is_empty()).ok_or("missing 'quote'")?;
-            let note = args.get("note").and_then(|v| v.as_str()).map(str::trim).filter(|n| !n.is_empty()).ok_or("missing 'note'")?;
-            let prefix = args.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
-            let suffix = args.get("suffix").and_then(|v| v.as_str()).unwrap_or("");
+            let quote = required_str(args, "quote", false)?;
+            let note = required_str(args, "note", true)?;
+            let prefix = str_arg(args, "prefix")?.unwrap_or("");
+            let suffix = str_arg(args, "suffix")?.unwrap_or("");
             let text = read_doc(path)?;
             let hint = line_hint_arg(args.get("lineHint"), line_count(&text))?;
             let has_hint = hint.is_some();
@@ -1006,8 +1080,8 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             Ok(text_result(serde_json::to_value(view_of(&stored, &text)).unwrap()))
         }
         "reply_annotation" => {
-            let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing 'id'")?;
-            let text = args.get("text").and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty()).ok_or("missing 'text'")?;
+            let id = required_str(args, "id", false)?;
+            let text = required_str(args, "text", true)?;
             if mutate_store(path, |store| apply_claude_reply(store, id, text))? {
                 Ok(text_result(json!({ "ok": true, "id": id })))
             } else {
@@ -1016,6 +1090,12 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
         }
         other => Err(format!("unknown tool '{other}'")),
     }
+}
+
+/// A failed tool call, reported the MCP way: a normal result the model can
+/// read and act on, flagged `isError`, rather than a JSON-RPC error.
+fn tool_error(message: &str) -> Value {
+    json!({ "content": [ { "type": "text", "text": message } ], "isError": true })
 }
 
 fn handle(method: &str, params: &Value) -> Option<Result<Value, (i64, String)>> {
@@ -1027,10 +1107,20 @@ fn handle(method: &str, params: &Value) -> Option<Result<Value, (i64, String)>> 
         }))),
         "tools/list" => Some(Ok(json!({ "tools": tool_schemas() }))),
         "tools/call" => {
-            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            // An unknown or missing tool name is a protocol error; anything
+            // that goes wrong inside a known tool is a tool result.
+            let Some(name) = params.get("name").and_then(|v| v.as_str()) else {
+                return Some(Err((-32602, "tools/call needs a tool 'name'".to_string())));
+            };
+            if !TOOL_NAMES.contains(&name) {
+                return Some(Err((-32602, format!("Unknown tool: {name}"))));
+            }
             let empty = json!({});
-            let args = params.get("arguments").unwrap_or(&empty);
-            Some(call_tool(name, args).map_err(|e| (-32000, e)))
+            let args = match params.get("arguments") {
+                None | Some(Value::Null) => &empty,
+                Some(a) => a,
+            };
+            Some(Ok(call_tool(name, args).unwrap_or_else(|e| tool_error(&e))))
         }
         "resources/list" => Some(Ok(json!({ "resources": [] }))),
         "resources/templates/list" => Some(Ok(json!({
