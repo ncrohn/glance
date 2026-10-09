@@ -87,6 +87,115 @@ describe("parseWikilink", () => {
   });
 });
 
+describe("renderMarkdown linkify", () => {
+  it("leaves bare filenames as text", () => {
+    const html = renderMarkdown("See AGENTS.md and src/lib.rs, run setup.sh, open Calculator.app");
+    expect(html).not.toContain("<a");
+    expect(html).not.toContain("http://");
+  });
+
+  it("still links URLs with a scheme and www. hosts", () => {
+    const html = renderMarkdown("Go to https://example.com/a?b=1 or www.example.com/docs.");
+    expect(html).toContain('<a href="https://example.com/a?b=1">https://example.com/a?b=1</a>');
+    expect(html).toContain('<a href="http://www.example.com/docs">www.example.com/docs</a>.');
+  });
+
+  it("doesn't link www. in the middle of a word", () => {
+    expect(renderMarkdown("notwww.example.com")).not.toContain("<a");
+  });
+});
+
+describe("renderMarkdown file: links", () => {
+  it("renders file:// links and autolinks so clicks reach classifyLink", () => {
+    const html = renderMarkdown("[f](file:///Users/me/a.md) <file:///Users/me/b%20c.pdf>");
+    expect(html).toContain('<a href="file:///Users/me/a.md">f</a>');
+    expect(html).toContain('<a href="file:///Users/me/b%20c.pdf">');
+    expect(classifyLink("file:///Users/me/a.md", base)).toEqual({ kind: "markdown", path: "/Users/me/a.md" });
+    expect(classifyLink("file:///Users/me/b%20c.pdf", null)).toEqual({ kind: "file", path: "/Users/me/b c.pdf" });
+  });
+
+  it("maps file:// images through the resolver and drops them without one", () => {
+    const resolve = (src: string) => {
+      const path = resolveLocalPath(base, src);
+      return path ? `asset://localhost${path}` : null;
+    };
+    const md = "![i](file:///Users/me/a.png)";
+    expect(renderMarkdown(md, undefined, undefined, resolve)).toContain('src="asset://localhost/Users/me/a.png"');
+    expect(renderMarkdown(md)).toContain('<img src="" alt="i">');
+  });
+
+  it("keeps script and non-image data URLs out of links", () => {
+    for (const md of [
+      "[x](javascript:alert(1))",
+      "[x](jav&#x61;script:alert(1))",
+      "[x](vbscript:msgbox)",
+      "[x](data:text/html,hi)",
+      "<javascript:alert(1)>",
+      "[x][r]\n\n[r]: javascript:alert(1)",
+    ]) {
+      expect(renderMarkdown(md), md).not.toContain("<a");
+    }
+    expect(renderMarkdown("![x](data:image/png;base64,AA)")).toContain('src="data:image/png;base64,AA"');
+  });
+});
+
+describe("renderMarkdown wikilinks inside links", () => {
+  it("keeps the outer link and shows the wikilink as text", () => {
+    expect(renderMarkdown("[see [[note]] here](https://x.example)")).toContain(
+      '<a href="https://x.example">see [[note]] here</a>',
+    );
+  });
+
+  it("still renders a wikilink next to an ordinary link", () => {
+    const html = renderMarkdown("[a](https://x.example) [[note]] [b [c]](y.md)");
+    expect(html).toContain('<a href="https://x.example">a</a>');
+    expect(html).toContain('<a class="wikilink" data-wikilink="note">note</a>');
+    expect(html).toContain('<a href="y.md">b [c]</a>');
+  });
+});
+
+describe("renderMarkdown HTML comments in containers", () => {
+  it("ends an unclosed comment with its list item", () => {
+    const html = renderMarkdown("- <!-- start\n- second item -->\n- third");
+    expect(html).not.toContain("start");
+    expect(html).toContain("second item --&gt;</li>");
+    expect(html).toContain("third</li>");
+    expect(html.match(/<li/g)).toHaveLength(3);
+  });
+
+  it("hides a comment that closes inside its list item, across a blank line", () => {
+    const html = renderMarkdown("- a <!-- x -->\n- <!-- hidden\n\n  still hidden -->\n- b");
+    expect(html).not.toContain("hidden");
+    expect(html).toContain('<li data-sourceline="5" data-sourceline-end="5">b</li>');
+  });
+
+  it("keeps hiding a list item's comment whose body is flush left", () => {
+    const html = renderMarkdown("- a\n- <!--\nHidden reviewer note.\n-->\n- next");
+    expect(html).not.toContain("Hidden reviewer note");
+    expect(html.match(/<ul/g)).toHaveLength(1);
+    expect(html).toContain("next</li>");
+  });
+
+  it("keeps hiding a blockquote comment that continues on a lazy line", () => {
+    const html = renderMarkdown("> <!-- note\ncontinued -->\n\nafter");
+    expect(html).not.toContain("continued");
+    expect(html).toContain("after");
+  });
+
+  it("ends an unclosed comment with its blockquote", () => {
+    const html = renderMarkdown("> - <!-- a\n> - b\n\nafter");
+    expect(html).not.toContain("&lt;!--");
+    expect(html).toContain("b</li>");
+    expect(html).toContain("after");
+  });
+
+  it("shows an unclosed top-level comment instead of hiding the rest", () => {
+    const html = renderMarkdown("<!-- oops\n\nBody");
+    expect(html).toContain("&lt;!-- oops");
+    expect(html).toContain("Body");
+  });
+});
+
 describe("renderMarkdown wikilinks and comments", () => {
   it("renders [[links]] with their target", () => {
     const html = renderMarkdown("See [[decisions]] and [[../x/index|X]].");

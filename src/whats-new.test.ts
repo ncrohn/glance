@@ -42,4 +42,19 @@ describe("sectionFor", () => {
     expect(sectionFor(LOG, "0.9.0")).toBeNull();
     expect(sectionFor("## 1.0.0\n\n## 0.9.0\n- x\n", "1.0.0")).toBeNull();
   });
+  it("doesn't end a section at a ## line inside fenced code", () => {
+    const log = "## 1.0\n```md\n## not a heading\n```\n~~~~\n## nor this\n```\n~~~~\n- a\n## 0.9\n- b";
+    expect(sectionFor(log, "1.0")).toBe("```md\n## not a heading\n```\n~~~~\n## nor this\n```\n~~~~\n- a");
+    expect(sectionFor("```\n## 2.0\n```\n## 1.0\n- a", "2.0")).toBeNull();
+  });
+  it("accepts Keep a Changelog headings", () => {
+    const log = "## [Unreleased]\n- u\n## [1.0] - 2026-01-01\n- a\n## 0.9 - 2025-12-01\n- b\n## [0.8]\n- c";
+    expect(sectionFor(log, "1.0")).toBe("- a");
+    expect(sectionFor(log, "0.9")).toBe("- b");
+    expect(sectionFor(log, "0.8")).toBe("- c");
+    expect(sectionFor(log, "Unreleased")).toBe("- u");
+  });
+  it("handles CRLF changelogs", () => {
+    expect(sectionFor("## 1.0\r\n- a\r\n## 0.9\r\n- b\r\n", "1.0")).toBe("- a");
+  });
 });

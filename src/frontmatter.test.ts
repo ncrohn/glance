@@ -79,4 +79,32 @@ describe("parseFrontmatter", () => {
       { key: "tags", value: ["hello, world", "foo"] },
     ]);
   });
+
+  it("detects frontmatter after a UTF-8 BOM without shifting lines", () => {
+    const r = parseFrontmatter("﻿---\nk: v\n---\n# Title");
+    expect(r.entries).toEqual([{ key: "k", value: "v" }]);
+    expect(r.body).toBe("# Title");
+    expect(r.lineOffset).toBe(3);
+  });
+
+  it("drops a BOM from a document without frontmatter", () => {
+    expect(parseFrontmatter("﻿# Title")).toEqual({ entries: [], body: "# Title", lineOffset: 0 });
+  });
+
+  it("parses YAML block lists into string lists", () => {
+    const src = "---\nurl: https://x.com/a\nlist:\n  - a\n  - 'b c'\ntags:\n- x\n-\nafter: 1\n---\nb";
+    const r = parseFrontmatter(src);
+    expect(r.entries).toEqual([
+      { key: "url", value: "https://x.com/a" },
+      { key: "list", value: ["a", "b c"] },
+      { key: "tags", value: ["x"] },
+      { key: "after", value: "1" },
+    ]);
+    expect(r.lineOffset).toBe(10);
+  });
+
+  it("parses block lists in CRLF files", () => {
+    const src = "---\r\nlist:\r\n  - a\r\n  - b\r\n---\r\nbody";
+    expect(parseFrontmatter(src).entries).toEqual([{ key: "list", value: ["a", "b"] }]);
+  });
 });

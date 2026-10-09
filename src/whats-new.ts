@@ -8,16 +8,40 @@ export function shouldShowWhatsNew(lastSeen: string | null, current: string): bo
   return current !== "" && lastSeen !== current;
 }
 
+/** The version a `## ` heading names: `1.0`, `[1.0]`, or either followed by
+ *  ` - date` as in Keep a Changelog. */
+function headingVersion(heading: string): string {
+  const text = heading.trim();
+  const bracketed = /^\[([^\]]+)\]/.exec(text);
+  if (bracketed) return bracketed[1].trim();
+  return text.replace(/\s+[-–—]\s+.*$/, "");
+}
+
+/** Indexes of `## ` heading lines, skipping any inside fenced code. */
+function h2Lines(lines: string[]): number[] {
+  const found: number[] = [];
+  let fence: string | null = null;
+  lines.forEach((line, i) => {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (fence) {
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) fence = null;
+    } else if (marker) {
+      fence = marker;
+    } else if (/^##\s+/.test(line)) {
+      found.push(i);
+    }
+  });
+  return found;
+}
+
 /** The body of the `## <version>` section of a changelog: everything after
  *  that heading up to the next `## ` heading, trimmed. Null when absent. */
 export function sectionFor(changelog: string, version: string): string | null {
   const lines = changelog.split("\n");
-  const start = lines.findIndex((l) => /^##\s+/.test(l) && l.replace(/^##\s+/, "").trim() === version);
-  if (start === -1) return null;
-  let end = lines.length;
-  for (let i = start + 1; i < lines.length; i++) {
-    if (/^##\s+/.test(lines[i])) { end = i; break; }
-  }
-  const body = lines.slice(start + 1, end).join("\n").trim();
+  const headings = h2Lines(lines);
+  const at = headings.findIndex((i) => headingVersion(lines[i].replace(/^##\s+/, "")) === version);
+  if (at === -1) return null;
+  const end = headings[at + 1] ?? lines.length;
+  const body = lines.slice(headings[at] + 1, end).join("\n").trim();
   return body.length ? body : null;
 }

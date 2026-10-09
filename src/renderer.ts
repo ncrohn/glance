@@ -34,9 +34,35 @@ const md = new MarkdownIt({
 
 md.use(taskLists);
 
+// Fuzzy linkify turns filenames like AGENTS.md or setup.sh into links to
+// http://AGENTS.md. Link only URLs with a scheme, plus `www.` hosts as GFM does.
+md.linkify.set({ fuzzyLink: false });
+md.linkify.add("www.", {
+  validate(text, pos, self) {
+    const re = self.re as Record<string, string | RegExp | undefined>;
+    re.www ??= new RegExp(`^${re.src_host_port_strict}${re.src_path}`, "i");
+    const m = (re.www as RegExp).exec(text.slice(pos));
+    return m ? m[0].length : 0;
+  },
+  normalize(match) {
+    match.url = `http://${match.url}`;
+  },
+});
+
+// markdown-it rejects file: URLs outright. Let file: links through to
+// classifyLink, whose open path asks before running anything; file: images are
+// mapped onto the asset protocol by the image rule below or dropped.
+const defaultValidateLink = md.validateLink;
+md.validateLink = (url) => /^file:/i.test(url.trim()) || defaultValidateLink(url);
+
 // HTML comments are hidden, as on GitHub and in Obsidian. Raw HTML stays off,
 // so only comments get this treatment; code spans and fences run first and keep
-// any comment inside them visible.
+// any comment inside them visible. A comment runs to the line holding `-->`,
+// but one that started in a list item or blockquote stops at a line that opens
+// the next item or quote, so it can't swallow it. Unindented lines that don't
+// open one stay hidden: agents often leave a comment's body flush left.
+const CONTAINER_START = /^(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)|^>/;
+
 md.block.ruler.before(
   "html_block",
   "html_comment",
@@ -44,7 +70,12 @@ md.block.ruler.before(
     if (state.sCount[startLine] - state.blkIndent >= 4) return false;
     const start = state.bMarks[startLine] + state.tShift[startLine];
     if (!state.src.startsWith("<!--", start)) return false;
-    for (let line = startLine; line < endLine; line++) {
+    let line = startLine;
+    for (; line < endLine; line++) {
+      if (
+        line > startLine && state.sCount[line] < state.blkIndent && !state.isEmpty(line)
+        && CONTAINER_START.test(state.src.slice(state.bMarks[line] + state.tShift[line], state.eMarks[line]))
+      ) break;
       const from = line === startLine ? start + 4 : state.bMarks[line];
       const text = state.src.slice(from, state.eMarks[line]);
       const close = text.indexOf("-->");
@@ -53,7 +84,12 @@ md.block.ruler.before(
       if (!silent) state.line = line + 1;
       return true;
     }
-    return false;
+    // Unclosed. Inside a container it ends with the container, as on GitHub;
+    // at the end of the document, show the stray `<!--` rather than hide
+    // everything after it.
+    if (line === endLine) return false;
+    if (!silent) state.line = line;
+    return true;
   },
   { alt: ["paragraph", "reference", "blockquote"] },
 );
@@ -68,7 +104,11 @@ md.inline.ruler.before("html_inline", "html_comment", (state) => {
 
 // Obsidian-style [[note]], [[note|label]] and [[note#Heading]]. The link is
 // resolved on click (see app.ts), since finding the file needs the filesystem.
+// Inside link text a wikilink would nest one <a> in another, so it stays plain
+// text there. Silent calls come only from the link-label scan, which has to
+// step over the brackets one at a time to find where `[text]` ends.
 md.inline.ruler.before("link", "wikilink", (state, silent) => {
+  if (silent || (state as { linkLevel?: number }).linkLevel) return false;
   if (!state.src.startsWith("[[", state.pos)) return false;
   const end = state.src.indexOf("]]", state.pos + 2);
   if (end === -1 || end > state.posMax) return false;
@@ -98,10 +138,9 @@ const defaultImage = md.renderer.rules.image!;
 md.renderer.rules.image = (tokens, idx, options, env, self) => {
   const resolve = env?.resolveImage as ((src: string) => string | null) | undefined;
   const src = tokens[idx].attrGet("src");
-  if (resolve && src) {
-    const next = resolve(src);
-    if (next) tokens[idx].attrSet("src", next);
-  }
+  const next = resolve && src ? resolve(src) : null;
+  if (next) tokens[idx].attrSet("src", next);
+  else if (src && /^file:/i.test(src.trim())) tokens[idx].attrSet("src", "");
   return defaultImage(tokens, idx, options, env, self);
 };
 
