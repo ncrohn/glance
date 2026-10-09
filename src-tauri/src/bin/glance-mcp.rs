@@ -224,7 +224,11 @@ fn pending_lines(
     }
     let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
     for (store_path, store) in stores {
-        let Some(rel) = prefixes.iter().find_map(|p| store.doc_path.strip_prefix(p.as_str())) else { continue };
+        if !prefixes.iter().any(|p| store.doc_path.starts_with(p.as_str())) {
+            continue;
+        }
+        // Absolute, because the tools refuse relative paths.
+        let doc = &store.doc_path;
         let Some(text) = read_doc(&store.doc_path) else { continue };
         let n = build_views(&store, &text, Some("open")).len();
         if n == 0 {
@@ -236,7 +240,7 @@ fn pending_lines(
             .unwrap_or(std::time::UNIX_EPOCH);
         found.push((
             mtime,
-            format!("Glance: {n} open review {noun} on {rel}. Read them with list_annotations before continuing."),
+            format!("Glance: {n} open review {noun} on {doc}. Read them with list_annotations before continuing."),
         ));
     }
     found.sort_by(|a, b| b.0.cmp(&a.0));
@@ -1005,11 +1009,11 @@ mod tests {
     }
 
     #[test]
-    fn pending_lines_wording_and_relative_path() {
+    fn pending_lines_wording_and_absolute_path() {
         let one = vec![store_at("/proj/docs/plan.md", vec![ann("a", "hello", "open")])];
         assert_eq!(
             pending_lines(Path::new("/proj"), one, any_doc),
-            vec!["Glance: 1 open review comment on docs/plan.md. Read them with list_annotations before continuing."]
+            vec!["Glance: 1 open review comment on /proj/docs/plan.md. Read them with list_annotations before continuing."]
         );
         let three = vec![store_at(
             "/proj/docs/plan.md",
@@ -1017,7 +1021,7 @@ mod tests {
         )];
         assert_eq!(
             pending_lines(Path::new("/proj"), three, any_doc),
-            vec!["Glance: 3 open review comments on docs/plan.md. Read them with list_annotations before continuing."]
+            vec!["Glance: 3 open review comments on /proj/docs/plan.md. Read them with list_annotations before continuing."]
         );
     }
 

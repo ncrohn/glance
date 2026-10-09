@@ -71,7 +71,10 @@ pub(crate) fn legacy_keys(doc_path: &str, key: &str) -> Vec<String> {
     if abs != doc_path {
         out.push(abs);
     }
-    out.retain(|k| k != key);
+    // Lexical `..` after a symlink can name a different file (`w/docs/../x.md`
+    // with docs → /r/docs is /r/x.md, but lexically w/x.md). A spelling that is
+    // some other existing doc's own path is that doc's store, never this one's.
+    out.retain(|k| k != key && !(Path::new(k).exists() && doc_key(k) != key));
     out
 }
 
@@ -129,8 +132,10 @@ fn migrate_from(dir: &Path, key: &str, legacy_keys: Vec<String>) -> Result<(), S
                 from
             };
             write_store_at(&path, &merged)?;
-            std::fs::remove_file(&old)
-                .map_err(|e| format!("Couldn't remove the old annotation store {}: {e}", old.display()))
+            // If the old file can't go, leave it: merging is idempotent by id,
+            // and failing here would block every read of this doc.
+            let _ = std::fs::remove_file(&old);
+            Ok(())
         })?;
     }
     Ok(())
@@ -1086,6 +1091,27 @@ mod tests {
         assert_eq!(v["annotations"][1]["note"], "old b");
         // Any spelling now reads the migrated store.
         assert_eq!(read_store(&canonical).unwrap().annotations.len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn a_dotdot_spelling_never_adopts_another_docs_store() {
+        let home = fresh_home("migrate-dotdot");
+        // Resolved, so the lexical spelling of the other doc is its real path.
+        let real = std::fs::canonicalize(&home).unwrap().join("r");
+        std::fs::create_dir_all(real.join("docs")).unwrap();
+        std::fs::create_dir_all(real.join("w")).unwrap();
+        std::os::unix::fs::symlink(real.join("docs"), real.join("w").join("docs")).unwrap();
+        std::fs::write(real.join("README.md"), "top\n").unwrap();
+        let other = real.join("w").join("README.md");
+        std::fs::write(&other, "hello\n").unwrap();
+        let other = std::fs::canonicalize(&other).unwrap().to_string_lossy().into_owned();
+        add_annotation(other.clone(), ann("theirs")).unwrap();
+        // w/docs/.. is r/ physically, but w/ lexically: the other doc's path.
+        let tricky = real.join("w").join("docs").join("..").join("README.md");
+        let mine = read_store(&tricky.to_string_lossy()).unwrap();
+        assert!(mine.annotations.is_empty());
+        assert_eq!(read_store(&other).unwrap().annotations.len(), 1);
     }
 
     #[test]
