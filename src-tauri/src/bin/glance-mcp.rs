@@ -247,6 +247,12 @@ fn pending_lines(
     found.into_iter().take(PENDING_MAX_DOCS).map(|(_, line)| line).collect()
 }
 
+/// The hook event's `cwd`. No fallback to the process cwd: hooks may run from
+/// `/`, which would list every project's docs.
+fn pending_event_cwd(input: &str) -> Option<String> {
+    serde_json::from_str::<Value>(input).ok()?.get("cwd")?.as_str().map(str::to_string)
+}
+
 /// Every parseable `~/.glance/annotations/*.json` store. Lock files and
 /// unreadable stores are skipped; a missing dir yields nothing.
 fn load_stores() -> Vec<(PathBuf, AnnotationStore)> {
@@ -266,21 +272,18 @@ fn load_stores() -> Vec<(PathBuf, AnnotationStore)> {
 
 /// `glance-mcp --pending [cwd]`: print the pending-comment context lines and
 /// exit 0 whatever happens. `cwd` comes from argv, else the hook event JSON on
-/// stdin, else the process cwd. stdin is only read when argv lacks a cwd, so a
-/// manual `--pending /path` never waits on a terminal.
+/// stdin. stdin is only read when argv lacks a cwd, so a manual `--pending
+/// /path` never waits on a terminal.
 fn run_pending(argv: &[String]) {
     let cwd = match argv.get(2) {
-        Some(c) => Some(PathBuf::from(c)),
+        Some(c) => Some(c.clone()),
         None => {
             let mut input = String::new();
             let _ = std::io::stdin().read_to_string(&mut input);
-            serde_json::from_str::<Value>(&input)
-                .ok()
-                .and_then(|v| v.get("cwd")?.as_str().map(PathBuf::from))
-                .or_else(|| std::env::current_dir().ok())
+            pending_event_cwd(&input)
         }
     };
-    let Some(cwd) = cwd else { return };
+    let Some(cwd) = cwd.filter(|c| !c.is_empty()).map(PathBuf::from) else { return };
     let mut stdout = std::io::stdout();
     for line in pending_lines(&cwd, load_stores(), |p| std::fs::read_to_string(p).ok()) {
         let _ = writeln!(stdout, "{line}");
@@ -1044,6 +1047,14 @@ mod tests {
     fn pending_lines_caps_at_five() {
         let stores = (0..8).map(|i| store_at(&format!("/proj/d{i}.md"), vec![ann("a", "hello", "open")])).collect();
         assert_eq!(pending_lines(Path::new("/proj"), stores, any_doc).len(), PENDING_MAX_DOCS);
+    }
+
+    #[test]
+    fn pending_event_without_cwd_yields_nothing() {
+        assert_eq!(pending_event_cwd(r#"{"cwd":"/proj","prompt":"hi"}"#).as_deref(), Some("/proj"));
+        assert_eq!(pending_event_cwd(r#"{"prompt":"hi"}"#), None);
+        assert_eq!(pending_event_cwd("not json"), None);
+        assert_eq!(pending_event_cwd(""), None);
     }
 }
 
