@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyLink, dirname, needsOpenConfirmation, parseWikilink, resolveLocalPath, slugify } from "./links";
+import { classifyLink, dirname, parseWikilink, resolveLocalPath, slugify } from "./links";
 import { renderMarkdown } from "./renderer";
 
 const base = "/Users/nick/notes";
@@ -112,20 +112,5 @@ describe("renderMarkdown wikilinks and comments", () => {
 
   it("keeps source line stamps after a hidden comment", () => {
     expect(renderMarkdown("<!-- c -->\n\nPara\n")).toContain('data-sourceline="3"');
-  });
-});
-
-describe("needsOpenConfirmation", () => {
-  it("asks before anything that could run code", () => {
-    for (const p of ["/r/setup.command", "/r/x.tool", "/r/x.terminal", "/System/Applications/Calculator.app",
-      "/System/Applications/Calculator.app/", "/bin/zsh", "/r/install.sh", "/r/page.html", "/r/img.svg", "/r/.hidden"]) {
-      expect(needsOpenConfirmation(p), p).toBe(true);
-    }
-  });
-
-  it("opens view-only documents directly", () => {
-    for (const p of ["/r/spec.pdf", "/r/shot.PNG", "/r/data.csv", "/r/deck.key", "/r/clip.mov"]) {
-      expect(needsOpenConfirmation(p), p).toBe(false);
-    }
   });
 });

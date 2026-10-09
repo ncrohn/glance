@@ -168,6 +168,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::read_file,
             commands::write_file,
+            commands::resolve_open_target,
             watcher::watch_file,
             watcher::unwatch_file,
             watcher::watch_annotations,

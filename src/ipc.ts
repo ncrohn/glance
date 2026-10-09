@@ -18,6 +18,12 @@ export function openFileExternal(path: string): Promise<void> {
   return openWithDefaultApp(path);
 }
 
+// Where a linked file really points, and whether opening it could run code.
+export interface OpenTarget { path: string; confirm: boolean }
+export function resolveOpenTarget(path: string): Promise<OpenTarget> {
+  return invoke<OpenTarget>("resolve_open_target", { path });
+}
+
 // A URL the webview can load a local file from, via Tauri's asset protocol.
 export function localFileUrl(path: string): string {
   return convertFileSrc(path);

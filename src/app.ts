@@ -17,9 +17,9 @@ import {
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
   onShowAbout, onShowWhatsNew, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
   onShowInFinder, revealInFinder, setShowInFinderEnabled,
-  readReviewed, writeReviewed, openExternal, openFileExternal, localFileUrl, resolveWikilink,
+  readReviewed, writeReviewed, openExternal, openFileExternal, resolveOpenTarget, localFileUrl, resolveWikilink,
 } from "./ipc";
-import { classifyLink, dirname, needsOpenConfirmation, parseWikilink, resolveLocalPath, slugify } from "./links";
+import { classifyLink, dirname, parseWikilink, resolveLocalPath, slugify } from "./links";
 import {
   addAnnotation, removeAnnotation, patchAnnotation, appendReply, genId, type Annotation, type AnnotationPatch,
 } from "./annotations";
@@ -749,8 +749,13 @@ function handleLinkClick(ev: MouseEvent): void {
 }
 
 async function openLinkedFile(path: string): Promise<void> {
-  if (needsOpenConfirmation(path) && !(await confirmOpenFile(path))) return;
-  await openFileExternal(path).catch(() => showNotice(`Couldn't open ${path}.`, false));
+  try {
+    const target = await resolveOpenTarget(path);
+    if (target.confirm && !(await confirmOpenFile(target.path))) return;
+    await openFileExternal(target.path);
+  } catch {
+    showNotice(`Couldn't open ${path}.`, false);
+  }
 }
 
 function scrollToHeading(id: string): void {
@@ -833,7 +838,9 @@ export async function start(): Promise<void> {
   if (grip && railEl) mountRailResizer(grip, railEl, (w) => localStorage.setItem(LS_RAIL_W, String(w)));
 
   document.addEventListener("click", handleLinkClick);
-  await onOpenFile((absPath) => { void openPath(absPath); });
+  await onOpenFile((absPath) => {
+    void openPath(absPath).catch((err) => showNotice(`Couldn't open ${absPath}: ${err}`, false));
+  });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
   await onShowIntegrationPicker((action) => { void openIntegrationPicker(action); });
   await onShowAbout(async () => { showAbout(await appVersion()); });
