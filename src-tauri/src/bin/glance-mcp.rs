@@ -165,6 +165,7 @@ fn claude_annotation(path: &str, quote: &str, note: &str, prefix: &str, suffix: 
         resolved_by: None,
         resolved_at: None,
         replies: Vec::new(),
+        extra: Default::default(),
     }
 }
 
@@ -272,11 +273,12 @@ mod tests {
             resolved_by: None,
             resolved_at: None,
             replies: Vec::new(),
+            extra: Default::default(),
         }
     }
 
     fn store_of(anns: Vec<Annotation>) -> AnnotationStore {
-        AnnotationStore { doc_path: "/d.md".into(), annotations: anns, next_number: 0 }
+        AnnotationStore { doc_path: "/d.md".into(), annotations: anns, ..Default::default() }
     }
 
     #[test]
@@ -582,6 +584,7 @@ mod tests {
             resolved_by: None,
             resolved_at: None,
             replies: Vec::new(),
+            extra: Default::default(),
         };
         let store = store_of(vec![a]);
         let text = "hello world\n"; // 1 line only, so line_hint 99 is out of range → orphaned
@@ -598,7 +601,7 @@ mod tests {
     fn store_at(doc_path: &str, anns: Vec<Annotation>) -> (PathBuf, AnnotationStore) {
         (
             PathBuf::from(format!("/nonexistent/{}.json", doc_path.replace('/', "_"))),
-            AnnotationStore { doc_path: doc_path.into(), next_number: 0, annotations: anns },
+            AnnotationStore { doc_path: doc_path.into(), annotations: anns, ..Default::default() },
         )
     }
 

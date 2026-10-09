@@ -33,6 +33,10 @@ pub struct Annotation {
     /// user's answers. Absent from stores written before replies existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replies: Vec<Reply>,
+    /// Fields this version doesn't know (written by a newer or older Glance),
+    /// kept so a rewrite doesn't drop them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// One message in an annotation's reply thread. `author` is "user" or "claude".
@@ -159,6 +163,7 @@ mod tests {
             resolved_by: None,
             resolved_at: None,
             replies: Vec::new(),
+            extra: Default::default(),
         }
     }
 
@@ -263,5 +268,18 @@ mod tests {
         assert_eq!(r.start_line, Some(3)); // nearest to the (huge) hint
         let a = ann("dup", "", "", (i64::MAX as usize) + 1);
         assert_eq!(resolve_anchor("dup\nx\ndup\n", &a).start_line, Some(3));
+    }
+
+    #[test]
+    fn unknown_fields_survive_a_round_trip() {
+        let text = r#"{"id":"a","quote":"q","prefix":"","suffix":"","lineHint":{"start":1,"end":1},"note":"n","status":"open","author":"user","createdAt":"t","number":1,"tags":["x"],"severity":"high"}"#;
+        let a: Annotation = serde_json::from_str(text).unwrap();
+        assert_eq!(a.extra.get("severity"), Some(&serde_json::json!("high")));
+        assert!(!a.extra.contains_key("quote"));
+        let back = serde_json::to_value(&a).unwrap();
+        assert_eq!(back["tags"], serde_json::json!(["x"]));
+        assert_eq!(back["severity"], "high");
+        // Nothing extra is written for an annotation without unknown fields.
+        assert_eq!(serde_json::to_value(ann("q", "", "", 1)).unwrap().as_object().unwrap().len(), 10);
     }
 }

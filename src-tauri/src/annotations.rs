@@ -13,6 +13,9 @@ pub struct AnnotationStore {
     pub annotations: Vec<Annotation>,
     #[serde(default, rename = "nextNumber")]
     pub next_number: u32,
+    /// Top-level fields this version doesn't know, kept across rewrites.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 pub fn sha1_hex(s: &str) -> String {
@@ -34,11 +37,7 @@ pub fn store_path_for(doc_path: &str) -> Option<PathBuf> {
 /// took it for "no comments" would show nothing, and a mutation would write the
 /// empty store over every comment in the file.
 pub fn read_store(doc_path: &str) -> Result<AnnotationStore, String> {
-    let empty = || AnnotationStore {
-        doc_path: doc_path.to_string(),
-        annotations: Vec::new(),
-        next_number: 0,
-    };
+    let empty = || AnnotationStore { doc_path: doc_path.to_string(), ..Default::default() };
     let path = match store_path_for(doc_path) {
         Some(p) => p,
         None => return Ok(empty()),
@@ -378,11 +377,12 @@ mod tests {
             resolved_by: None,
             resolved_at: None,
             replies: Vec::new(),
+            extra: Default::default(),
         }
     }
 
     fn store_of(annotations: Vec<Annotation>) -> AnnotationStore {
-        AnnotationStore { doc_path: "/d.md".into(), annotations, next_number: 0 }
+        AnnotationStore { doc_path: "/d.md".into(), annotations, ..Default::default() }
     }
 
     #[test]
@@ -770,6 +770,24 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         remove_annotation(doc.into(), "zzz".into()).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+    }
+
+    #[test]
+    #[serial]
+    fn unknown_store_and_annotation_fields_survive_a_mutation() {
+        fresh_home("unknown");
+        let doc = "/m/unknown.md";
+        let path = store_path_for(doc).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"docPath":"/m/unknown.md","nextNumber":2,"schemaVersion":2,"annotations":[
+            {"id":"a","quote":"q","prefix":"","suffix":"","lineHint":{"start":1,"end":1},"note":"n","status":"open","author":"user","createdAt":"t","number":1,"tags":["x"],"severity":"high"}]}"#).unwrap();
+        add_reply(doc.into(), "a".into(), "hi".into()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["schemaVersion"], 2);
+        assert_eq!(v["annotations"][0]["severity"], "high");
+        assert_eq!(v["annotations"][0]["tags"], serde_json::json!(["x"]));
+        assert_eq!(v["annotations"][0]["replies"][0]["text"], "hi");
+        assert!(v.get("extra").is_none());
     }
 
     #[test]
