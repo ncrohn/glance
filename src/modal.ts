@@ -431,3 +431,26 @@ export function showWhatsNew(version: string, html: string, onClose: () => void)
   m.footer.append(link, ok);
   ok.focus();
 }
+
+// Asked before a link hands a file that might be a program (.command, .app, a
+// bare executable) to its default app. Cancel is the default.
+export function confirmOpenFile(path: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const done = (open: boolean) => { m.close(); resolve(open); };
+    const m = openModal({ title: "Open this file?", onEscape: () => done(false) });
+    const msg = document.createElement("p");
+    msg.textContent = "This link opens a file outside Glance. If it's a program or script, it will run.";
+    const where = document.createElement("p");
+    const code = document.createElement("code");
+    code.textContent = path;
+    where.appendChild(code);
+    m.body.append(msg, where);
+
+    const open = button("Open");
+    const cancel = button("Cancel", true);
+    open.onclick = () => done(true);
+    cancel.onclick = () => done(false);
+    m.footer.append(open, cancel);
+    cancel.focus();
+  });
+}

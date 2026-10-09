@@ -68,6 +68,24 @@ export function classifyLink(href: string, baseDir: string | null): LinkTarget {
   return /\.(md|markdown)$/i.test(path) ? { kind: "markdown", path } : { kind: "file", path };
 }
 
+// Documents and media whose default macOS app only displays them. Anything
+// else — .command, .app, .terminal, a bare executable, .html — can run code
+// when handed to `open`, so a click on it asks first.
+const VIEW_ONLY = new Set([
+  "pdf", "png", "jpg", "jpeg", "gif", "webp", "heic", "tif", "tiff", "bmp",
+  "txt", "csv", "tsv", "json", "yaml", "yml", "toml", "xml", "log", "rtf",
+  "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pages", "numbers", "key",
+  "mp3", "m4a", "wav", "mp4", "mov", "m4v",
+]);
+
+/** True when opening `path` in its default app should be confirmed first. */
+export function needsOpenConfirmation(path: string): boolean {
+  const name = path.replace(/\/+$/, "").split("/").pop() ?? "";
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return true;
+  return !VIEW_ONLY.has(name.slice(dot + 1).toLowerCase());
+}
+
 /** GitHub-style heading slug, so `[x](#some-heading)` finds `## Some Heading`. */
 export function slugify(text: string): string {
   return text

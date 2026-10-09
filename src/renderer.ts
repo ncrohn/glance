@@ -14,8 +14,11 @@ const md = new MarkdownIt({
     if (lang === "mermaid") {
       return `<pre class="mermaid-block">${md.utils.escapeHtml(code)}</pre>`;
     }
-    const language = lang && hljs.getLanguage(lang) ? lang : "";
-    const cls = `hljs language-${lang || "plaintext"}`;
+    // The fence info string is document text and lands inside an attribute,
+    // so anything that isn't a plain language name is treated as plaintext.
+    const safeLang = /^[\w+#.-]+$/.test(lang) ? lang : "";
+    const language = safeLang && hljs.getLanguage(safeLang) ? safeLang : "";
+    const cls = `hljs language-${safeLang || "plaintext"}`;
     if (language) {
       try {
         const out = hljs.highlight(code, { language }).value;
