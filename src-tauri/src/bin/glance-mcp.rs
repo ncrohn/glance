@@ -577,6 +577,67 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&store_path).unwrap(), damaged);
     }
 
+    fn fresh_home(name: &str) -> PathBuf {
+        let home = std::env::temp_dir().join(format!("glance-test-mcp-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        home
+    }
+
+    fn tool_json(out: &Value) -> Value {
+        serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn tools_only_touch_existing_markdown_and_text_files() {
+        let home = fresh_home("paths");
+        let doc = home.join("doc.md");
+        std::fs::write(&doc, NINE).unwrap();
+        std::fs::write(home.join("secret.env"), "password=hunter2\n").unwrap();
+        std::fs::write(home.join("profile"), "password=hunter2\n").unwrap();
+        std::os::unix::fs::symlink(home.join("profile"), home.join("notes.md")).unwrap();
+        std::fs::create_dir_all(home.join("dir.md")).unwrap();
+        let p = |name: &str| home.join(name).to_string_lossy().into_owned();
+        let cases = [
+            (p("secret.env"), "only annotates markdown and text"),
+            (p("notes.md"), "only annotates markdown and text"), // judged by the symlink's target
+            (p("dir.md"), "not a file"),
+            (p("missing.md"), "no such file"),
+            ("doc.md".to_string(), "must be absolute"),
+            ("~/missing.md".to_string(), "no such file"),
+        ];
+        for (path, want) in &cases {
+            for tool in ["list_annotations", "get_annotation", "add_annotation", "resolve_annotation", "reply_annotation"] {
+                let args = json!({ "path": path, "id": "x", "quote": "password", "note": "n", "text": "t" });
+                let err = call_tool(tool, &args).unwrap_err();
+                assert!(err.contains(want), "{tool} {path}: {err}");
+            }
+        }
+        assert!(!home.join(".glance").exists(), "a refused path must not create a store");
+
+        // A symlink to a doc, `~/`, `./` and `//` all reach the one store.
+        std::os::unix::fs::symlink(&doc, home.join("alias.md")).unwrap();
+        call_tool("add_annotation", &json!({ "path": p("alias.md"), "quote": "l2", "note": "n" })).unwrap();
+        for spelling in ["~/doc.md".to_string(), p("./doc.md"), format!("{}//doc.md", home.display()), p("doc.md")] {
+            let out = call_tool("list_annotations", &json!({ "path": spelling })).unwrap();
+            assert_eq!(tool_json(&out).as_array().unwrap().len(), 1, "{spelling}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn failed_resolve_or_reply_on_an_existing_doc_creates_nothing() {
+        let home = fresh_home("noop");
+        let doc = home.join("doc.md").to_string_lossy().into_owned();
+        std::fs::write(&doc, NINE).unwrap();
+        assert!(call_tool("resolve_annotation", &json!({ "path": doc, "id": "zzz" })).unwrap_err().contains("no annotation"));
+        assert!(call_tool("reply_annotation", &json!({ "path": doc, "id": "zzz", "text": "hi" })).unwrap_err().contains("no annotation"));
+        assert!(call_tool("get_annotation", &json!({ "path": doc, "id": "zzz" })).is_err());
+        assert!(!home.join(".glance").exists());
+    }
+
     #[test]
     fn build_views_orphaned_filter_returns_unresolvable() {
         // Quote absent from text AND line_hint out of range → resolve_anchor returns "orphaned".
@@ -694,6 +755,8 @@ mod tests {
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
+const PATH_DESC: &str = "Absolute path (or ~/...) to an existing markdown or text file.";
+
 fn tool_schemas() -> Value {
     json!([
         {
@@ -702,7 +765,7 @@ fn tool_schemas() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path to the markdown file." },
+                    "path": { "type": "string", "description": PATH_DESC },
                     "status": { "type": "string", "enum": ["open", "resolved", "orphaned", "all"], "description": "Filter (default: open)." }
                 },
                 "required": ["path"]
@@ -714,7 +777,7 @@ fn tool_schemas() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" },
+                    "path": { "type": "string", "description": PATH_DESC },
                     "id": { "type": "string" }
                 },
                 "required": ["path", "id"]
@@ -726,7 +789,7 @@ fn tool_schemas() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" },
+                    "path": { "type": "string", "description": PATH_DESC },
                     "id": { "type": "string" },
                     "note": { "type": "string", "description": "One line saying what you changed. Appended to the comment's thread as your reply." }
                 },
@@ -739,7 +802,7 @@ fn tool_schemas() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path to the markdown file." },
+                    "path": { "type": "string", "description": PATH_DESC },
                     "quote": { "type": "string", "description": "Text copied verbatim from the file. The call fails if it is not found." },
                     "note": { "type": "string", "description": "One line saying what to look at and why." },
                     "prefix": { "type": "string", "description": "Optional text immediately before the quote, to disambiguate repeated phrases." },
@@ -760,7 +823,7 @@ fn tool_schemas() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" },
+                    "path": { "type": "string", "description": PATH_DESC },
                     "id": { "type": "string" },
                     "text": { "type": "string", "description": "Your question or reason, one or two lines." }
                 },
@@ -770,8 +833,44 @@ fn tool_schemas() -> Value {
     ])
 }
 
-fn read_doc(path: &str) -> String {
-    std::fs::read_to_string(path).unwrap_or_default()
+/// Same list as `TEXT_EXTENSIONS` in commands.rs: the files the app opens.
+const DOC_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd", "mkdn", "mdx", "txt"];
+
+/// Resolve a tool's `path` to the doc's canonical path, which is also its
+/// store key. `~/` expands to $HOME. A relative path is refused: this server's
+/// cwd isn't necessarily the caller's. Only an existing regular file whose
+/// real target (symlinks followed) has a markdown or text extension is
+/// accepted, so the tools can't be used to read any other file.
+fn resolve_doc_path(raw: &str) -> Result<String, String> {
+    let expanded = match raw.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            let home = std::env::var_os("HOME").ok_or("can't expand '~': $HOME is not set")?;
+            PathBuf::from(home).join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(raw),
+    };
+    if !expanded.is_absolute() {
+        return Err(format!("'path' must be absolute (or start with ~/): {raw}"));
+    }
+    let target = std::fs::canonicalize(&expanded).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!("no such file: {raw}"),
+        _ => format!("can't open {raw}: {e}"),
+    })?;
+    if !target.is_file() {
+        return Err(format!("not a file: {raw}"));
+    }
+    let is_doc = target
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| DOC_EXTENSIONS.iter().any(|d| e.eq_ignore_ascii_case(d)));
+    if !is_doc {
+        return Err(format!("Glance only annotates markdown and text files: {raw}"));
+    }
+    Ok(target.to_string_lossy().into_owned())
+}
+
+fn read_doc(path: &str) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("can't read {path}: {e}"))
 }
 
 fn text_result(value: Value) -> Value {
@@ -779,18 +878,21 @@ fn text_result(value: Value) -> Value {
 }
 
 fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
-    let path = args.get("path").and_then(|v| v.as_str()).ok_or("missing 'path'")?;
+    let raw_path = args.get("path").and_then(|v| v.as_str()).ok_or("missing 'path'")?;
+    let path = resolve_doc_path(raw_path)?;
+    let path = path.as_str();
     match name {
         "list_annotations" => {
             let status = args.get("status").and_then(|v| v.as_str());
+            let text = read_doc(path)?;
             let store = read_store(path)?;
-            let views = build_views(&store, &read_doc(path), status);
+            let views = build_views(&store, &text, status);
             Ok(text_result(serde_json::to_value(views).unwrap()))
         }
         "get_annotation" => {
             let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing 'id'")?;
+            let text = read_doc(path)?;
             let store = read_store(path)?;
-            let text = read_doc(path);
             match store.annotations.iter().find(|a| a.id == id) {
                 Some(a) => Ok(text_result(serde_json::to_value(detail_of(a, &text)).unwrap())),
                 None => Err(format!("no annotation '{id}'")),
@@ -813,7 +915,7 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             let prefix = args.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
             let suffix = args.get("suffix").and_then(|v| v.as_str()).unwrap_or("");
             let mut a = claude_annotation(path, quote, note, prefix, suffix, line_hint_arg(args.get("lineHint")));
-            let text = read_doc(path);
+            let text = read_doc(path)?;
             let r = resolve_anchor(&text, &a);
             // A missing quote resolves to "drifted" when the line hint is in
             // range and "orphaned" otherwise; neither means the text is there.
@@ -873,12 +975,14 @@ fn handle(method: &str, params: &Value) -> Option<Result<Value, (i64, String)>> 
         }))),
         "resources/read" => {
             let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
-            let path = uri.strip_prefix("glance://annotations/").unwrap_or("");
-            let store = match read_store(path) {
-                Ok(s) => s,
+            let raw = uri.strip_prefix("glance://annotations/").unwrap_or("");
+            let views = match resolve_doc_path(raw).and_then(|path| {
+                let text = read_doc(&path)?;
+                Ok(build_views(&read_store(&path)?, &text, Some("open")))
+            }) {
+                Ok(v) => v,
                 Err(e) => return Some(Err((-32000, e))),
             };
-            let views = build_views(&store, &read_doc(path), Some("open"));
             Some(Ok(json!({
                 "contents": [ {
                     "uri": uri,
