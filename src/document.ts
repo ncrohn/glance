@@ -16,6 +16,28 @@ export interface Doc {
   // Ids Claude resolved or replied to while this doc was in a background tab;
   // pulsed and cleared when the tab is next shown.
   claudeActivity: string[];
+  // The file's line ending. The editor works in LF, so its text is put back
+  // into this form before it lands in editorContent and on disk.
+  eol: LineEnding;
+}
+
+// A lone "\r" is a line break to CodeMirror too (old Mac files), so it's
+// handled like the others; otherwise the editor and the stored text never agree.
+export type LineEnding = "\n" | "\r\n" | "\r";
+
+/** The line ending of the first line break, LF when there is none. */
+export function detectEol(text: string): LineEnding {
+  const m = /\r\n|\r|\n/.exec(text);
+  return m ? (m[0] as LineEnding) : "\n";
+}
+
+export function toLf(text: string): string {
+  return text.includes("\r") ? text.replace(/\r\n?/g, "\n") : text;
+}
+
+/** Editor text (LF) in the file's own line ending. */
+export function withEol(lfText: string, eol: LineEnding): string {
+  return eol === "\n" ? lfText : toLf(lfText).replace(/\n/g, eol);
 }
 
 export function basename(path: string): string {
@@ -36,6 +58,7 @@ export function createDoc(absPath: string, diskContent: string): Doc {
     annotations: [],
     resolutions: {},
     claudeActivity: [],
+    eol: detectEol(diskContent),
   };
 }
 

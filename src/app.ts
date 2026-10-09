@@ -5,7 +5,7 @@ import {
   setDocAnnotations, setDocResolutions, setDocActivity, clearDocActivity,
   markReviewed, setReviewedBaseline, canRevealActive, setDiskContent,
 } from "./store";
-import { isDirty, basename, changedLines, deletedBefore, hasUnreviewedChanges, type Doc } from "./document";
+import { isDirty, basename, changedLines, deletedBefore, hasUnreviewedChanges, toLf, withEol, type Doc } from "./document";
 import { parseFrontmatter } from "./frontmatter";
 import { renderMarkdown } from "./renderer";
 import { renderMermaidBlocks } from "./mermaid";
@@ -18,6 +18,7 @@ import {
   onShowAbout, onShowWhatsNew, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
   onShowInFinder, revealInFinder, setShowInFinderEnabled, onQuitRequested, quitApp,
   readReviewed, writeReviewed, openExternal, openFileExternal, localFileUrl, resolveWikilink,
+  canonicalizePath, onFileError,
 } from "./ipc";
 import { classifyLink, dirname, parseWikilink, resolveLocalPath, slugify } from "./links";
 import {
@@ -74,6 +75,8 @@ function saveSession(): void {
 
 let state: State = emptyState();
 let activeEditor: EditorHandle | null = null;
+// The doc activeEditor was mounted for.
+let editorDocId: string | null = null;
 // Source line at the top of the view when Read/Edit was toggled, so the other
 // mode opens at the same place instead of the top.
 let pendingTopLine: number | null = null;
@@ -133,7 +136,8 @@ async function loadAnnotations(absPath: string): Promise<void> {
   }
   const next = store.annotations;
   const before = state.docs.find((d) => d.absPath === absPath);
-  const prev = before && annotationsLoaded.has(absPath) ? before.annotations : next;
+  if (!before) return; // closed while the read was in flight
+  const prev = annotationsLoaded.has(absPath) ? before.annotations : next;
   annotationsLoaded.add(absPath);
   state = setDocAnnotations(state, absPath, next);
   await refreshResolutions(absPath);
@@ -517,10 +521,17 @@ function renderActions(): void {
 
 function renderContent(): void {
   const host = document.getElementById("content")!;
-  if (activeEditor) { activeEditor.destroy(); activeEditor = null; }
+  const doc = getActive(state);
+  // Same doc still in Edit mode: keep the editor (cursor, focus, undo history)
+  // and only bring its text up to date if it changed outside the editor.
+  if (doc && doc.viewMode === "source" && activeEditor && editorDocId === doc.id && host.querySelector(".cm-host")) {
+    activeEditor.setContent(toLf(doc.editorContent));
+    activeEditor.setDark(currentAppearance() === "dark");
+    return;
+  }
+  if (activeEditor) { activeEditor.destroy(); activeEditor = null; editorDocId = null; }
   host.innerHTML = "";
   if (toolbar) { toolbar.destroy(); toolbar = null; }
-  const doc = getActive(state);
   if (!doc) {
     const empty = el("div", "empty");
     const wm = el("div", "wordmark");
@@ -539,7 +550,12 @@ function renderContent(): void {
         const li = el("li");
         li.appendChild(el("span", "name", basename(p)));
         li.appendChild(el("span", "path", p));
-        li.onclick = () => { void openPath(p); };
+        li.onclick = () => {
+          void openPath(p).catch((err) => {
+            if (isNotFound(err)) { forgetRecent(p); render(); }
+            showNotice(`Couldn't open ${p}: ${err}`, false);
+          });
+        };
         ul.appendChild(li);
       }
       wrap.appendChild(ul);
@@ -572,9 +588,11 @@ function renderContent(): void {
     const cmHost = el("div", "cm-host");
     host.appendChild(cmHost);
     activeEditor = mountEditor(cmHost, doc.editorContent, (v) => {
-      state = updateEditorContent(state, doc.id, v);
+      const eol = state.docs.find((d) => d.id === doc.id)?.eol ?? doc.eol;
+      state = updateEditorContent(state, doc.id, withEol(v, eol));
       refreshTabDirty(); // toggle dirty dot in place; don't rebuild tab nodes mid-interaction
     }, currentAppearance() === "dark");
+    editorDocId = doc.id;
   } else {
     const view = el("div", "rendered");
     view.innerHTML = renderMarkdown(
@@ -843,13 +861,33 @@ async function handleDiskChange(path: string, contents: string): Promise<void> {
   }
 }
 
-export async function openPath(absPath: string): Promise<void> {
+// One spelling per file, so a symlink, `..` or different letter case finds the
+// tab that is already open instead of opening a second one.
+async function canonical(path: string): Promise<string> {
+  try { return await canonicalizePath(path); } catch { return path; }
+}
+
+const isNotFound = (err: unknown) => /os error 2\b|No such file/i.test(String(err));
+
+function forgetRecent(path: string): void {
+  localStorage.setItem(LS_RECENT, JSON.stringify(loadRecent().filter((p) => p !== path)));
+}
+
+export async function openPath(requested: string): Promise<void> {
+  const absPath = await canonical(requested);
   const already = state.docs.find((d) => d.absPath === absPath);
-  if (already) { state = setActive(state, absPath); render(); return; }
+  if (already) { state = setActive(state, already.id); render(); return; }
   const contents = await readFile(absPath);
   state = openDoc(state, absPath, contents);
+  // The tab can be closed while any of the awaits below is pending. closeTab
+  // can only release watchers that exist by then, so each step checks and
+  // releases its own.
+  const isOpen = () => state.docs.some((d) => d.absPath === absPath);
+  // The first baseline and store calls use the spelling the doc arrived with:
+  // older versions filed its data under that spelling, and the backend moves
+  // it to the resolved path when it sees it. Later calls use absPath.
   try {
-    const baseline = await readReviewed(absPath);
+    const baseline = await readReviewed(requested);
     if (baseline != null) state = setReviewedBaseline(state, absPath, baseline);
   } catch (err) {
     console.warn("readReviewed failed for", absPath, err);
@@ -859,12 +897,19 @@ export async function openPath(absPath: string): Promise<void> {
   } catch (err) {
     console.warn("watchFile failed for", absPath, err);
   }
-  const recent = pushRecent(loadRecent(), absPath);
+  if (!isOpen()) { void unwatchFile(absPath); return; }
+  const recent = pushRecent(loadRecent().filter((p) => p !== requested), absPath);
   localStorage.setItem(LS_RECENT, JSON.stringify(recent));
   try {
-    const storePath = await ensureAnnotationStore(absPath);
+    const storePath = await ensureAnnotationStore(requested);
+    if (!isOpen()) return;
     annotationStorePaths.set(absPath, storePath);
     await watchAnnotations(storePath, absPath);
+    if (!isOpen()) {
+      void unwatchFile(storePath);
+      if (annotationStorePaths.get(absPath) === storePath) annotationStorePaths.delete(absPath);
+      return;
+    }
   } catch (err) {
     console.warn("annotation store watch failed for", absPath, err);
   }
@@ -929,8 +974,14 @@ async function followWikilink(docPath: string, raw: string): Promise<void> {
   const link = parseWikilink(raw);
   if (!link) return;
   if (!link.note) { scrollToHeading(link.heading); return; }
-  const path = await resolveWikilink(docPath, link.note).catch(() => null);
-  if (!path) { showNotice(`No note named "${link.note}" was found.`, false); return; }
+  const match = await resolveWikilink(docPath, link.note).catch(() => null);
+  const path = match?.path;
+  if (!path) {
+    showNotice(match?.capped
+      ? `No note named "${link.note}" was found. The vault is too large to search in full, so it may still exist.`
+      : `No note named "${link.note}" was found.`, false);
+    return;
+  }
   if (!/\.(md|markdown)$/i.test(path)) {
     void openLinkedFile(path);
     return;
@@ -968,7 +1019,7 @@ function scrollToSourceLine(content: HTMLElement, line: number): void {
 function changeTheme(pref: ThemePref): void {
   saveThemePref(pref);
   applyTheme(pref, render);
-  render(); // remount editor so its dark flag matches the new appearance
+  render(); // so the editor's dark flag matches the new appearance
 }
 
 // Publish the content pane's inner width as --pane-w so an expanded code/table
@@ -1000,6 +1051,11 @@ export async function start(): Promise<void> {
     void openPath(absPath).catch((err) => showNotice(`Couldn't open ${absPath}: ${err}`, false));
   });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
+  await onFileError(({ path, message }) => {
+    const doc = state.docs.find((d) => d.absPath === path);
+    if (!doc) return;
+    showToast(`${doc.fileName} changed on disk but can't be read: ${message}. The tab shows the last version Glance could read.`, { ms: ERROR_TOAST_MS });
+  });
   await onShowIntegrationPicker((action) => { void openIntegrationPicker(action); });
   await onShowAbout(async () => { showAbout(await appVersion()); });
   await onShowWhatsNew(() => { void openWhatsNew(true); });
@@ -1043,7 +1099,8 @@ export async function start(): Promise<void> {
   try {
     for (const p of Array.isArray(toRestore) ? toRestore : []) {
       if (typeof p !== "string") continue;
-      try { await openPath(p); } catch { /* file gone; skip */ }
+      // A file gone since last time drops out of the session and the recent list.
+      try { await openPath(p); } catch (err) { if (isNotFound(err)) forgetRecent(p); }
     }
     // Launch files last, so the file just opened ends up as the active tab.
     for (const p of launchPaths) {

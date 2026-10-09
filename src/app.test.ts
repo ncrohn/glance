@@ -14,9 +14,17 @@ const env = {
   annotations: new Map<string, Annotation[]>(),
   storeError: null as null | string,
   calls: [] as string[],
+  aliases: new Map<string, string>(),
+  watched: [] as string[],
+  unwatched: [] as string[],
+  storeGate: null as null | Promise<void>,
 };
 
 function resetEnv(): void {
+  env.aliases = new Map();
+  env.watched = [];
+  env.unwatched = [];
+  env.storeGate = null;
   env.fs = new Map();
   env.handlers = new Map();
   env.launch = [];
@@ -46,8 +54,11 @@ vi.mock("./ipc", () => ({
     env.fs.set(p, c);
     env.writes.push([p, c]);
   },
-  watchFile: async () => {}, unwatchFile: async () => {},
+  watchFile: async (p: string) => { env.watched.push(p); },
+  unwatchFile: async (p: string) => { env.unwatched.push(p); },
   onOpenFile: on("open-file"), onFileChanged: on("file-changed"), onFileRemoved: on("file-removed"),
+  onFileError: on("file-error"),
+  canonicalizePath: async (p: string) => env.aliases.get(p) ?? p,
   takeLaunchArgs: async () => env.launch,
   readAnnotations: async (p: string) => {
     await storeOp();
@@ -56,8 +67,8 @@ vi.mock("./ipc", () => ({
   addStoredAnnotation: storeOp, removeStoredAnnotation: storeOp,
   updateStoredAnnotation: storeOp, addStoredReply: storeOp,
   resolveAnchors: async () => [],
-  ensureAnnotationStore: async (p: string) => "/store" + p,
-  watchAnnotations: async () => {}, onAnnotationsChanged: on("annotations-changed"),
+  ensureAnnotationStore: async (p: string) => { await env.storeGate; return "/store" + p; },
+  watchAnnotations: async (s: string) => { env.watched.push(s); }, onAnnotationsChanged: on("annotations-changed"),
   onShowIntegrationPicker: on("x1"), listIntegrationTargets: async () => [], runIntegration: async () => [],
   onShowAbout: on("x2"), onShowWhatsNew: on("x3"), onShowTheme: on("x4"),
   onCloseActiveTab: on("close-active-tab"), onMenuSave: on("menu-save"), onSelectAll: on("x5"),
@@ -417,5 +428,132 @@ describe("damaged annotation store", () => {
     await flush();
     expect(document.querySelectorAll("#rail .note-card")).toHaveLength(1);
     expect(toastText()).toContain("Couldn't save the comment change on a.md");
+  });
+});
+
+describe("the editor survives re-renders", () => {
+  const fifty = Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n") + "\n";
+
+  it("Cmd+S and a comment change keep the same editor, cursor and undo history", async () => {
+    env.fs.set("/a.md", fifty);
+    env.launch = ["/a.md"];
+    await boot();
+    const { undoDepth } = await import("@codemirror/commands");
+    const v1 = await editorView();
+    v1.dispatch({ changes: { from: 200, insert: "TYPED" }, selection: { anchor: 205 } });
+    const depth = undoDepth(v1.state);
+    await emit("menu-save");
+    expect(env.fs.get("/a.md")).toContain("TYPED");
+    await emit("annotations-changed", "/a.md");
+    const v2 = await editorView();
+    expect(v2).toBe(v1);
+    expect(v2.state.selection.main.head).toBe(205);
+    expect(undoDepth(v2.state)).toBe(depth);
+  });
+
+  it("an outside change to a clean doc updates the text in place and keeps the cursor", async () => {
+    env.fs.set("/a.md", fifty);
+    env.launch = ["/a.md"];
+    await boot();
+    const v1 = await editorView();
+    v1.dispatch({ selection: { anchor: 300 } });
+    await diskChange("/a.md", "NEW TOP\n" + fifty);
+    const v2 = await editorView();
+    expect(v2).toBe(v1);
+    expect(v2.state.doc.toString()).toBe("NEW TOP\n" + fifty);
+    expect(v2.state.selection.main.head).toBe(308);
+    expect(isDirtyTab("/a.md")).toBe(false);
+  });
+
+  it("undo doesn't revert an outside change", async () => {
+    env.fs.set("/a.md", fifty);
+    env.launch = ["/a.md"];
+    await boot();
+    const { undo } = await import("@codemirror/commands");
+    const v = await editorView();
+    v.dispatch({ changes: { from: 0, insert: "MINE " }, userEvent: "input.type" });
+    await emit("menu-save");
+    await diskChange("/a.md", "AGENT\n" + env.fs.get("/a.md"));
+    undo(v);
+    expect(v.state.doc.toString()).toContain("AGENT\n");
+    expect(v.state.doc.toString()).not.toContain("MINE ");
+  });
+});
+
+describe("old-Mac CR files", () => {
+  it("an edit keeps lone-CR line endings and a re-render changes nothing", async () => {
+    env.fs.set("/m.md", "line1\rline2\r");
+    env.launch = ["/m.md"];
+    await boot();
+    const v = await editorView();
+    await emit("annotations-changed", "/m.md");
+    expect(isDirtyTab("/m.md")).toBe(false);
+    v.dispatch({ changes: { from: 0, insert: "X" } });
+    await emit("menu-save");
+    expect(env.fs.get("/m.md")).toBe("Xline1\rline2\r");
+  });
+});
+
+describe("CRLF files", () => {
+  it("an edit keeps the file's CRLF line endings on save", async () => {
+    env.fs.set("/w.md", "line1\r\nline2\r\nline3\r\n");
+    env.launch = ["/w.md"];
+    await boot();
+    await type("X");
+    await emit("menu-save");
+    expect(env.fs.get("/w.md")).toBe("Xline1\r\nline2\r\nline3\r\n");
+  });
+
+  it("typing then undoing leaves the tab clean", async () => {
+    env.fs.set("/w.md", "line1\r\nline2\r\n");
+    env.launch = ["/w.md"];
+    await boot();
+    const { undo } = await import("@codemirror/commands");
+    await type("X");
+    expect(isDirtyTab("/w.md")).toBe(true);
+    undo(await editorView());
+    expect(isDirtyTab("/w.md")).toBe(false);
+  });
+});
+
+describe("opening files", () => {
+  it("another spelling of an open file focuses its tab instead of opening a second", async () => {
+    env.fs.set("/real/a.md", "a\n"); env.fs.set("/b.md", "b\n");
+    env.aliases.set("/link/a.md", "/real/a.md");
+    env.launch = ["/real/a.md", "/b.md"];
+    await boot();
+    await emit("open-file", "/link/a.md");
+    expect(tabs()).toEqual(["/real/a.md", "/b.md"]);
+    expect(activeTab()).toBe("/real/a.md");
+  });
+
+  it("closing a tab while it is still opening releases every watcher it set up", async () => {
+    env.fs.set("/a.md", "a\n");
+    await boot();
+    const g = gate();
+    env.storeGate = g.promise;
+    await emit("open-file", "/a.md");
+    await emit("close-active-tab");
+    g.release();
+    await flush();
+    expect(tabs()).toEqual([]);
+    for (const w of env.watched) expect(env.unwatched).toContain(w);
+  });
+
+  it("a recent file that no longer exists says so and leaves the list", async () => {
+    localStorage.setItem("glance.recent", JSON.stringify(["/gone.md", "/kept.md"]));
+    await boot();
+    document.querySelector<HTMLElement>("#content .recent li")!.click();
+    await flush();
+    expect(modalText()).toContain("Couldn't open /gone.md");
+    expect(JSON.parse(localStorage.getItem("glance.recent")!)).toEqual(["/kept.md"]);
+  });
+
+  it("a watched file that stops being readable text says so", async () => {
+    env.fs.set("/a.md", "a\n");
+    env.launch = ["/a.md"];
+    await boot();
+    await emit("file-error", { path: "/a.md", message: "not valid UTF-8" });
+    expect(toastText()).toContain("a.md changed on disk but can't be read");
   });
 });

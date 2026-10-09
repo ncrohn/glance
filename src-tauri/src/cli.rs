@@ -1,9 +1,25 @@
 use std::path::{Path, PathBuf};
 
+/// An absolute spelling of `path`, cleaned up lexically but not resolved. The
+/// frontend resolves it (see [`canonical`]) when it opens the doc; keeping the
+/// caller's spelling until then lets the annotation store find comments filed
+/// under it by older versions and move them to the resolved path.
 pub fn to_abs(path: &str, cwd: &Path) -> String {
     let p = Path::new(path);
     let joined = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
     normalize(&joined)
+}
+
+/// One spelling per file, so a symlink, `/tmp` vs `/private/tmp`, `x/../` or
+/// different letter case can't open the same document twice. A file that
+/// exists is resolved by the filesystem (which also follows a symlinked
+/// directory before any `..` after it); one that doesn't is cleaned up
+/// lexically. The annotation store keys documents the same way.
+pub fn canonical(path: &Path) -> String {
+    match std::fs::canonicalize(path) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(_) => normalize(path),
+    }
 }
 
 fn normalize(p: &Path) -> String {
@@ -30,12 +46,30 @@ fn normalize(p: &Path) -> String {
     pb.to_string_lossy().to_string()
 }
 
-pub fn md_paths_from_argv(argv: &[String]) -> Vec<String> {
-    argv.iter()
-        .skip(1)
-        .filter(|a| !a.starts_with('-'))
-        .cloned()
-        .collect()
+/// The document paths in a launch's argv (relative ones resolve against
+/// `cwd`). A leading `-` marks a flag unless the argument names an existing
+/// file or comes after `--`. Empty arguments and directories are dropped.
+pub fn md_paths_from_argv(argv: &[String], cwd: &Path) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut only_paths = false;
+    for arg in argv.iter().skip(1) {
+        if arg == "--" && !only_paths {
+            only_paths = true;
+            continue;
+        }
+        if arg.is_empty() {
+            continue;
+        }
+        let meta = std::fs::metadata(cwd.join(arg)).ok();
+        if meta.as_ref().is_some_and(|m| m.is_dir()) {
+            continue;
+        }
+        if arg.starts_with('-') && !only_paths && !meta.is_some_and(|m| m.is_file()) {
+            continue;
+        }
+        paths.push(arg.clone());
+    }
+    paths
 }
 
 #[cfg(test)]
@@ -72,6 +106,54 @@ mod tests {
             "/a.md".to_string(),
             "b.md".to_string(),
         ];
-        assert_eq!(md_paths_from_argv(&argv), vec!["/a.md", "b.md"]);
+        assert_eq!(md_paths_from_argv(&argv, Path::new("/nonexistent")), vec!["/a.md", "b.md"]);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("glance-cli-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::canonicalize(&dir).unwrap()
+    }
+
+    #[test]
+    fn argv_honors_double_dash_and_dash_named_files() {
+        let dir = scratch("argv");
+        std::fs::write(dir.join("-notes.md"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("some-dir")).unwrap();
+        let argv: Vec<String> = [
+            "glance", "-psn_0_12345", "-notes.md", "", "some-dir", "a.md", "--", "--weird.md", "--", "",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(md_paths_from_argv(&argv, &dir), vec!["-notes.md", "a.md", "--weird.md", "--"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn existing_files_resolve_to_one_spelling() {
+        use std::os::unix::fs::symlink;
+        let dir = scratch("canon");
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::fs::write(dir.join("real/Notes.md"), "x").unwrap();
+        symlink(dir.join("real"), dir.join("link")).unwrap();
+        let want = dir.join("real/Notes.md").to_string_lossy().into_owned();
+        assert_eq!(canonical(&dir.join("link/Notes.md")), want);
+        assert_eq!(canonical(&dir.join("./real/../link/Notes.md")), want);
+        // APFS and HFS+ are case-insensitive by default; realpath returns the
+        // on-disk case there.
+        if dir.join("real/notes.md").exists() {
+            assert_eq!(canonical(&dir.join("real/notes.md")), want);
+        }
+        // A file that doesn't exist yet still gets a clean absolute path.
+        assert_eq!(
+            canonical(&dir.join("real/./new.md")),
+            dir.join("real/new.md").to_string_lossy().into_owned()
+        );
+        // to_abs keeps the caller's spelling (only cleaned up) for the store's
+        // migration; the frontend resolves it when opening.
+        assert_eq!(to_abs("link/Notes.md", &dir), dir.join("link/Notes.md").to_string_lossy());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

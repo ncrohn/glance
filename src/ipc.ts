@@ -29,9 +29,18 @@ export function localFileUrl(path: string): string {
   return convertFileSrc(path);
 }
 
-// Find the file an Obsidian-style [[note]] points at, or null if none exists.
-export function resolveWikilink(docPath: string, target: string): Promise<string | null> {
-  return invoke<string | null>("resolve_wikilink", { docPath, target });
+// Find the file an Obsidian-style [[note]] points at. `path` is null when none
+// was found; `capped` says the vault search stopped at its entry limit, so the
+// note may exist further in.
+export interface WikilinkMatch { path: string | null; capped: boolean }
+export function resolveWikilink(docPath: string, target: string): Promise<WikilinkMatch> {
+  return invoke<WikilinkMatch>("resolve_wikilink", { docPath, target });
+}
+
+// One spelling per file: symlinks, `..` and letter case resolved when the file
+// exists, a lexical cleanup otherwise. Tabs and comment stores key on this.
+export function canonicalizePath(path: string): Promise<string> {
+  return invoke<string>("canonicalize_path", { path });
 }
 
 // Grey out / re-enable File → Show in Finder. Only the frontend knows whether
@@ -73,6 +82,11 @@ export function onFileChanged(
 
 export function onFileRemoved(cb: (path: string) => void): Promise<UnlistenFn> {
   return listen<string>("file-removed", (e) => cb(e.payload));
+}
+
+// A watched file that can no longer be read as text (not UTF-8, permissions).
+export function onFileError(cb: (e: { path: string; message: string }) => void): Promise<UnlistenFn> {
+  return listen<{ path: string; message: string }>("file-error", (e) => cb(e.payload));
 }
 
 export function takeLaunchArgs(): Promise<string[]> {

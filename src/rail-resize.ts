@@ -29,11 +29,15 @@ export function mountRailResizer(
   onCommit: (w: number) => void,
 ): () => void {
   let dragging = false;
+  // A press that never moves is a click, not a resize: committing then would
+  // save whatever `width` held (the default on first use) over the real width.
+  let moved = false;
   let width = RAIL_DEFAULT;
 
   const onDown = (e: PointerEvent) => {
     if (e.button !== 0) return;
     dragging = true;
+    moved = false;
     grip.setPointerCapture(e.pointerId);
     document.body.classList.add("rail-resizing");
     e.preventDefault();
@@ -43,6 +47,7 @@ export function mountRailResizer(
     // The rail sits on the right edge; its width is the distance from the
     // pointer to its right edge.
     width = clampRailWidth(rail.getBoundingClientRect().right - e.clientX);
+    moved = true;
     applyRailWidth(width);
   };
   const onUp = (e: PointerEvent) => {
@@ -50,7 +55,7 @@ export function mountRailResizer(
     dragging = false;
     grip.releasePointerCapture(e.pointerId);
     document.body.classList.remove("rail-resizing");
-    onCommit(width);
+    if (moved) onCommit(width);
   };
   const onReset = () => {
     width = RAIL_DEFAULT;

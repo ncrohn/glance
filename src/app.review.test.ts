@@ -48,6 +48,7 @@ vi.mock("./ipc", () => ({
   },
   watchFile: async () => {}, unwatchFile: async () => {},
   onOpenFile: on("open-file"), onFileChanged: on("file-changed"), onFileRemoved: on("file-removed"),
+  onFileError: on("file-error"), canonicalizePath: async (p: string) => p,
   takeLaunchArgs: async () => env.launch,
   readAnnotations: async (p: string) => {
     await storeOp();
