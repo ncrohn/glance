@@ -23,6 +23,14 @@ struct LaunchArgs(std::sync::Mutex<Vec<String>>);
 #[derive(Default)]
 struct FrontendReady(AtomicBool);
 
+/// A reload (including the one after a WebContent crash) replaces the page and
+/// its listeners, so files must buffer again until the new page drains them.
+fn reset_on_page_load(ready: &FrontendReady, event: tauri::webview::PageLoadEvent) {
+    if event == tauri::webview::PageLoadEvent::Started {
+        ready.0.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Handle to File → Show in Finder, so the frontend can grey it out when there's
 /// no revealable document (HIG: disable, don't silently no-op). Only the
 /// frontend knows which tab is active, hence the round trip.
@@ -218,7 +226,7 @@ pub fn run() {
             // In a cold burst these arrive before the frontend's listener
             // exists, so they go through the same buffer as Finder opens.
             let cwd_path = Path::new(&cwd);
-            let paths = cli::md_paths_from_argv(&argv)
+            let paths = cli::md_paths_from_argv(&argv, cwd_path)
                 .iter()
                 .map(|raw| cli::to_abs(raw, cwd_path))
                 .collect();
@@ -235,6 +243,9 @@ pub fn run() {
         .manage(FrontendReady::default())
         .manage(QuitApproved::default())
         .manage(QuitRequests::default())
+        .on_page_load(|webview, payload| {
+            reset_on_page_load(&webview.app_handle().state::<FrontendReady>(), payload.event());
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
@@ -248,6 +259,7 @@ pub fn run() {
             commands::read_file,
             commands::write_file,
             commands::resolve_open_target,
+            commands::canonicalize_path,
             watcher::watch_file,
             watcher::unwatch_file,
             watcher::watch_annotations,
@@ -488,7 +500,7 @@ pub fn run() {
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
             let launch_args = app.state::<LaunchArgs>();
             let mut stored = launch_args.0.lock().unwrap_or_else(|e| e.into_inner());
-            for raw in cli::md_paths_from_argv(&argv) {
+            for raw in cli::md_paths_from_argv(&argv, &cwd) {
                 stored.push(cli::to_abs(&raw, &cwd));
             }
             Ok(())
@@ -506,7 +518,7 @@ pub fn run() {
             let paths: Vec<String> = urls
                 .iter()
                 .filter_map(|u| u.to_file_path().ok())
-                .map(|p| p.to_string_lossy().to_string())
+                .map(|p| cli::canonical(&p))
                 .collect();
             deliver_open_files(app, paths);
         }
@@ -522,5 +534,15 @@ mod tests {
         assert_eq!(quit_step(false, false), QuitStep::Proceed);
         assert_eq!(quit_step(true, false), QuitStep::AskFrontend);
         assert_eq!(quit_step(true, true), QuitStep::Proceed);
+    }
+
+    #[test]
+    fn a_page_load_makes_open_files_buffer_again() {
+        use tauri::webview::PageLoadEvent;
+        let ready = FrontendReady(AtomicBool::new(true));
+        reset_on_page_load(&ready, PageLoadEvent::Finished);
+        assert!(ready.0.load(Ordering::SeqCst));
+        reset_on_page_load(&ready, PageLoadEvent::Started);
+        assert!(!ready.0.load(Ordering::SeqCst));
     }
 }

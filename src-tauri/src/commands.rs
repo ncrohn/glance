@@ -37,7 +37,70 @@ pub fn read_file(path: String) -> Result<String, String> {
 #[tauri::command]
 pub fn write_file(path: String, contents: String) -> Result<(), String> {
     ensure_text_document(&path)?;
-    fs::write(&path, contents).map_err(|e| e.to_string())
+    write_atomic(Path::new(&path), contents.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// The path the frontend keys tabs on: see `cli::canonical`.
+#[tauri::command]
+pub fn canonicalize_path(path: String) -> String {
+    crate::cli::canonical(Path::new(&path))
+}
+
+/// Replace a file's contents so a crash or a full disk leaves either the old
+/// text or the new, never a truncated file: write a temp file beside the
+/// target, fsync it, then rename it over. A symlink is followed first so the
+/// link itself survives. The new inode takes the old file's permissions, but
+/// a hard link to the old file keeps the old text, and owner and extended
+/// attributes come from the writer, as with any editor's safe save.
+fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let existing = fs::metadata(&target).ok();
+    // A rename would replace a read-only file the in-place write was refused.
+    if existing.as_ref().is_some_and(|m| m.permissions().readonly()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} is read-only", target.display()),
+        ));
+    }
+    let name = target
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file path"))?;
+    let dir = target.parent().unwrap_or(Path::new("/"));
+    let tmp = dir.join(format!(
+        ".{}.{}-{}.glance-tmp",
+        name.to_string_lossy(),
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        if existing.is_some() {
+            // Private until it has the target's permissions.
+            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+        }
+        let mut file = opts.open(&tmp)?;
+        file.write_all(contents)?;
+        if let Some(meta) = &existing {
+            file.set_permissions(meta.permissions())?;
+        }
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, &target)?;
+        if let Ok(d) = fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 // Documents and media whose default macOS app only displays them. Anything
@@ -115,6 +178,65 @@ mod tests {
         symlink(&target, &link).unwrap();
         assert!(write_file(link.to_string_lossy().into(), "pwned".into()).is_err());
         assert!(!target.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_replaces_the_file_whole_and_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("atomic");
+        let doc = dir.join("doc.md");
+        fs::write(&doc, "old").unwrap();
+        fs::set_permissions(&doc, fs::Permissions::from_mode(0o640)).unwrap();
+        write_file(doc.to_string_lossy().into(), "new text".into()).unwrap();
+        assert_eq!(fs::read_to_string(&doc).unwrap(), "new text");
+        assert_eq!(fs::metadata(&doc).unwrap().permissions().mode() & 0o777, 0o640);
+        // No temp file is left behind.
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        // A new file can still be created.
+        write_file(dir.join("new.md").to_string_lossy().into(), "x".into()).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("new.md")).unwrap(), "x");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_through_a_symlink_keeps_the_link() {
+        let dir = scratch("atomic-link");
+        let target = dir.join("real.md");
+        let link = dir.join("link.md");
+        fs::write(&target, "old").unwrap();
+        symlink(&target, &link).unwrap();
+        write_file(link.to_string_lossy().into(), "new".into()).unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_refuses_a_read_only_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("atomic-ro");
+        let doc = dir.join("doc.md");
+        fs::write(&doc, "old").unwrap();
+        fs::set_permissions(&doc, fs::Permissions::from_mode(0o444)).unwrap();
+        assert!(write_file(doc.to_string_lossy().into(), "new".into()).is_err());
+        assert_eq!(fs::read_to_string(&doc).unwrap(), "old");
+        fs::set_permissions(&doc, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_old_file_and_no_temp() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("atomic-fail");
+        let doc = dir.join("doc.md");
+        fs::write(&doc, "old").unwrap();
+        // A read-only directory refuses the temp file.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(write_file(doc.to_string_lossy().into(), "new".into()).is_err());
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(fs::read_to_string(&doc).unwrap(), "old");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
         fs::remove_dir_all(&dir).unwrap();
     }
 
