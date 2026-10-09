@@ -17,13 +17,14 @@ import {
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
   onShowAbout, onShowWhatsNew, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
   onShowInFinder, revealInFinder, setShowInFinderEnabled,
-  readReviewed, writeReviewed, openExternal, openFileExternal, resolveOpenTarget, localFileUrl, resolveWikilink,
+  readReviewed, writeReviewed, openExternal, openFileExternal, localFileUrl, resolveWikilink,
 } from "./ipc";
 import { classifyLink, dirname, parseWikilink, resolveLocalPath, slugify } from "./links";
 import {
   addAnnotation, removeAnnotation, patchAnnotation, appendReply, genId, type Annotation, type AnnotationPatch,
 } from "./annotations";
 import { captureSelection } from "./anchor-capture";
+import { resolveOpenTarget } from "./ipc";
 import { showCommentComposer } from "./composer";
 import { showToast } from "./toast";
 import { applyRailWidth, mountRailResizer, parseRailWidth } from "./rail-resize";
