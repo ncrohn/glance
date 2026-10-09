@@ -4,7 +4,7 @@
 
 use glance_lib::anchor::{resolve_anchor, Annotation, LineHint, Reply};
 use glance_lib::annotations::{
-    apply_reply, mutate_store, now_iso8601, push_annotation, read_store, store_dir, unique_id, AnnotationStore,
+    adopt_alias_store, apply_reply, mutate_store, now_iso8601, push_annotation, read_store, store_dir, unique_id, AnnotationStore,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -889,6 +889,35 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn tools_migrate_stores_filed_under_the_callers_old_spelling() {
+        let home = fresh_home("migrate");
+        std::fs::create_dir_all(home.join("real")).unwrap();
+        std::fs::write(home.join("real/Plan.md"), NINE).unwrap();
+        std::os::unix::fs::symlink(home.join("real"), home.join("link")).unwrap();
+        let dir = store_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let legacy = |raw: &str, id: &str| {
+            let p = dir.join(format!("{}.json", glance_lib::annotations::sha1_hex(raw)));
+            let a = json!({ "id": id, "quote": "l4", "prefix": "", "suffix": "", "lineHint": { "start": 4, "end": 4 },
+                "note": "old", "status": "open", "author": "user", "createdAt": "t", "number": 1 });
+            std::fs::write(&p, json!({ "docPath": raw, "annotations": [a] }).to_string()).unwrap();
+            p
+        };
+        // The app's (or an old glance-mcp's) raw spelling, and a literal `~/` key.
+        let via_link = home.join("link/Plan.md").to_string_lossy().into_owned();
+        let old_link = legacy(&via_link, "fromlink");
+        let old_tilde = legacy("~/link/Plan.md", "fromtilde");
+        let out = call_tool("list_annotations", &json!({ "path": via_link })).unwrap();
+        assert_eq!(tool_json(&out).as_array().unwrap().len(), 1);
+        assert!(!old_link.exists());
+        let out = call_tool("list_annotations", &json!({ "path": "~/link/Plan.md" })).unwrap();
+        let ids: Vec<Value> = tool_json(&out).as_array().unwrap().iter().map(|v| v["id"].clone()).collect();
+        assert_eq!(ids, vec![json!("fromlink"), json!("fromtilde")]);
+        assert!(!old_tilde.exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn failed_resolve_or_reply_on_an_existing_doc_creates_nothing() {
         let home = fresh_home("noop");
         let doc = home.join("doc.md").to_string_lossy().into_owned();
@@ -1097,12 +1126,30 @@ fn tool_schemas() -> Value {
 /// Same list as `TEXT_EXTENSIONS` in commands.rs: the files the app opens.
 const DOC_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd", "mkdn", "mdx", "txt"];
 
-/// Resolve a tool's `path` to the doc's canonical path, which is also its
-/// store key. `~/` expands to $HOME. A relative path is refused: this server's
-/// cwd isn't necessarily the caller's. Only an existing regular file whose
-/// real target (symlinks followed) has a markdown or text extension is
-/// accepted, so the tools can't be used to read any other file.
-fn resolve_doc_path(raw: &str) -> Result<String, String> {
+/// A validated tool path: `canonical` is the file to read; `spelled` is the
+/// caller's absolute spelling, which the store layer normalizes to the same
+/// key while still finding a store an older version filed under it.
+struct DocPath {
+    canonical: String,
+    spelled: String,
+}
+
+/// Validate a tool's `path` (see `canonical_doc_path`) and fold in any store an
+/// older glance-mcp filed under the literal `~/…` spelling.
+fn doc_path_arg(raw: &str) -> Result<DocPath, String> {
+    let (canonical, spelled) = canonical_doc_path(raw)?;
+    if raw.starts_with('~') {
+        adopt_alias_store(raw, &spelled)?;
+    }
+    Ok(DocPath { canonical, spelled })
+}
+
+/// Resolve a tool's `path` to the doc's canonical path and its `~`-expanded
+/// spelling. A relative path is refused: this server's cwd isn't necessarily
+/// the caller's. Only an existing regular file whose real target (symlinks
+/// followed) has a markdown or text extension is accepted, so the tools can't
+/// be used to read any other file.
+fn canonical_doc_path(raw: &str) -> Result<(String, String), String> {
     let expanded = match raw.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => {
             let home = std::env::var_os("HOME").ok_or("can't expand '~': $HOME is not set")?;
@@ -1127,7 +1174,7 @@ fn resolve_doc_path(raw: &str) -> Result<String, String> {
     if !is_doc {
         return Err(format!("Glance only annotates markdown and text files: {raw}"));
     }
-    Ok(target.to_string_lossy().into_owned())
+    Ok((target.to_string_lossy().into_owned(), expanded.to_string_lossy().into_owned()))
 }
 
 fn read_doc(path: &str) -> Result<String, String> {
@@ -1164,8 +1211,8 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
     if !args.is_object() {
         return Err("'arguments' must be an object".to_string());
     }
-    let path = resolve_doc_path(required_str(args, "path", false)?)?;
-    let path = path.as_str();
+    let doc = doc_path_arg(required_str(args, "path", false)?)?;
+    let (path, store_path) = (doc.canonical.as_str(), doc.spelled.as_str());
     match name {
         "list_annotations" => {
             let status = str_arg(args, "status")?.unwrap_or("open");
@@ -1173,14 +1220,14 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
                 return Err(format!("'status' must be one of {}; got '{status}'", STATUS_FILTERS.join(", ")));
             }
             let text = read_doc(path)?;
-            let store = read_store(path)?;
+            let store = read_store(store_path)?;
             let views = build_views(&store, &text, Some(status));
             Ok(text_result(serde_json::to_value(views).unwrap()))
         }
         "get_annotation" => {
             let id = required_str(args, "id", false)?;
             let text = read_doc(path)?;
-            let store = read_store(path)?;
+            let store = read_store(store_path)?;
             match store.annotations.iter().find(|a| a.id == id) {
                 Some(a) => Ok(text_result(serde_json::to_value(detail_of(a, &text)).unwrap())),
                 None => Err(format!("no annotation '{id}'")),
@@ -1191,7 +1238,7 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             let note = str_arg(args, "note")?;
             // Read-modify-write under the shared cross-process lock so a
             // concurrent add/remove from the GUI isn't clobbered.
-            match mutate_store(path, |store| apply_resolve(store, id, note))? {
+            match mutate_store(store_path, |store| apply_resolve(store, id, note))? {
                 ResolveOutcome::Resolved => Ok(text_result(json!({ "ok": true, "id": id }))),
                 ResolveOutcome::AlreadyResolved { by, at } => {
                     let who = by.as_deref().unwrap_or("someone");
@@ -1227,7 +1274,7 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
                     a.line_hint = LineHint { start: s, end: e };
                 }
             }
-            let stored = mutate_store(path, |store| {
+            let stored = mutate_store(store_path, |store| {
                 let mut a = a.clone();
                 while store.annotations.iter().any(|b| b.id == a.id) {
                     a.id = unique_id(&a.id);
@@ -1240,7 +1287,7 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
         "reply_annotation" => {
             let id = required_str(args, "id", false)?;
             let text = required_str(args, "text", true)?;
-            if mutate_store(path, |store| apply_claude_reply(store, id, text))? {
+            if mutate_store(store_path, |store| apply_claude_reply(store, id, text))? {
                 Ok(text_result(json!({ "ok": true, "id": id })))
             } else {
                 Err(format!("no annotation '{id}'"))
@@ -1322,9 +1369,9 @@ fn handle(method: &str, params: &Value) -> Option<Result<Value, (i64, String)>> 
                 Ok(r) => r,
                 Err(e) => return Some(Err((-32602, format!("{e}: {uri}")))),
             };
-            let views = match resolve_doc_path(&raw).and_then(|path| {
-                let text = read_doc(&path)?;
-                Ok(build_views(&read_store(&path)?, &text, Some("open")))
+            let views = match doc_path_arg(&raw).and_then(|doc| {
+                let text = read_doc(&doc.canonical)?;
+                Ok(build_views(&read_store(&doc.spelled)?, &text, Some("open")))
             }) {
                 Ok(v) => v,
                 Err(e) => return Some(Err((-32000, e))),

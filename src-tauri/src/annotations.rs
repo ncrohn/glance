@@ -94,8 +94,24 @@ fn has_legacy_store(dir: &Path, doc_path: &str, key: &str) -> bool {
 /// taken. The legacy file is removed only after the merged store is written,
 /// and a damaged legacy store is an error that leaves both files alone.
 fn migrate_legacy(dir: &Path, doc_path: &str, key: &str) -> Result<(), String> {
+    migrate_from(dir, key, legacy_keys(doc_path, key))
+}
+
+/// Fold a store filed under `alias`, a spelling that can't be derived from
+/// `doc_path` (glance-mcp once keyed `~/notes.md` literally), into the doc's
+/// store, the same way an upgrade migrates a legacy key.
+pub fn adopt_alias_store(alias: &str, doc_path: &str) -> Result<(), String> {
+    let Some(dir) = store_dir() else { return Ok(()) };
+    let key = doc_key(doc_path);
+    if alias == key || !store_file(&dir, alias).exists() {
+        return Ok(());
+    }
+    with_store_lock(&store_file(&dir, &key), || migrate_from(&dir, &key, vec![alias.to_string()]))
+}
+
+fn migrate_from(dir: &Path, key: &str, legacy_keys: Vec<String>) -> Result<(), String> {
     let path = store_file(dir, key);
-    for legacy in legacy_keys(doc_path, key) {
+    for legacy in legacy_keys {
         let old = store_file(dir, &legacy);
         if !old.exists() {
             continue;
@@ -1103,6 +1119,20 @@ mod tests {
         assert_eq!(ensure_annotation_store(dotted).unwrap(), expected);
         assert!(!old.exists());
         assert_eq!(read_store(&canonical).unwrap().annotations.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn adopt_alias_store_folds_in_a_literal_tilde_key() {
+        let home = fresh_home("alias");
+        let (_, canonical) = linked_doc(&home);
+        add_annotation(canonical.clone(), ann("a")).unwrap();
+        let old = write_legacy("~/real/Plan.md", &legacy_json("~/real/Plan.md", &[("t", 1)]));
+        adopt_alias_store("~/real/Plan.md", &canonical).unwrap();
+        assert!(!old.exists());
+        assert_eq!(numbered(&read_store(&canonical).unwrap()), pairs(&[("a", 1), ("t", 2)]));
+        adopt_alias_store("~/real/Plan.md", &canonical).unwrap(); // nothing left to adopt
+        assert_eq!(read_store(&canonical).unwrap().annotations.len(), 2);
     }
 
     #[test]
