@@ -189,6 +189,15 @@ export function onShowInFinder(cb: () => void): Promise<UnlistenFn> {
   return listen("show-in-finder", () => cb());
 }
 
+// Cmd+Q and the window's close button ask here first, so unsaved edits can be
+// dealt with; `quitApp` then does the actual exit.
+export function onQuitRequested(cb: () => void): Promise<UnlistenFn> {
+  return listen("quit-requested", () => cb());
+}
+export function quitApp(): Promise<void> {
+  return invoke<void>("quit_app");
+}
+
 export function readReviewed(path: string): Promise<string | null> {
   return invoke<string | null>("read_reviewed", { path });
 }

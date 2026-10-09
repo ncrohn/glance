@@ -189,6 +189,107 @@ describe("session restore", () => {
   });
 });
 
+describe("unsaved edits on close and quit", () => {
+  async function bootWithEdit() {
+    env.fs.set("/a.md", "hello\n");
+    env.launch = ["/a.md"];
+    await boot();
+    await type("UNSAVED ");
+    expect(isDirtyTab("/a.md")).toBe(true);
+  }
+
+  it("Cmd+W on a dirty tab asks first; Cancel keeps the tab and the edits", async () => {
+    await bootWithEdit();
+    await emit("close-active-tab");
+    expect(modalText()).toContain("Save changes to a.md?");
+    await emit("close-active-tab"); // a repeat doesn't stack a second prompt
+    expect(modalCount()).toBe(1);
+    await click("Cancel");
+    expect(tabs()).toEqual(["/a.md"]);
+    expect(await editorText()).toBe("UNSAVED hello\n");
+    expect(env.writes).toEqual([]);
+  });
+
+  it("Save writes the edits, then closes the tab", async () => {
+    await bootWithEdit();
+    await emit("close-active-tab");
+    await click("Save");
+    expect(env.fs.get("/a.md")).toBe("UNSAVED hello\n");
+    expect(tabs()).toEqual([]);
+  });
+
+  it("Don't Save closes without writing", async () => {
+    await bootWithEdit();
+    document.querySelector<HTMLElement>('#tabs .tab[data-id="/a.md"] .close')!.click();
+    await flush();
+    await click("Don't Save");
+    expect(tabs()).toEqual([]);
+    expect(env.writes).toEqual([]);
+  });
+
+  it("a clean tab closes with no prompt", async () => {
+    env.fs.set("/a.md", "hello\n");
+    env.launch = ["/a.md"];
+    await boot();
+    await emit("close-active-tab");
+    expect(modalCount()).toBe(0);
+    expect(tabs()).toEqual([]);
+  });
+
+  it("quit with nothing dirty quits straight away", async () => {
+    env.fs.set("/a.md", "hello\n");
+    env.launch = ["/a.md"];
+    await boot();
+    await emit("quit-requested");
+    expect(modalCount()).toBe(0);
+    expect(env.calls).toEqual(["quit"]);
+  });
+
+  it("quit with a dirty doc: Cancel stays, Don't Save quits without writing", async () => {
+    await bootWithEdit();
+    await emit("quit-requested");
+    expect(modalText()).toContain("Save changes to a.md?");
+    await click("Cancel");
+    expect(env.calls).toEqual([]);
+    await emit("quit-requested");
+    await click("Don't Save");
+    expect(env.writes).toEqual([]);
+    expect(env.calls).toEqual(["quit"]);
+  });
+
+  it("quit walks every dirty doc and stops at the first Cancel", async () => {
+    env.fs.set("/a.md", "a\n"); env.fs.set("/b.md", "b\n"); env.fs.set("/c.md", "c\n");
+    env.launch = ["/a.md", "/b.md", "/c.md"];
+    await boot();
+    await selectTab("/a.md");
+    await type("A ");
+    await selectTab("/b.md");
+    await type("B ");
+    await selectTab("/c.md");
+    await emit("quit-requested");
+    expect(modalText()).toContain("a.md");
+    expect(activeTab()).toBe("/a.md");
+    await click("Save");
+    expect(env.fs.get("/a.md")).toBe("A a\n");
+    expect(modalText()).toContain("b.md");
+    expect(activeTab()).toBe("/b.md");
+    await click("Cancel");
+    expect(env.calls).toEqual([]);
+    expect(env.fs.get("/b.md")).toBe("b\n");
+    expect(tabs()).toEqual(["/a.md", "/b.md", "/c.md"]);
+  });
+
+  it("quit doesn't go ahead when the save fails", async () => {
+    await bootWithEdit();
+    env.writeGate = Promise.reject(new Error("disk full"));
+    env.writeGate.catch(() => {});
+    await emit("quit-requested");
+    await click("Save");
+    expect(env.calls).toEqual([]);
+    expect(modalText()).toContain("disk full");
+  });
+});
+
 describe("saving while the file changes on disk", () => {
   it("typing during a save is not reverted by the save's own echo", async () => {
     env.fs.set("/a.md", "base\n");

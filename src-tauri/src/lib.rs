@@ -53,6 +53,43 @@ fn deliver_open_files(app: &tauri::AppHandle, paths: Vec<String>) {
     }
 }
 
+/// Set by `quit_app` once the frontend has dealt with unsaved edits, so the
+/// window close that follows isn't held again.
+#[derive(Default)]
+struct QuitApproved(AtomicBool);
+
+#[derive(Debug, PartialEq)]
+enum QuitStep {
+    Proceed,
+    AskFrontend,
+}
+
+/// Cmd+Q and the window's close button go through the frontend, which knows
+/// about unsaved edits. Before the frontend is up there is nothing to save
+/// and no listener to ask, so quit goes ahead.
+fn quit_step(frontend_ready: bool, approved: bool) -> QuitStep {
+    if approved || !frontend_ready {
+        QuitStep::Proceed
+    } else {
+        QuitStep::AskFrontend
+    }
+}
+
+fn current_quit_step(app: &tauri::AppHandle) -> QuitStep {
+    quit_step(
+        app.state::<FrontendReady>().0.load(Ordering::SeqCst),
+        app.state::<QuitApproved>().0.load(Ordering::SeqCst),
+    )
+}
+
+/// The frontend's go-ahead after `quit-requested`: nothing was dirty, or the
+/// user saved or let go of every unsaved doc.
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle, approved: tauri::State<QuitApproved>) {
+    approved.0.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
+
 #[tauri::command]
 fn take_launch_args(
     state: tauri::State<LaunchArgs>,
@@ -146,6 +183,16 @@ pub fn run() {
         .manage(watcher::Watchers::default())
         .manage(LaunchArgs::default())
         .manage(FrontendReady::default())
+        .manage(QuitApproved::default())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                if current_quit_step(app) == QuitStep::AskFrontend {
+                    api.prevent_close();
+                    let _ = app.emit("quit-requested", ());
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::read_file,
             commands::write_file,
@@ -165,6 +212,7 @@ pub fn run() {
             setup::run_integration,
             set_show_in_finder_enabled,
             take_launch_args,
+            quit_app,
             wikilink::resolve_wikilink,
         ])
         .on_menu_event(|app, event| {
@@ -203,6 +251,12 @@ pub fn run() {
                 "close_tab" => {
                     let _ = app.emit("close-active-tab", ());
                 }
+                "quit" => match current_quit_step(app) {
+                    QuitStep::Proceed => app.exit(0),
+                    QuitStep::AskFrontend => {
+                        let _ = app.emit("quit-requested", ());
+                    }
+                },
                 "save_file" => {
                     let _ = app.emit("menu-save", ());
                 }
@@ -263,6 +317,16 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
+            // Custom, not PredefinedMenuItem::quit: the predefined item sends
+            // terminate: straight to NSApp, which nothing here can intercept,
+            // so unsaved edits would be dropped without a prompt.
+            let quit_item = MenuItem::with_id(
+                handle,
+                "quit",
+                "Quit Glance",
+                true,
+                Some("CmdOrCtrl+Q"),
+            )?;
             let app_menu = Submenu::with_items(
                 handle,
                 "Glance",
@@ -275,7 +339,7 @@ pub fn run() {
                     &remove_cli_item,
                     &PredefinedMenuItem::separator(handle)?,
                     &PredefinedMenuItem::hide(handle, None)?,
-                    &PredefinedMenuItem::quit(handle, None)?,
+                    &quit_item,
                 ],
             )?;
             let new_item = MenuItem::with_id(
@@ -396,4 +460,16 @@ pub fn run() {
             deliver_open_files(app, paths);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quit_asks_the_frontend_only_once_it_is_up_and_until_it_approves() {
+        assert_eq!(quit_step(false, false), QuitStep::Proceed);
+        assert_eq!(quit_step(true, false), QuitStep::AskFrontend);
+        assert_eq!(quit_step(true, true), QuitStep::Proceed);
+    }
 }

@@ -16,12 +16,13 @@ interface ModalParts {
   close: () => void;
 }
 
-// One modal shows at a time. A modal with no onEscape is waiting on a decision
-// (the reload prompt, the unsaved-changes prompt) and is never replaced: later
-// modals queue behind it, so every prompt's promise resolves. Any other modal
-// is dismissed through its onEscape when a new one opens, as before.
+// One modal shows at a time. A modal that waits on a decision (no onEscape, or
+// `decision: true`) is never replaced: later modals queue behind it, so every
+// prompt's promise resolves. Any other modal is dismissed through its onEscape
+// when a new one opens, as before.
 interface Entry {
   overlay: HTMLDivElement;
+  replaceable: boolean;
   onEscape?: () => void;
   close: () => void;
 }
@@ -37,7 +38,9 @@ function presentNext(): void {
   next.overlay.querySelector<HTMLElement>("input, .modal-btn.primary")?.focus();
 }
 
-function openModal(opts: { title: string; tone?: "default" | "error"; onEscape?: () => void }): ModalParts {
+function openModal(opts: {
+  title: string; tone?: "default" | "error"; onEscape?: () => void; decision?: boolean;
+}): ModalParts {
   const overlay = document.createElement("div");
   overlay.className = "modal";
 
@@ -67,6 +70,7 @@ function openModal(opts: { title: string; tone?: "default" | "error"; onEscape?:
 
   const entry: Entry = {
     overlay,
+    replaceable: !!opts.onEscape && !opts.decision,
     onEscape: opts.onEscape,
     close: () => {
       const i = queue.indexOf(entry);
@@ -79,8 +83,8 @@ function openModal(opts: { title: string; tone?: "default" | "error"; onEscape?:
   };
   queue.push(entry);
   const current = shown;
-  if (current?.onEscape) {
-    current.onEscape(); // its close() presents the next queued modal
+  if (current?.replaceable) {
+    current.onEscape!(); // its close() presents the next queued modal
     if (shown === current) current.close();
   }
   if (!shown) presentNext();
@@ -111,6 +115,28 @@ export function confirmReload(fileName: string): Promise<"mine" | "disk"> {
     keep.onclick = () => done("mine");
     load.onclick = () => done("disk");
     m.footer.append(load, keep);
+  });
+}
+
+export type UnsavedChoice = "save" | "discard" | "cancel";
+
+// Closing a tab or quitting with unsaved edits. Escape and the backdrop cancel.
+export function confirmUnsaved(fileName: string): Promise<UnsavedChoice> {
+  return new Promise((resolve) => {
+    const done = (r: UnsavedChoice) => { m.close(); resolve(r); };
+    const m = openModal({ title: `Save changes to ${fileName}?`, onEscape: () => done("cancel"), decision: true });
+    const msg = document.createElement("p");
+    msg.textContent = "Your changes will be lost if you don't save them.";
+    m.body.appendChild(msg);
+
+    const discard = button("Don't Save");
+    const cancel = button("Cancel");
+    const save = button("Save", true);
+    discard.onclick = () => done("discard");
+    cancel.onclick = () => done("cancel");
+    save.onclick = () => done("save");
+    m.footer.append(discard, cancel, save);
+    save.focus();
   });
 }
 

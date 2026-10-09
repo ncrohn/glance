@@ -16,7 +16,7 @@ import {
   readAnnotations, addStoredAnnotation, removeStoredAnnotation, updateStoredAnnotation, addStoredReply, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
   onShowAbout, onShowWhatsNew, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
-  onShowInFinder, revealInFinder, setShowInFinderEnabled,
+  onShowInFinder, revealInFinder, setShowInFinderEnabled, onQuitRequested, quitApp,
   readReviewed, writeReviewed, openExternal, openFileExternal, localFileUrl, resolveWikilink,
 } from "./ipc";
 import { classifyLink, dirname, parseWikilink, resolveLocalPath, slugify } from "./links";
@@ -37,7 +37,7 @@ import {
 import { mountEditor, type EditorHandle } from "./editor";
 import { decideReload } from "./reload";
 import { restoreTarget, lineAtOffset, offsetForLine, type LineBlock } from "./scroll-restore";
-import { confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker, showWhatsNew } from "./modal";
+import { confirmReload, confirmUnsaved, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker, showWhatsNew } from "./modal";
 import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
 } from "./theme";
@@ -329,7 +329,7 @@ function bindTabBar(bar: HTMLElement): void {
     const tab = target.closest<HTMLElement>(".tab");
     const id = tab?.dataset.id;
     if (!id) return;
-    if (target.closest(".close")) { closeTab(id); return; }
+    if (target.closest(".close")) { void closeTab(id); return; }
     if (id !== state.activeId) { state = setActive(state, id); render(); }
   });
   bindTabHover(bar);
@@ -688,7 +688,29 @@ function selectAllContent(): void {
   sel.addRange(range);
 }
 
-function closeTab(id: string): void {
+// Ask what to do with a doc's unsaved edits. Resolves true when the doc can go:
+// it was clean, it saved, or the user chose Don't Save.
+async function settleUnsaved(id: string): Promise<boolean> {
+  const doc = state.docs.find((d) => d.id === id);
+  if (!doc || !isDirty(doc)) return true;
+  const choice = await confirmUnsaved(doc.fileName);
+  if (choice === "cancel") return false;
+  if (choice === "discard") return true;
+  return saveDoc(id);
+}
+
+// Tabs with an unsaved-changes prompt open, so a repeated Cmd+W doesn't stack
+// a second prompt for the same doc.
+const closing = new Set<string>();
+
+async function closeTab(id: string): Promise<void> {
+  if (closing.has(id)) return;
+  closing.add(id);
+  try {
+    if (!(await settleUnsaved(id))) return;
+  } finally {
+    closing.delete(id);
+  }
   const doc = state.docs.find((d) => d.id === id);
   if (doc) {
     void unwatchFile(doc.absPath);
@@ -745,6 +767,24 @@ async function saveDoc(id: string): Promise<boolean> {
 function saveActive(): void {
   const doc = getActive(state);
   if (doc) void saveDoc(doc.id);
+}
+
+let quitting = false;
+
+// Cmd+Q / the window's close button. Walks the dirty docs one at a time
+// (showing each), and quits only if every one was saved or let go.
+async function requestQuit(): Promise<void> {
+  if (quitting) return;
+  quitting = true;
+  try {
+    for (const doc of state.docs.filter(isDirty)) {
+      if (state.activeId !== doc.id) { state = setActive(state, doc.id); render(); }
+      if (!(await settleUnsaved(doc.id))) return;
+    }
+    await quitApp().catch((err) => showNotice(`Couldn't quit: ${err}`, false));
+  } finally {
+    quitting = false;
+  }
 }
 
 // A change event whose text we already account for: what we last saw on disk,
@@ -936,7 +976,8 @@ export async function start(): Promise<void> {
       onCommit: changeTheme,
     });
   });
-  await onCloseActiveTab(() => { const d = getActive(state); if (d) closeTab(d.id); });
+  await onCloseActiveTab(() => { const d = getActive(state); if (d) void closeTab(d.id); });
+  await onQuitRequested(() => { void requestQuit(); });
   await onMenuSave(() => saveActive());
   await onSelectAll(() => selectAllContent());
   await onShowInFinder(() => {
