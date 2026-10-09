@@ -123,8 +123,8 @@ const GUIDANCE_BODY: &str = "## Glance markdown review\n\n\
      When you create or update a markdown file the user should review, open it with `mdview <absolute-path>`.\n\
      To read the user's review comments on that file, use the Glance MCP tools (`list_annotations`, `get_annotation`) and call `resolve_annotation` after applying each change.\n";
 
-/// The block between the start and end markers. Remove and refresh find it
-/// by those markers, so wording edits (ours or the user's) don't strand it.
+/// The block between the start and end markers. Remove finds it by those
+/// markers, so wording edits (ours or the user's) don't strand it.
 pub fn guidance_block() -> String {
     format!("{GUIDANCE_MARKER}\n{GUIDANCE_BODY}{GUIDANCE_END}\n")
 }
@@ -144,7 +144,7 @@ fn find_guidance(text: &str) -> Result<Option<std::ops::Range<usize>>, String> {
     let mut ends = Vec::new();
     let mut pos = 0;
     for line in text.split_inclusive('\n') {
-        let t = line.trim_end();
+        let t = line.trim();
         if t == GUIDANCE_MARKER {
             starts.push(pos);
         } else if t == GUIDANCE_END {
@@ -153,6 +153,11 @@ fn find_guidance(text: &str) -> Result<Option<std::ops::Range<usize>>, String> {
         pos += line.len();
     }
     match (starts.as_slice(), ends.as_slice()) {
+        // A marker that isn't on a line of its own (moved into a quote or a
+        // list) still means a block is there; appending would duplicate it.
+        ([], []) if text.contains(GUIDANCE_MARKER) || text.contains(GUIDANCE_END) => Err(format!(
+            "its Glance guidance block markers ({GUIDANCE_MARKER} … {GUIDANCE_END}) aren't on lines of their own. Fix or delete the block by hand, then retry."
+        )),
         ([], []) => Ok(None),
         ([s], [e]) if s < e => Ok(Some(*s..*e)),
         ([s], []) if text[*s..].starts_with(&legacy_guidance_block()) => Ok(Some(*s..*s + legacy_guidance_block().len())),
@@ -226,12 +231,13 @@ Use `add_annotation(path: "<absolute-path>", quote: "<verbatim text>", note: "<o
     .to_string()
 }
 
-/// Append the guidance block, or refresh an existing one in place. Returns the
-/// new file contents, `Ok(None)` if the current block is already there, or an
-/// error when the block's markers are malformed (see [`find_guidance`]).
+/// Append the guidance block, or upgrade a ≤ 0.8.5 block in place. Returns the
+/// new file contents, `Ok(None)` if a block is already there, or an error when
+/// the block's markers are malformed (see [`find_guidance`]). A current-format
+/// block whose text differs from ours was edited by the user, so it's kept.
 pub fn append_guidance(existing: &str) -> Result<Option<String>, String> {
     match find_guidance(existing)? {
-        Some(r) if existing[r.clone()] == guidance_block() => Ok(None),
+        Some(r) if existing[r.clone()].contains(GUIDANCE_END) => Ok(None),
         Some(r) => Ok(Some(format!("{}{}{}", &existing[..r.start], guidance_block(), &existing[r.end..]))),
         None => {
             let sep = if existing.is_empty() || existing.ends_with('\n') { "" } else { "\n" };
@@ -427,15 +433,26 @@ exit 0
     TEMPLATE.replace("__MCP_BIN__", &sh_quote(mcp_bin))
 }
 
-/// The `command` strings of a hooks entry's inner `hooks[]` list.
+/// The `command` strings of a hooks entry's inner `hooks[]` list. Only those
+/// strings are decoded: a field `serde_json::Value` can't hold (`1e400`, a lone
+/// surrogate) must not hide our entry, or setup would add a second one.
 fn entry_commands(entry: &Node) -> Vec<String> {
-    entry
-        .value()
-        .and_then(|v| {
-            let hs = v.get("hooks")?.as_array()?.clone();
-            Some(hs.iter().filter_map(|h| h.get("command")?.as_str().map(str::to_string)).collect())
-        })
-        .unwrap_or_default()
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        #[serde(default)]
+        hooks: Vec<Box<serde_json::value::RawValue>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Hook {
+        command: Option<String>,
+    }
+    let Ok(e) = serde_json::from_str::<Entry>(&entry.json_text()) else {
+        return Vec::new();
+    };
+    e.hooks
+        .iter()
+        .filter_map(|h| serde_json::from_str::<Hook>(h.get()).ok()?.command)
+        .collect()
 }
 
 /// Add a hook entry running `command` under `hooks.<event>` in a hooks file
@@ -2533,10 +2550,23 @@ mod tests {
         let edited = installed.replace("open it with", "open it using") + "\n## my later rule\nkeep\n";
         // remove strips the edited block and keeps the user's own content
         assert_eq!(strip_guidance(&edited).unwrap().unwrap(), "# mine\n\n## my later rule\nkeep\n");
-        // setup refreshes the edited block in place instead of saying "present"
-        let refreshed = append_guidance(&edited).unwrap().unwrap();
-        assert_eq!(refreshed, format!("{installed}\n## my later rule\nkeep\n"));
-        assert!(append_guidance(&refreshed).unwrap().is_none());
+        // setup keeps the user's edit rather than overwriting it, and adds no second block
+        assert!(append_guidance(&edited).unwrap().is_none());
+    }
+
+    #[test]
+    fn indented_guidance_markers_are_found_and_quoted_ones_refused() {
+        let installed = append_guidance("# mine\n").unwrap().unwrap();
+        let indented = installed.replace(GUIDANCE_MARKER, &format!("  {GUIDANCE_MARKER}"));
+        assert!(append_guidance(&indented).unwrap().is_none());
+        assert_eq!(strip_guidance(&indented).unwrap().unwrap(), "# mine\n");
+        let quoted = installed
+            .lines()
+            .map(|l| format!("> {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(append_guidance(&quoted).is_err());
+        assert!(strip_guidance(&quoted).is_err());
     }
 
     #[test]
@@ -2604,6 +2634,29 @@ mod tests {
         assert_eq!(v["mcpServers"]["glance"]["type"], "stdio");
         assert_eq!(v["mcpServers"]["glance"]["command"], "/new/glance-mcp");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn odd_values_in_our_hook_entry_dont_cause_a_duplicate() {
+        let f = "f";
+        for odd in ["1e400", "\"\\ud800\""] {
+            let src = format!(
+                r#"{{"hooks":{{"PostToolUse":[{{"matcher":"Write","hooks":[{{"type":"command","command":"/g.sh","timeout":{odd}}}]}}]}}}}"#
+            );
+            match merge_settings_hook_in(&src, f, "PostToolUse", Some("Write"), "/g.sh", &[]) {
+                Ok(out) => assert_eq!(out.matches("/g.sh").count(), 1, "{odd}: {out}"),
+                Err(_) => {} // refusing is fine; duplicating is not
+            }
+        }
+    }
+
+    #[test]
+    fn crlf_settings_round_trip_keeps_content() {
+        let src = "{\r\n  \"model\": \"x\",\r\n  \"hooks\": {}\r\n}\r\n";
+        let out = merge_settings_hook_in(src, "f", "PostToolUse", Some("Write"), "/g.sh", &[]).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["model"], "x");
+        assert_eq!(out.matches("/g.sh").count(), 1);
     }
 
     #[test]

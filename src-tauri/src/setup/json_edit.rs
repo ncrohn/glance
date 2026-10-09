@@ -71,12 +71,17 @@ impl Node {
 
     /// The value as a `serde_json::Value`, for read-only inspection.
     pub fn value(&self) -> Option<serde_json::Value> {
+        serde_json::from_str(&self.json_text()).ok()
+    }
+
+    /// This node as compact JSON text.
+    pub fn json_text(&self) -> String {
         match self {
-            Node::Raw(s) => serde_json::from_str(s).ok(),
+            Node::Raw(s) => s.clone(),
             other => {
                 let mut out = String::new();
                 other.emit(&Style { indent: None, trailing_newline: false }, 0, &mut out);
-                serde_json::from_str(&out).ok()
+                out
             }
         }
     }
