@@ -3,7 +3,7 @@ import {
   State, emptyState, openDoc, closeDoc, setActive, getActive,
   toggleViewMode, updateEditorContent, markSaved, applyDiskChange, markRemoved,
   setDocAnnotations, setDocResolutions, setDocActivity, clearDocActivity,
-  markReviewed, setReviewedBaseline, canRevealActive,
+  markReviewed, setReviewedBaseline, canRevealActive, setDiskContent,
 } from "./store";
 import { isDirty, basename, changedLines, deletedBefore, hasUnreviewedChanges, type Doc } from "./document";
 import { parseFrontmatter } from "./frontmatter";
@@ -701,19 +701,90 @@ function closeTab(id: string): void {
   scrollPositions.delete(id); // after render(), which re-saves the outgoing doc's position
 }
 
-// Save the active doc to disk. Shared by the File▸Save menu item (⌘S). On
-// failure the doc stays dirty (markSaved never runs) and the error is surfaced.
+// absPath → texts our saves are writing right now. The watcher can report a
+// save's own write before the write call returns; matching it here keeps that
+// echo from looking like an outside change.
+const inFlightWrites = new Map<string, string[]>();
+
+// doc id → newest disk text seen while a "changed on disk" prompt is open for
+// that doc. Save is refused meanwhile (it would overwrite the change being
+// asked about), and further changes update the open prompt instead of opening
+// another.
+const pendingReloads = new Map<string, string>();
+
+// Write a doc to disk. On failure the doc stays dirty (markSaved never runs)
+// and the error is surfaced. Resolves true once the text is on disk.
+async function saveDoc(id: string): Promise<boolean> {
+  const doc = state.docs.find((d) => d.id === id);
+  if (!doc) return false;
+  if (pendingReloads.has(id)) {
+    showToast(`${doc.fileName} changed on disk. Choose Keep mine or Load disk before saving.`);
+    return false;
+  }
+  const written = doc.editorContent;
+  const writes = inFlightWrites.get(doc.absPath) ?? [];
+  writes.push(written);
+  inFlightWrites.set(doc.absPath, writes);
+  try {
+    await writeFile(doc.absPath, written);
+  } catch (err) {
+    showNotice(`Couldn't save ${doc.fileName}: ${err}`, false);
+    return false;
+  } finally {
+    writes.splice(writes.indexOf(written), 1);
+    if (!writes.length) inFlightWrites.delete(doc.absPath);
+  }
+  state = markSaved(state, id, written);
+  const saved = state.docs.find((d) => d.id === id);
+  if (saved) void writeReviewed(saved.absPath, saved.reviewedContent);
+  render();
+  return true;
+}
+
+// File▸Save (⌘S).
 function saveActive(): void {
   const doc = getActive(state);
+  if (doc) void saveDoc(doc.id);
+}
+
+// A change event whose text we already account for: what we last saw on disk,
+// what the editor holds, or what one of our saves is writing.
+function isKnownContent(doc: Doc, contents: string): boolean {
+  // Guard on existsOnDisk so a file that was deleted and then recreated with
+  // content identical to the editor still clears the "(deleted)" state.
+  if (!doc.existsOnDisk) return false;
+  return contents === doc.diskContent
+    || contents === doc.editorContent
+    || (inFlightWrites.get(doc.absPath)?.includes(contents) ?? false);
+}
+
+async function handleDiskChange(path: string, contents: string): Promise<void> {
+  const doc = state.docs.find((d) => d.absPath === path);
   if (!doc) return;
-  void writeFile(doc.absPath, doc.editorContent).then(() => {
-    state = markSaved(state, doc.id);
-    const saved = state.docs.find((d) => d.id === doc.id);
-    if (saved) void writeReviewed(saved.absPath, saved.reviewedContent);
+  if (pendingReloads.has(doc.id)) { pendingReloads.set(doc.id, contents); return; }
+  if (isKnownContent(doc, contents)) return;
+  if (decideReload(doc) === "auto-reload") {
+    state = applyDiskChange(state, doc.id, contents);
     render();
-  }).catch((err) => {
-    showNotice(`Couldn't save ${doc.fileName}: ${err}`, false);
-  });
+    return;
+  }
+  pendingReloads.set(doc.id, contents);
+  // Dismiss any open zoom overlay first — it sits above the modal layer, so
+  // the reload prompt would otherwise be unreachable underneath it.
+  closeMermaidZoom();
+  const choice = await confirmReload(doc.fileName);
+  const latest = pendingReloads.get(doc.id) ?? contents;
+  pendingReloads.delete(doc.id);
+  if (!state.docs.some((d) => d.id === doc.id)) return;
+  if (choice === "disk") {
+    state = applyDiskChange(state, doc.id, latest);
+    render();
+  } else {
+    // "mine": keep the editor text (still dirty) but record what disk holds now.
+    state = setDiskContent(state, doc.id, latest);
+    renderTabBar();
+    renderActions();
+  }
 }
 
 export async function openPath(absPath: string): Promise<void> {
@@ -877,28 +948,7 @@ export async function start(): Promise<void> {
     void revealInFinder(d.absPath).catch(() => showNotice(`Couldn't show ${d.absPath} in Finder.`, false));
   });
   await onAnnotationsChanged((docPath) => { void loadAnnotations(docPath); });
-  await onFileChanged(async (e) => {
-    const doc = state.docs.find((d) => d.absPath === e.path);
-    if (!doc) return;
-    // Our own save echo — no-op. Guard on existsOnDisk so a file that was
-    // deleted and then recreated with content identical to the editor still
-    // clears the "(deleted)" state instead of being swallowed as an echo.
-    if (doc.existsOnDisk && doc.editorContent === e.contents) return;
-    if (decideReload(doc) === "auto-reload") {
-      state = applyDiskChange(state, doc.id, e.contents);
-      render();
-    } else {
-      // Dismiss any open zoom overlay first — it sits above the modal layer, so
-      // the reload prompt would otherwise be unreachable underneath it.
-      closeMermaidZoom();
-      const choice = await confirmReload(doc.fileName);
-      if (choice === "disk") {
-        state = applyDiskChange(state, doc.id, e.contents);
-        render();
-      }
-      // "mine" → keep editor content; user's edits stay dirty
-    }
-  });
+  await onFileChanged((e) => handleDiskChange(e.path, e.contents));
   window.addEventListener("keydown", (e) => {
     if (e.metaKey && (e.key === "e" || e.key === "E")) {
       e.preventDefault();

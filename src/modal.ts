@@ -16,10 +16,28 @@ interface ModalParts {
   close: () => void;
 }
 
-function openModal(opts: { title: string; tone?: "default" | "error"; onEscape?: () => void }): ModalParts {
-  const root = document.getElementById("modal-root")!;
-  root.innerHTML = "";
+// One modal shows at a time. A modal with no onEscape is waiting on a decision
+// (the reload prompt, the unsaved-changes prompt) and is never replaced: later
+// modals queue behind it, so every prompt's promise resolves. Any other modal
+// is dismissed through its onEscape when a new one opens, as before.
+interface Entry {
+  overlay: HTMLDivElement;
+  onEscape?: () => void;
+  close: () => void;
+}
+let shown: Entry | null = null;
+const queue: Entry[] = [];
 
+function presentNext(): void {
+  const next = queue.shift();
+  if (!next) return;
+  shown = next;
+  document.getElementById("modal-root")!.appendChild(next.overlay);
+  // A queued modal's builder ran its focus() while detached; redo it.
+  next.overlay.querySelector<HTMLElement>("input, .modal-btn.primary")?.focus();
+}
+
+function openModal(opts: { title: string; tone?: "default" | "error"; onEscape?: () => void }): ModalParts {
   const overlay = document.createElement("div");
   overlay.className = "modal";
 
@@ -39,10 +57,7 @@ function openModal(opts: { title: string; tone?: "default" | "error"; onEscape?:
   footer.className = "modal-footer";
   card.appendChild(footer);
 
-  const close = () => { root.innerHTML = ""; };
-
   overlay.appendChild(card);
-  root.appendChild(overlay);
 
   overlay.onkeydown = (e) => {
     if (e.key === "Escape") { e.preventDefault(); opts.onEscape?.(); }
@@ -50,7 +65,27 @@ function openModal(opts: { title: string; tone?: "default" | "error"; onEscape?:
   // Backdrop click closes only when there's a safe default (an Escape handler).
   overlay.onclick = (e) => { if (e.target === overlay) opts.onEscape?.(); };
 
-  return { overlay, card, body, footer, close };
+  const entry: Entry = {
+    overlay,
+    onEscape: opts.onEscape,
+    close: () => {
+      const i = queue.indexOf(entry);
+      if (i !== -1) { queue.splice(i, 1); return; }
+      if (shown !== entry) return;
+      overlay.remove();
+      shown = null;
+      presentNext();
+    },
+  };
+  queue.push(entry);
+  const current = shown;
+  if (current?.onEscape) {
+    current.onEscape(); // its close() presents the next queued modal
+    if (shown === current) current.close();
+  }
+  if (!shown) presentNext();
+
+  return { overlay, card, body, footer, close: entry.close };
 }
 
 function button(label: string, primary = false): HTMLButtonElement {

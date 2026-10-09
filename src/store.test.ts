@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   emptyState, openDoc, closeDoc, setActive, updateEditorContent,
   toggleViewMode, markSaved, applyDiskChange, markRemoved, getActive, canRevealActive,
-  markReviewed, setReviewedBaseline, setDocActivity, clearDocActivity,
+  markReviewed, setReviewedBaseline, setDocActivity, clearDocActivity, setDiskContent,
 } from "./store";
 import { isDirty } from "./document";
 
@@ -41,7 +41,7 @@ describe("store", () => {
     let s = openDoc(emptyState(), "/a.md", "A");
     s = updateEditorContent(s, "/a.md", "A!");
     expect(isDirty(getActive(s)!)).toBe(true);
-    s = markSaved(s, "/a.md");
+    s = markSaved(s, "/a.md", "A!");
     expect(isDirty(getActive(s)!)).toBe(false);
     expect(getActive(s)!.diskContent).toBe("A!");
   });
@@ -49,10 +49,35 @@ describe("store", () => {
   it("markSaved also advances the reviewed baseline (own edits need no highlight)", () => {
     let s = openDoc(emptyState(), "/a.md", "A");
     s = updateEditorContent(s, "/a.md", "A!");
-    s = markSaved(s, "/a.md");
+    s = markSaved(s, "/a.md", "A!");
     const d = getActive(s)!;
     expect(d.reviewedContent).toBe("A!");
     expect(d.diskContent).toBe("A!");
+  });
+
+  it("markSaved records the bytes written, so typing during the save stays dirty", () => {
+    let s = openDoc(emptyState(), "/a.md", "A");
+    s = updateEditorContent(s, "/a.md", "A!");
+    const written = getActive(s)!.editorContent;
+    s = updateEditorContent(s, "/a.md", "A!?"); // typed while the write was in flight
+    s = markSaved(s, "/a.md", written);
+    const d = getActive(s)!;
+    expect(d.diskContent).toBe("A!");
+    expect(d.reviewedContent).toBe("A!");
+    expect(d.editorContent).toBe("A!?");
+    expect(isDirty(d)).toBe(true);
+  });
+
+  it("setDiskContent records disk without touching the editor", () => {
+    let s = openDoc(emptyState(), "/a.md", "A");
+    s = updateEditorContent(s, "/a.md", "mine");
+    s = markRemoved(s, "/a.md");
+    s = setDiskContent(s, "/a.md", "theirs");
+    const d = getActive(s)!;
+    expect(d.diskContent).toBe("theirs");
+    expect(d.editorContent).toBe("mine");
+    expect(d.reviewedContent).toBe("A");
+    expect(d.existsOnDisk).toBe(true);
   });
 
   it("toggleViewMode flips rendered/source", () => {

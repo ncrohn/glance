@@ -83,6 +83,47 @@ const tabs = () => Array.from(document.querySelectorAll<HTMLElement>("#tabs .tab
 const activeTab = () => document.querySelector<HTMLElement>("#tabs .tab.active")?.dataset.id ?? null;
 const savedSession = () => JSON.parse(localStorage.getItem("glance.openPaths") ?? "null");
 const toastText = () => document.querySelector(".toast-text")?.textContent ?? "";
+const modalText = () => document.getElementById("modal-root")!.textContent ?? "";
+const modalCount = () => document.querySelectorAll("#modal-root .modal").length;
+const isDirtyTab = (id: string) => !!document.querySelector(`#tabs .tab.dirty[data-id="${id}"]`);
+const emit = async (name: string, payload?: unknown) => { void env.handlers.get(name)!(payload); await flush(); };
+const diskChange = (path: string, contents: string) => emit("file-changed", { path, contents });
+
+async function click(label: string) {
+  const btn = Array.from(document.querySelectorAll<HTMLButtonElement>("#modal-root button"))
+    .find((b) => b.textContent === label);
+  if (!btn) throw new Error(`no "${label}" button in: ${modalText()}`);
+  btn.click();
+  await flush();
+}
+
+async function selectTab(id: string) {
+  document.querySelector<HTMLElement>(`#tabs .tab[data-id="${id}"]`)!.click();
+  await flush();
+}
+
+async function editorView() {
+  const { EditorView } = await import("@codemirror/view");
+  if (!document.querySelector(".cm-editor")) {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "e", metaKey: true }));
+    await flush();
+  }
+  return EditorView.findFromDOM(document.querySelector(".cm-editor") as HTMLElement)!;
+}
+
+// Type into the active tab's editor (switching it to Edit first).
+async function type(text: string, at: "start" | "end" = "start") {
+  const v = await editorView();
+  v.dispatch({ changes: { from: at === "end" ? v.state.doc.length : 0, insert: text } });
+}
+
+const editorText = async () => (await editorView()).state.doc.toString();
+
+function gate(): { promise: Promise<void>; release: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((r) => { release = r; });
+  return { promise, release };
+}
 
 beforeEach(() => {
   resetEnv();
@@ -93,6 +134,9 @@ beforeEach(() => {
   (globalThis as any).ResizeObserver ??= class { observe() {} disconnect() {} };
   (window as any).matchMedia ??= () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
   (globalThis as any).CSS ??= { escape: (s: string) => s };
+  // jsdom has no layout; CodeMirror's measure pass needs these to exist.
+  (Range.prototype as any).getClientRects ??= () => [];
+  (Range.prototype as any).getBoundingClientRect ??= () => new DOMRect();
 });
 
 function annotation(id: string): Annotation {
@@ -142,6 +186,111 @@ describe("session restore", () => {
     release();
     await booted;
     expect(savedSession()).toEqual(["/a.md", "/b.md", "/c.md"]);
+  });
+});
+
+describe("saving while the file changes on disk", () => {
+  it("typing during a save is not reverted by the save's own echo", async () => {
+    env.fs.set("/a.md", "base\n");
+    env.launch = ["/a.md"];
+    await boot();
+    await type("ONE ");
+    const g = gate();
+    env.writeGate = g.promise;
+    await emit("menu-save");
+    await type("TWO", "end");
+    g.release();
+    await flush();
+    expect(env.fs.get("/a.md")).toBe("ONE base\n");
+    expect(isDirtyTab("/a.md")).toBe(true);
+    await diskChange("/a.md", "ONE base\n");
+    expect(await editorText()).toBe("ONE base\nTWO");
+    expect(isDirtyTab("/a.md")).toBe(true);
+    expect(modalCount()).toBe(0);
+  });
+
+  it("an echo that arrives before the save returns raises no prompt", async () => {
+    env.fs.set("/a.md", "base\n");
+    env.launch = ["/a.md"];
+    await boot();
+    await type("ONE ");
+    const g = gate();
+    env.writeGate = g.promise;
+    await emit("menu-save");
+    await type("TWO", "end");
+    await diskChange("/a.md", "ONE base\n");
+    expect(modalCount()).toBe(0);
+    g.release();
+    await flush();
+    expect(await editorText()).toBe("ONE base\nTWO");
+    expect(modalCount()).toBe(0);
+  });
+
+  it("Save while the reload prompt is open does not overwrite the outside change", async () => {
+    env.fs.set("/a.md", "base\n");
+    env.launch = ["/a.md"];
+    await boot();
+    await type("USER ");
+    env.fs.set("/a.md", "AGENT\n");
+    await diskChange("/a.md", "AGENT\n");
+    expect(modalText()).toContain("changed on disk");
+    await emit("menu-save");
+    expect(env.writes).toEqual([]);
+    expect(env.fs.get("/a.md")).toBe("AGENT\n");
+    expect(toastText()).toContain("Choose Keep mine or Load disk");
+    await click("Load disk");
+    expect(await editorText()).toBe("AGENT\n");
+    expect(isDirtyTab("/a.md")).toBe(false);
+  });
+
+  it("Keep mine, then Save, writes the user's text", async () => {
+    env.fs.set("/a.md", "base\n");
+    env.launch = ["/a.md"];
+    await boot();
+    await type("USER ");
+    env.fs.set("/a.md", "AGENT\n");
+    await diskChange("/a.md", "AGENT\n");
+    await click("Keep mine");
+    expect(isDirtyTab("/a.md")).toBe(true);
+    await emit("menu-save");
+    expect(env.fs.get("/a.md")).toBe("USER base\n");
+    expect(isDirtyTab("/a.md")).toBe(false);
+  });
+
+  it("a second change to the same doc updates the open prompt; Load disk takes the newest", async () => {
+    env.fs.set("/a.md", "base\n");
+    env.launch = ["/a.md"];
+    await boot();
+    await type("USER ");
+    await diskChange("/a.md", "AGENT 1\n");
+    await diskChange("/a.md", "AGENT 2\n");
+    expect(modalCount()).toBe(1);
+    await click("Load disk");
+    expect(modalCount()).toBe(0);
+    expect(await editorText()).toBe("AGENT 2\n");
+  });
+
+  it("two docs changed on disk each get their own prompt, one after the other", async () => {
+    env.fs.set("/a.md", "a\n"); env.fs.set("/b.md", "b\n");
+    env.launch = ["/a.md", "/b.md"];
+    await boot();
+    await selectTab("/a.md");
+    await type("USER-A ");
+    await selectTab("/b.md");
+    await type("USER-B ");
+    await diskChange("/a.md", "AGENT-A\n");
+    await diskChange("/b.md", "AGENT-B\n");
+    expect(modalCount()).toBe(1);
+    expect(modalText()).toContain("a.md");
+    await click("Load disk");
+    expect(modalCount()).toBe(1);
+    expect(modalText()).toContain("b.md");
+    await click("Keep mine");
+    expect(modalCount()).toBe(0);
+    await selectTab("/a.md");
+    expect(await editorText()).toBe("AGENT-A\n");
+    await selectTab("/b.md");
+    expect(await editorText()).toBe("USER-B b\n");
   });
 });
 
