@@ -2,8 +2,10 @@ use crate::anchor::{resolve_anchor, Annotation, LineHint, Reply, Resolution};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AnnotationStore {
@@ -13,6 +15,9 @@ pub struct AnnotationStore {
     pub annotations: Vec<Annotation>,
     #[serde(default, rename = "nextNumber")]
     pub next_number: u32,
+    /// Top-level fields this version doesn't know, kept across rewrites.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 pub fn sha1_hex(s: &str) -> String {
@@ -25,8 +30,131 @@ pub fn store_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".glance").join("annotations"))
 }
 
+/// The spelling a doc's store is keyed by, so every spelling of one file shares
+/// one store: a symlink, `/tmp` vs `/private/tmp`, a case variant, `./`, `//`.
+/// An existing file is keyed by its canonical path. A missing one is keyed by
+/// its lexically normalized absolute path with the deepest existing ancestor
+/// canonicalized, which is the key it gets once it is created.
+pub fn doc_key(doc_path: &str) -> String {
+    if let Ok(c) = std::fs::canonicalize(doc_path) {
+        return c.to_string_lossy().into_owned();
+    }
+    let lexical = PathBuf::from(crate::cli::to_abs(doc_path, &cwd()));
+    let mut missing = Vec::new();
+    let mut cur = lexical.as_path();
+    loop {
+        if let Ok(mut c) = std::fs::canonicalize(cur) {
+            for name in missing.iter().rev() {
+                c.push(name);
+            }
+            return c.to_string_lossy().into_owned();
+        }
+        match (cur.parent(), cur.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name);
+                cur = parent;
+            }
+            _ => return lexical.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+fn cwd() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+}
+
+/// Keys a doc's data was filed under before `doc_key`: the caller's raw
+/// spelling, and the lexically normalized absolute path the app always passed.
+pub(crate) fn legacy_keys(doc_path: &str, key: &str) -> Vec<String> {
+    let mut out = vec![doc_path.to_string()];
+    let abs = crate::cli::to_abs(doc_path, &cwd());
+    if abs != doc_path {
+        out.push(abs);
+    }
+    // Lexical `..` after a symlink can name a different file (`w/docs/../x.md`
+    // with docs → /r/docs is /r/x.md, but lexically w/x.md). A spelling that is
+    // some other existing doc's own path is that doc's store, never this one's.
+    out.retain(|k| k != key && !(Path::new(k).exists() && doc_key(k) != key));
+    out
+}
+
+fn store_file(dir: &Path, key: &str) -> PathBuf {
+    dir.join(format!("{}.json", sha1_hex(key)))
+}
+
 pub fn store_path_for(doc_path: &str) -> Option<PathBuf> {
-    store_dir().map(|d| d.join(format!("{}.json", sha1_hex(doc_path))))
+    store_dir().map(|d| store_file(&d, &doc_key(doc_path)))
+}
+
+fn has_legacy_store(dir: &Path, doc_path: &str, key: &str) -> bool {
+    legacy_keys(doc_path, key).iter().any(|k| store_file(dir, k).exists())
+}
+
+/// Fold any store filed under a legacy key into the doc's store, holding both
+/// locks; the caller already holds the lock on the doc's store. A legacy store
+/// moves over whole when the doc has none yet. Otherwise its annotations are
+/// merged in, skipping ids already present and renumbering any whose number is
+/// taken. The legacy file is removed only after the merged store is written,
+/// and a damaged legacy store is an error that leaves both files alone.
+fn migrate_legacy(dir: &Path, doc_path: &str, key: &str) -> Result<(), String> {
+    migrate_from(dir, key, legacy_keys(doc_path, key))
+}
+
+/// Fold a store filed under `alias`, a spelling that can't be derived from
+/// `doc_path` (glance-mcp once keyed `~/notes.md` literally), into the doc's
+/// store, the same way an upgrade migrates a legacy key.
+pub fn adopt_alias_store(alias: &str, doc_path: &str) -> Result<(), String> {
+    let Some(dir) = store_dir() else { return Ok(()) };
+    let key = doc_key(doc_path);
+    if alias == key || !store_file(&dir, alias).exists() {
+        return Ok(());
+    }
+    with_store_lock(&store_file(&dir, &key), || migrate_from(&dir, &key, vec![alias.to_string()]))
+}
+
+fn migrate_from(dir: &Path, key: &str, legacy_keys: Vec<String>) -> Result<(), String> {
+    let path = store_file(dir, key);
+    for legacy in legacy_keys {
+        let old = store_file(dir, &legacy);
+        if !old.exists() {
+            continue;
+        }
+        with_store_lock(&old, || {
+            if !old.exists() {
+                return Ok(());
+            }
+            let from = read_store_file(&old, key)?;
+            let merged = if path.exists() {
+                let mut into = read_store_file(&path, key)?;
+                merge_store(&mut into, from);
+                into
+            } else {
+                from
+            };
+            write_store_at(&path, &merged)?;
+            // If the old file can't go, leave it: merging is idempotent by id,
+            // and failing here would block every read of this doc.
+            let _ = std::fs::remove_file(&old);
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+fn merge_store(into: &mut AnnotationStore, from: AnnotationStore) {
+    for mut a in from.annotations {
+        if into.annotations.iter().any(|b| b.id == a.id) {
+            continue;
+        }
+        if into.annotations.iter().any(|b| b.number == a.number) {
+            a.number = 0;
+        }
+        push_annotation(into, a);
+    }
+    into.next_number = into.next_number.max(from.next_number);
+    for (k, v) in from.extra {
+        into.extra.entry(k).or_insert(v);
+    }
 }
 
 /// Load a doc's store. A store that doesn't exist yet is empty. One that exists
@@ -34,16 +162,22 @@ pub fn store_path_for(doc_path: &str) -> Option<PathBuf> {
 /// took it for "no comments" would show nothing, and a mutation would write the
 /// empty store over every comment in the file.
 pub fn read_store(doc_path: &str) -> Result<AnnotationStore, String> {
-    let empty = || AnnotationStore {
-        doc_path: doc_path.to_string(),
-        annotations: Vec::new(),
-        next_number: 0,
+    let key = doc_key(doc_path);
+    let Some(dir) = store_dir() else {
+        return Ok(AnnotationStore { doc_path: key, ..Default::default() });
     };
-    let path = match store_path_for(doc_path) {
-        Some(p) => p,
-        None => return Ok(empty()),
-    };
-    let mut store = match std::fs::read_to_string(&path) {
+    let path = store_file(&dir, &key);
+    if has_legacy_store(&dir, doc_path, &key) {
+        with_store_lock(&path, || migrate_legacy(&dir, doc_path, &key))?;
+    }
+    read_store_file(&path, &key)
+}
+
+/// Parse the store at `path`, reporting `key` as its doc path whatever spelling
+/// the file recorded.
+fn read_store_file(path: &Path, key: &str) -> Result<AnnotationStore, String> {
+    let empty = || AnnotationStore { doc_path: key.to_string(), ..Default::default() };
+    let mut store = match std::fs::read_to_string(path) {
         Ok(text) if text.trim().is_empty() => empty(),
         Ok(text) => serde_json::from_str(&text).map_err(|e| {
             format!(
@@ -54,6 +188,7 @@ pub fn read_store(doc_path: &str) -> Result<AnnotationStore, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => empty(),
         Err(e) => return Err(format!("Couldn't read the annotation store {}: {e}", path.display())),
     };
+    store.doc_path = key.to_string();
     backfill_numbers(&mut store);
     Ok(store)
 }
@@ -72,24 +207,53 @@ pub fn backfill_numbers(store: &mut AnnotationStore) {
         (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id))
     });
     for i in unnumbered {
-        max += 1;
+        max = max.saturating_add(1);
         store.annotations[i].number = max;
     }
-    store.next_number = store.next_number.max(max + 1);
+    store.next_number = store.next_number.max(max.saturating_add(1));
 }
 
 pub fn write_store(store: &AnnotationStore) -> Result<(), String> {
     let path = store_path_for(&store.doc_path)
         .ok_or_else(|| "Could not determine $HOME for annotation store".to_string())?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
+    write_store_at(&path, store)
+}
+
+fn write_store_at(path: &Path, store: &AnnotationStore) -> Result<(), String> {
     let json = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
-    // Write to a sibling temp file then rename, so a crash mid-write can't leave
-    // a truncated/corrupt store on disk (rename is atomic within the directory).
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    write_atomic(path, json.as_bytes())
+}
+
+static SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A suffix no other call in any process will produce: pid, nanos, counter.
+fn unique_suffix() -> String {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    format!("{}.{nanos}.{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Replace `path` with `bytes` so a reader or a crash sees the old file or the
+/// new one, never a torn one: write a temp file in the same directory, fsync
+/// it, rename it over `path`, then fsync the directory so the rename sticks.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let dir = path.parent().ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.{}.tmp", unique_suffix()));
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("Couldn't write {}: {e}", path.display()));
+    }
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
 }
 
 /// Run `f` against the current on-disk store under an exclusive **cross-process**
@@ -100,19 +264,32 @@ pub fn write_store(store: &AnnotationStore) -> Result<(), String> {
 /// silently clobbering each other's full-file writes.
 ///
 /// A store that fails to parse is an error and is left untouched. A mutation
-/// that changes nothing (an unknown id) writes nothing.
+/// that changes nothing (an unknown id) writes nothing, and on a doc with no
+/// store yet it creates no store or lock file either: `f` is first tried on
+/// the empty store without the lock, and only runs again under the lock if it
+/// changed something.
 pub fn mutate_store<T>(
     doc_path: &str,
-    f: impl FnOnce(&mut AnnotationStore) -> T,
+    mut f: impl FnMut(&mut AnnotationStore) -> T,
 ) -> Result<T, String> {
-    let store_path = store_path_for(doc_path)
-        .ok_or_else(|| "Could not determine $HOME for annotation store".to_string())?;
+    let dir = store_dir().ok_or_else(|| "Could not determine $HOME for annotation store".to_string())?;
+    let key = doc_key(doc_path);
+    let store_path = store_file(&dir, &key);
+    if !store_path.exists() && !has_legacy_store(&dir, doc_path, &key) {
+        let mut probe = read_store_file(&store_path, &key)?;
+        let before = probe.clone();
+        let out = f(&mut probe);
+        if probe == before {
+            return Ok(out);
+        }
+    }
     with_store_lock(&store_path, || {
-        let mut store = read_store(doc_path)?;
+        migrate_legacy(&dir, doc_path, &key)?;
+        let mut store = read_store_file(&store_path, &key)?;
         let before = store.clone();
         let out = f(&mut store);
         if store != before {
-            write_store(&store)?;
+            write_store_at(&store_path, &store)?;
         }
         Ok(out)
     })
@@ -122,8 +299,18 @@ pub fn mutate_store<T>(
 /// stable sibling file (never renamed), so it is held across a read and the
 /// temp-file+rename write. flock on the store file itself wouldn't work: the
 /// rename swaps the inode out from under it.
-fn with_store_lock<T>(
-    store_path: &std::path::Path,
+fn with_store_lock<T>(store_path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    with_store_lock_within(store_path, LOCK_WAIT, f)
+}
+
+/// How long a mutation waits for another process to release a store's lock
+/// before giving up. Holders keep it for milliseconds; one that keeps it
+/// longer is stuck, and waiting forever would hang the caller with it.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+
+fn with_store_lock_within<T>(
+    store_path: &Path,
+    wait: Duration,
     f: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     if let Some(parent) = store_path.parent() {
@@ -136,7 +323,23 @@ fn with_store_lock<T>(
         .truncate(false) // only used as a flock handle; never written to
         .open(&lock_path)
         .map_err(|e| e.to_string())?;
-    lock_file.lock_exclusive().map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + wait;
+    let contended = fs2::lock_contended_error().raw_os_error();
+    loop {
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(e) if e.raw_os_error() == contended && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) if e.raw_os_error() == contended => {
+                return Err(format!(
+                    "The annotation store {} is locked by another process. Try again in a moment.",
+                    store_path.display()
+                ));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
     let out = f();
     let _ = lock_file.unlock(); // also released when lock_file drops
     out
@@ -153,7 +356,7 @@ pub fn read_annotations(path: String) -> Result<AnnotationStore, String> {
 /// from glance-mcp can't be lost.
 #[tauri::command]
 pub fn add_annotation(doc_path: String, annotation: Annotation) -> Result<(), String> {
-    mutate_store(&doc_path, move |s| push_annotation(s, annotation))
+    mutate_store(&doc_path, move |s| push_annotation(s, annotation.clone()))
 }
 
 /// Body of `add_annotation`, shared with glance-mcp: backfill, assign the
@@ -163,7 +366,7 @@ pub fn push_annotation(store: &mut AnnotationStore, mut a: Annotation) {
     if a.number == 0 {
         a.number = store.next_number;
     }
-    store.next_number = store.next_number.max(a.number + 1);
+    store.next_number = store.next_number.max(a.number.saturating_add(1));
     store.annotations.push(a);
 }
 
@@ -172,12 +375,18 @@ pub fn new_id(seed: &str) -> String {
     sha1_hex(seed)[..8].to_string()
 }
 
+/// A short id that differs on every call, even for the same seed in the same
+/// second: the seed is mixed with the pid, nanoseconds and a counter.
+pub fn unique_id(seed: &str) -> String {
+    new_id(&format!("{seed}\0{}", unique_suffix()))
+}
+
 /// Remove one annotation by id under lock. Returns it as stored at removal
 /// (store-assigned number, replies, resolution), which is what the GUI's Undo
 /// re-adds — the GUI's own copy can be stale or still numberless.
 #[tauri::command]
 pub fn remove_annotation(doc_path: String, id: String) -> Result<Option<Annotation>, String> {
-    mutate_store(&doc_path, move |s| {
+    mutate_store(&doc_path, |s| {
         let removed = s.annotations.iter().find(|a| a.id == id).cloned();
         s.annotations.retain(|a| a.id != id);
         removed
@@ -317,16 +526,18 @@ pub fn resolve_anchors(text: String, annotations: Vec<Annotation>) -> Vec<Resolu
 /// return its absolute path.
 #[tauri::command]
 pub fn ensure_annotation_store(path: String) -> Result<String, String> {
-    let store_path =
-        store_path_for(&path).ok_or_else(|| "Could not determine $HOME".to_string())?;
-    if !store_path.exists() {
+    let dir = store_dir().ok_or_else(|| "Could not determine $HOME".to_string())?;
+    let key = doc_key(&path);
+    let store_path = store_file(&dir, &key);
+    if !store_path.exists() || has_legacy_store(&dir, &path, &key) {
         // Create under the same lock as mutations and re-check inside it, so a
         // concurrent first mutation from another process can't be clobbered.
         with_store_lock(&store_path, || {
+            migrate_legacy(&dir, &path, &key)?;
             if store_path.exists() {
                 return Ok(());
             }
-            write_store(&read_store(&path)?)
+            write_store_at(&store_path, &read_store_file(&store_path, &key)?)
         })?;
     }
     Ok(store_path.to_string_lossy().to_string())
@@ -384,11 +595,12 @@ mod tests {
             resolved_by: None,
             resolved_at: None,
             replies: Vec::new(),
+            extra: Default::default(),
         }
     }
 
     fn store_of(annotations: Vec<Annotation>) -> AnnotationStore {
-        AnnotationStore { doc_path: "/d.md".into(), annotations, next_number: 0 }
+        AnnotationStore { doc_path: "/d.md".into(), annotations, ..Default::default() }
     }
 
     #[test]
@@ -483,6 +695,13 @@ mod tests {
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
         assert_eq!(a, new_id("/d.md quote note 2026-09-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn unique_id_differs_for_the_same_seed() {
+        let ids: std::collections::HashSet<String> = (0..200).map(|_| unique_id("/d.md same note")).collect();
+        assert_eq!(ids.len(), 200);
+        assert!(ids.iter().all(|id| id.len() == 8 && id.chars().all(|c| c.is_ascii_hexdigit())));
     }
 
     #[test]
@@ -700,11 +919,12 @@ mod tests {
         assert_eq!(read_store(doc).unwrap().annotations[0].status, "resolved");
     }
 
-    fn fresh_home(name: &str) {
+    fn fresh_home(name: &str) -> PathBuf {
         let home = std::env::temp_dir().join("glance-test-dataloss").join(name);
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
         std::env::set_var("HOME", &home);
+        home
     }
 
     #[test]
@@ -766,16 +986,283 @@ mod tests {
         fresh_home("noop");
         let doc = "/m/noop.md";
         let path = store_path_for(doc).unwrap();
-        // Unknown doc + unknown id: no store file is created.
+        // Unknown doc + unknown id: no store file, lock file, or store dir is created.
         assert!(update_annotation(doc.into(), "zzz".into(), AnnotationPatch::default()).is_err());
+        assert!(add_reply(doc.into(), "zzz".into(), "x".into()).is_err());
         remove_annotation(doc.into(), "zzz".into()).unwrap();
         assert!(!path.exists());
+        assert!(!path.with_extension("json.lock").exists());
+        assert!(!path.parent().unwrap().exists());
         // Existing store: an unknown id leaves the file byte-for-byte alone.
         add_annotation(doc.into(), ann("a")).unwrap();
         let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         remove_annotation(doc.into(), "zzz".into()).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+    }
+
+    /// A real file reached through a symlinked dir. The temp dir is itself
+    /// under a symlink on macOS (/var -> /private/var), so even `real` isn't canonical.
+    fn linked_doc(home: &Path) -> (String, String) {
+        let real = home.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("Plan.md"), "x\n").unwrap();
+        std::os::unix::fs::symlink(&real, home.join("link")).unwrap();
+        let via_link = home.join("link/Plan.md").to_string_lossy().into_owned();
+        let canonical = std::fs::canonicalize(real.join("Plan.md")).unwrap().to_string_lossy().into_owned();
+        assert_ne!(via_link, canonical);
+        (via_link, canonical)
+    }
+
+    fn write_legacy(raw: &str, json: &str) -> PathBuf {
+        let p = store_dir().unwrap().join(format!("{}.json", sha1_hex(raw)));
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, json).unwrap();
+        p
+    }
+
+    fn legacy_json(doc: &str, anns: &[(&str, u32)]) -> String {
+        let list: Vec<String> = anns.iter().map(|(id, n)| format!(
+            r#"{{"id":"{id}","quote":"q","prefix":"","suffix":"","lineHint":{{"start":1,"end":1}},"note":"old {id}","status":"open","author":"user","createdAt":"t","number":{n}}}"#
+        )).collect();
+        format!(r#"{{"docPath":"{doc}","nextNumber":{},"legacyExtra":true,"annotations":[{}]}}"#, anns.len() + 1, list.join(","))
+    }
+
+    fn numbered(store: &AnnotationStore) -> Vec<(String, u32)> {
+        store.annotations.iter().map(|a| (a.id.clone(), a.number)).collect()
+    }
+
+    fn pairs(v: &[(&str, u32)]) -> Vec<(String, u32)> {
+        v.iter().map(|(id, n)| (id.to_string(), *n)).collect()
+    }
+
+    #[test]
+    #[serial]
+    fn every_spelling_of_a_file_shares_one_store() {
+        let home = fresh_home("spellings");
+        let (via_link, canonical) = linked_doc(&home);
+        let real = home.join("real");
+        let mut variants = vec![
+            via_link.clone(),
+            canonical.clone(),
+            real.join("Plan.md").to_string_lossy().into_owned(),
+            format!("{}/./Plan.md", real.display()),
+            format!("{}//Plan.md", real.display()),
+            format!("{}/../real/Plan.md", real.display()),
+        ];
+        if real.join("plan.md").exists() {
+            variants.push(real.join("plan.md").to_string_lossy().into_owned()); // case-insensitive volume
+        }
+        for v in &variants {
+            assert_eq!(doc_key(v), canonical, "{v}");
+        }
+        add_annotation(via_link.clone(), ann("a")).unwrap();
+        for v in &variants {
+            assert_eq!(read_store(v).unwrap().annotations.len(), 1, "{v}");
+        }
+        assert_eq!(read_store(&via_link).unwrap().doc_path, canonical);
+        let expected = store_path_for(&canonical).unwrap().to_string_lossy().into_owned();
+        assert_eq!(ensure_annotation_store(variants[3].clone()).unwrap(), expected);
+        assert_eq!(doc_key("/tmp/glance-no-such-doc.md"), "/private/tmp/glance-no-such-doc.md");
+    }
+
+    #[test]
+    #[serial]
+    fn a_missing_file_gets_the_key_it_will_have_once_created() {
+        let home = fresh_home("missing-key");
+        linked_doc(&home);
+        let new_doc = home.join("link/New.md");
+        let before = doc_key(&new_doc.to_string_lossy());
+        assert!(!before.contains("/link/"), "{before}");
+        assert_eq!(doc_key(&format!("{}/link/./sub/../New.md", home.display())), before);
+        std::fs::write(&new_doc, "x").unwrap();
+        assert_eq!(doc_key(&new_doc.to_string_lossy()), before);
+    }
+
+    #[test]
+    #[serial]
+    fn upgrade_moves_a_store_filed_under_the_old_raw_key() {
+        let home = fresh_home("migrate-move");
+        let (via_link, canonical) = linked_doc(&home);
+        // 0.8.5 keyed the store by sha1 of the exact string the app passed.
+        let old = write_legacy(&via_link, &legacy_json(&via_link, &[("a", 1), ("b", 2)]));
+        let store = read_store(&via_link).unwrap();
+        assert_eq!(numbered(&store), pairs(&[("a", 1), ("b", 2)]));
+        assert!(!old.exists());
+        let new = store_path_for(&canonical).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&new).unwrap()).unwrap();
+        assert_eq!(v["docPath"], canonical.as_str());
+        assert_eq!(v["nextNumber"], 3);
+        assert_eq!(v["legacyExtra"], true);
+        assert_eq!(v["annotations"][1]["note"], "old b");
+        // Any spelling now reads the migrated store.
+        assert_eq!(read_store(&canonical).unwrap().annotations.len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn a_dotdot_spelling_never_adopts_another_docs_store() {
+        let home = fresh_home("migrate-dotdot");
+        // Resolved, so the lexical spelling of the other doc is its real path.
+        let real = std::fs::canonicalize(&home).unwrap().join("r");
+        std::fs::create_dir_all(real.join("docs")).unwrap();
+        std::fs::create_dir_all(real.join("w")).unwrap();
+        std::os::unix::fs::symlink(real.join("docs"), real.join("w").join("docs")).unwrap();
+        std::fs::write(real.join("README.md"), "top\n").unwrap();
+        let other = real.join("w").join("README.md");
+        std::fs::write(&other, "hello\n").unwrap();
+        let other = std::fs::canonicalize(&other).unwrap().to_string_lossy().into_owned();
+        add_annotation(other.clone(), ann("theirs")).unwrap();
+        // w/docs/.. is r/ physically, but w/ lexically: the other doc's path.
+        let tricky = real.join("w").join("docs").join("..").join("README.md");
+        let mine = read_store(&tricky.to_string_lossy()).unwrap();
+        assert!(mine.annotations.is_empty());
+        assert_eq!(read_store(&other).unwrap().annotations.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn upgrade_merges_a_legacy_store_into_an_existing_one() {
+        let home = fresh_home("migrate-merge");
+        let (via_link, canonical) = linked_doc(&home);
+        add_annotation(canonical.clone(), ann("a")).unwrap();
+        add_annotation(canonical.clone(), ann("b")).unwrap();
+        // glance-mcp wrote under the canonical spelling while the app used the link.
+        let old = write_legacy(&via_link, &legacy_json(&via_link, &[("a", 1), ("c", 2)]));
+        // A mutation migrates under the lock before applying itself.
+        add_reply(via_link.clone(), "c".into(), "still here?".into()).unwrap();
+        assert!(!old.exists());
+        let store = read_store(&canonical).unwrap();
+        assert_eq!(numbered(&store), pairs(&[("a", 1), ("b", 2), ("c", 3)]));
+        assert_eq!(store.annotations[0].note, "n"); // the existing copy of a duplicate id wins
+        assert_eq!(store.annotations[2].replies[0].text, "still here?");
+        assert_eq!(store.next_number, 4);
+        assert_eq!(store.extra.get("legacyExtra"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    #[serial]
+    fn upgrade_finds_the_apps_spelling_from_a_dotted_variant() {
+        let home = fresh_home("migrate-dotted");
+        let (via_link, canonical) = linked_doc(&home);
+        let old = write_legacy(&via_link, &legacy_json(&via_link, &[("a", 1)]));
+        let dotted = via_link.replace("/link/", "/link/./");
+        let expected = store_path_for(&canonical).unwrap().to_string_lossy().into_owned();
+        assert_eq!(ensure_annotation_store(dotted).unwrap(), expected);
+        assert!(!old.exists());
+        assert_eq!(read_store(&canonical).unwrap().annotations.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn adopt_alias_store_folds_in_a_literal_tilde_key() {
+        let home = fresh_home("alias");
+        let (_, canonical) = linked_doc(&home);
+        add_annotation(canonical.clone(), ann("a")).unwrap();
+        let old = write_legacy("~/real/Plan.md", &legacy_json("~/real/Plan.md", &[("t", 1)]));
+        adopt_alias_store("~/real/Plan.md", &canonical).unwrap();
+        assert!(!old.exists());
+        assert_eq!(numbered(&read_store(&canonical).unwrap()), pairs(&[("a", 1), ("t", 2)]));
+        adopt_alias_store("~/real/Plan.md", &canonical).unwrap(); // nothing left to adopt
+        assert_eq!(read_store(&canonical).unwrap().annotations.len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn a_damaged_legacy_store_blocks_and_is_left_alone() {
+        let home = fresh_home("migrate-damaged");
+        let (via_link, canonical) = linked_doc(&home);
+        let old = write_legacy(&via_link, "{not json");
+        assert!(read_store(&via_link).unwrap_err().contains("damaged"));
+        assert!(add_annotation(via_link.clone(), ann("x")).is_err());
+        assert!(ensure_annotation_store(via_link.clone()).is_err());
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "{not json");
+        assert!(!store_path_for(&canonical).unwrap().exists());
+    }
+
+    #[test]
+    #[serial]
+    fn a_held_lock_times_out_with_a_clear_error() {
+        fresh_home("locked");
+        let doc = "/m/locked.md";
+        add_annotation(doc.into(), ann("a")).unwrap();
+        let store_path = store_path_for(doc).unwrap();
+        // flock is per open file, so a second handle in this process contends like another process.
+        let holder = std::fs::File::open(store_path.with_extension("json.lock")).unwrap();
+        holder.lock_exclusive().unwrap();
+        let started = Instant::now();
+        let err = with_store_lock_within(&store_path, Duration::from_millis(150), || Ok(())).unwrap_err();
+        assert!(err.contains("locked by another process"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        holder.unlock().unwrap();
+        with_store_lock_within(&store_path, Duration::from_millis(150), || Ok(())).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn numbers_at_u32_max_saturate_instead_of_overflowing() {
+        fresh_home("overflow");
+        let doc = "/m/of.md";
+        let path = store_path_for(doc).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"docPath":"/m/of.md","annotations":[
+            {"id":"a","quote":"q","prefix":"","suffix":"","lineHint":{"start":1,"end":1},"note":"n","status":"open","author":"user","createdAt":"t","number":4294967295},
+            {"id":"b","quote":"q","prefix":"","suffix":"","lineHint":{"start":1,"end":1},"note":"n","status":"open","author":"user","createdAt":"t"}]}"#).unwrap();
+        let store = read_store(doc).unwrap();
+        assert_eq!(store.next_number, u32::MAX);
+        assert_eq!(store.annotations[1].number, u32::MAX);
+        let mut carried = ann("c");
+        carried.number = u32::MAX;
+        add_annotation(doc.into(), carried).unwrap();
+        assert_eq!(read_store(doc).unwrap().annotations.len(), 3);
+    }
+
+    #[test]
+    #[serial]
+    fn store_writes_leave_no_temp_files_behind() {
+        let home = fresh_home("atomic");
+        let doc = "/m/atomic.md";
+        for id in ["a", "b"] {
+            add_annotation(doc.into(), ann(id)).unwrap();
+        }
+        let names: Vec<String> = std::fs::read_dir(home.join(".glance/annotations")).unwrap()
+            .flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+        assert_eq!(read_store(doc).unwrap().annotations.len(), 2);
+    }
+
+    #[test]
+    fn write_atomic_replaces_content_and_reports_failure() {
+        let dir = std::env::temp_dir().join(format!("glance-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("f.json");
+        write_atomic(&file, b"one").unwrap();
+        write_atomic(&file, b"two").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "two");
+        // Renaming over a directory fails; the temp file is cleaned up.
+        std::fs::create_dir_all(dir.join("sub.json")).unwrap();
+        assert!(write_atomic(&dir.join("sub.json"), b"x").is_err());
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 2, "{left:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn unknown_store_and_annotation_fields_survive_a_mutation() {
+        fresh_home("unknown");
+        let doc = "/m/unknown.md";
+        let path = store_path_for(doc).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"docPath":"/m/unknown.md","nextNumber":2,"schemaVersion":2,"annotations":[
+            {"id":"a","quote":"q","prefix":"","suffix":"","lineHint":{"start":1,"end":1},"note":"n","status":"open","author":"user","createdAt":"t","number":1,"tags":["x"],"severity":"high"}]}"#).unwrap();
+        add_reply(doc.into(), "a".into(), "hi".into()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["schemaVersion"], 2);
+        assert_eq!(v["annotations"][0]["severity"], "high");
+        assert_eq!(v["annotations"][0]["tags"], serde_json::json!(["x"]));
+        assert_eq!(v["annotations"][0]["replies"][0]["text"], "hi");
+        assert!(v.get("extra").is_none());
     }
 
     #[test]
