@@ -3,6 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { openUrl, openPath as openWithDefaultApp, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { Annotation, AnnotationPatch, AnnotationStore, Resolution } from "./annotations";
+import { LATEST_RELEASE_URL } from "./update-check";
 
 export function appVersion(): Promise<string> {
   return getVersion();
@@ -191,6 +192,19 @@ export function onShowAbout(cb: () => void): Promise<UnlistenFn> {
 }
 export function onShowWhatsNew(cb: () => void): Promise<UnlistenFn> {
   return listen("show-whats-new", () => cb());
+}
+export function onCheckForUpdates(cb: () => void): Promise<UnlistenFn> {
+  return listen("check-for-updates", () => cb());
+}
+
+// The raw `releases/latest` body from GitHub; update-check.ts validates it.
+export async function fetchLatestRelease(): Promise<unknown> {
+  const res = await fetch(LATEST_RELEASE_URL, {
+    headers: { Accept: "application/vnd.github+json" },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) throw new Error(`GitHub returned ${res.status}`);
+  return res.json();
 }
 
 export function onShowTheme(cb: () => void): Promise<UnlistenFn> {

@@ -493,6 +493,38 @@ export function showWhatsNew(version: string, html: string, onClose: () => void)
   ok.focus();
 }
 
+/** A newer release is on GitHub. Download opens the release page; Homebrew
+ *  installs get the upgrade command instead. */
+export function showUpdateAvailable(current: string, latest: string, url: string): void {
+  const m = openModal({ title: "Update available", onEscape: () => m.close() });
+  const msg = document.createElement("p");
+  msg.textContent = `Glance ${latest} is available. You have ${current}.`;
+  const brew = document.createElement("p");
+  brew.append("Installed with Homebrew? Run ");
+  const code = document.createElement("code");
+  code.textContent = "brew upgrade --cask glance";
+  brew.append(code, ".");
+  m.body.append(msg, brew);
+
+  const later = button("Later");
+  later.onclick = m.close;
+  const download = button("Download", true);
+  download.onclick = () => { m.close(); void openExternal(url); };
+  m.footer.append(later, download);
+  download.focus();
+}
+
+export function showUpToDate(version: string): void {
+  const m = openModal({ title: "You're up to date", onEscape: () => m.close() });
+  const msg = document.createElement("p");
+  msg.textContent = `Glance ${version} is the latest version.`;
+  m.body.appendChild(msg);
+  const okBtn = button("OK", true);
+  okBtn.onclick = m.close;
+  m.footer.appendChild(okBtn);
+  okBtn.focus();
+}
+
 // Asked before a link hands a file that might be a program (.command, .app, a
 // bare executable) to its default app. Cancel is the default.
 export function confirmOpenFile(path: string): Promise<boolean> {

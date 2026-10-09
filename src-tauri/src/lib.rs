@@ -343,6 +343,9 @@ pub fn run() {
                 "whats_new" => {
                     let _ = app.emit("show-whats-new", ());
                 }
+                "check_for_updates" => {
+                    let _ = app.emit("check-for-updates", ());
+                }
                 "open_theme" => {
                     let _ = app.emit("show-theme", ());
                 }
@@ -363,6 +366,13 @@ pub fn run() {
                 handle,
                 "whats_new",
                 "What's New…",
+                true,
+                None::<&str>,
+            )?;
+            let check_updates_item = MenuItem::with_id(
+                handle,
+                "check_for_updates",
+                "Check for Updates…",
                 true,
                 None::<&str>,
             )?;
@@ -397,6 +407,7 @@ pub fn run() {
                 &[
                     &about_item,
                     &whats_new_item,
+                    &check_updates_item,
                     &PredefinedMenuItem::separator(handle)?,
                     &install_cli_item,
                     &remove_cli_item,
