@@ -38,7 +38,6 @@ import { mountEditor, type EditorHandle } from "./editor";
 import { decideReload } from "./reload";
 import { restoreTarget, lineAtOffset, offsetForLine, type LineBlock } from "./scroll-restore";
 import { confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker, showWhatsNew } from "./modal";
-import { confirmUnsaved } from "./modal";
 import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
 } from "./theme";
@@ -46,6 +45,7 @@ import { openPaths, pushRecent } from "./session";
 import { needsSetup } from "./integration";
 import { shouldShowCommentHint } from "./hint";
 import type { ClientInfo, IntegrationAction } from "./ipc";
+import { confirmUnsaved } from "./modal";
 
 const LS_OPEN = "glance.openPaths";
 const LS_RECENT = "glance.recent";
