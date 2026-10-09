@@ -2066,9 +2066,10 @@ mod tests {
             .unwrap();
         child.stdin.take().unwrap().write_all(stdin_json.as_bytes()).unwrap();
         let _ = child.wait();
-        // the stub is launched detached (`&`); poll briefly for the marker
+        // the stub is launched detached (`&`); poll briefly for the marker. Its
+        // `>>` creates the file before printf writes, so wait for a full line.
         for _ in 0..40 {
-            if marker.exists() {
+            if std::fs::read_to_string(marker).is_ok_and(|s| s.ends_with('\n')) {
                 return true;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
