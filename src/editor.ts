@@ -1,5 +1,5 @@
 import { EditorView, keymap } from "@codemirror/view";
-import { EditorState } from "@codemirror/state";
+import { Annotation, Compartment, EditorState } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, selectAll } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
@@ -40,12 +40,30 @@ const glanceHighlight = HighlightStyle.define([
   { tag: t.comment, color: "var(--faint)" },
 ]);
 
+// Marks a change that came from outside the editor (the file changed on disk),
+// so it isn't reported back through onChange as if the user typed it.
+const external = Annotation.define<boolean>();
+
+/** The single replacement turning `from` into `to`: their common prefix and
+ *  suffix stay put, so a cursor outside the changed span keeps its place. */
+export function minimalChange(from: string, to: string): { from: number; to: number; insert: string } | null {
+  if (from === to) return null;
+  const max = Math.min(from.length, to.length);
+  let start = 0;
+  while (start < max && from.charCodeAt(start) === to.charCodeAt(start)) start++;
+  let end = 0;
+  while (end < max - start && from.charCodeAt(from.length - 1 - end) === to.charCodeAt(to.length - 1 - end)) end++;
+  return { from: start, to: from.length - end, insert: to.slice(start, to.length - end) };
+}
+
 export function mountEditor(
   host: HTMLElement,
   initial: string,
   onChange: (v: string) => void,
   dark = false,
 ): EditorHandle {
+  const darkness = new Compartment();
+  let isDark = dark;
   const view = new EditorView({
     parent: host,
     state: EditorState.create({
@@ -56,16 +74,27 @@ export function mountEditor(
         markdown(),
         EditorView.lineWrapping,
         glanceTheme,
-        EditorView.theme({}, { dark }),
+        darkness.of(EditorView.theme({}, { dark })),
         syntaxHighlighting(glanceHighlight),
         EditorView.updateListener.of((u) => {
-          if (u.docChanged) onChange(u.state.doc.toString());
+          if (!u.docChanged) return;
+          if (u.transactions.every((tr) => tr.annotation(external))) return;
+          onChange(u.state.doc.toString());
         }),
       ],
     }),
   });
   return {
     destroy: () => view.destroy(),
+    setContent: (text: string) => {
+      const change = minimalChange(view.state.doc.toString(), text);
+      if (change) view.dispatch({ changes: change, annotations: external.of(true) });
+    },
+    setDark: (next: boolean) => {
+      if (next === isDark) return;
+      isDark = next;
+      view.dispatch({ effects: darkness.reconfigure(EditorView.theme({}, { dark: next })) });
+    },
     // Full-document select-all: CodeMirror knows the whole doc even though only
     // the visible lines are in the DOM, so this beats the webview's native
     // selectAll: (which would grab only the rendered lines).
@@ -85,6 +114,9 @@ export function mountEditor(
 
 export interface EditorHandle {
   destroy(): void;
+  /** Replace the text (an outside change), keeping selection and undo history. */
+  setContent(text: string): void;
+  setDark(dark: boolean): void;
   selectAll(): void;
   /** 1-based source line at the top of the visible area. */
   topLine(): number;

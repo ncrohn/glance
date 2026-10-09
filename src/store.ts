@@ -1,4 +1,4 @@
-import { Doc, ViewMode, createDoc } from "./document";
+import { Doc, ViewMode, createDoc, detectEol } from "./document";
 import type { Annotation, Resolution } from "./annotations";
 
 export interface State {
@@ -94,6 +94,7 @@ export function applyDiskChange(s: State, id: string, diskContent: string): Stat
     diskContent,
     editorContent: diskContent,
     existsOnDisk: true,
+    eol: detectEol(diskContent),
   }));
 }
 

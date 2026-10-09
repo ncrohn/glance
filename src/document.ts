@@ -16,6 +16,26 @@ export interface Doc {
   // Ids Claude resolved or replied to while this doc was in a background tab;
   // pulsed and cleared when the tab is next shown.
   claudeActivity: string[];
+  // The file's line ending. The editor works in LF, so its text is put back
+  // into this form before it lands in editorContent and on disk.
+  eol: LineEnding;
+}
+
+export type LineEnding = "\n" | "\r\n";
+
+/** The line ending of the first line break, LF when there is none. */
+export function detectEol(text: string): LineEnding {
+  const nl = text.indexOf("\n");
+  return nl > 0 && text[nl - 1] === "\r" ? "\r\n" : "\n";
+}
+
+export function toLf(text: string): string {
+  return text.includes("\r\n") ? text.replace(/\r\n/g, "\n") : text;
+}
+
+/** Editor text (LF) in the file's own line ending. */
+export function withEol(lfText: string, eol: LineEnding): string {
+  return eol === "\n" ? lfText : toLf(lfText).replace(/\n/g, "\r\n");
 }
 
 export function basename(path: string): string {
@@ -36,6 +56,7 @@ export function createDoc(absPath: string, diskContent: string): Doc {
     annotations: [],
     resolutions: {},
     claudeActivity: [],
+    eol: detectEol(diskContent),
   };
 }
 
