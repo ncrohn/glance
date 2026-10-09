@@ -172,10 +172,16 @@ pub fn new_id(seed: &str) -> String {
     sha1_hex(seed)[..8].to_string()
 }
 
-/// Remove one annotation by id under lock.
+/// Remove one annotation by id under lock. Returns it as stored at removal
+/// (store-assigned number, replies, resolution), which is what the GUI's Undo
+/// re-adds — the GUI's own copy can be stale or still numberless.
 #[tauri::command]
-pub fn remove_annotation(doc_path: String, id: String) -> Result<(), String> {
-    mutate_store(&doc_path, move |s| s.annotations.retain(|a| a.id != id))
+pub fn remove_annotation(doc_path: String, id: String) -> Result<Option<Annotation>, String> {
+    mutate_store(&doc_path, move |s| {
+        let removed = s.annotations.iter().find(|a| a.id == id).cloned();
+        s.annotations.retain(|a| a.id != id);
+        removed
+    })
 }
 
 /// Fields the GUI may change on a stored annotation. Every `Some` is applied;
@@ -770,6 +776,22 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         remove_annotation(doc.into(), "zzz".into()).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+    }
+
+    #[test]
+    #[serial]
+    fn remove_returns_the_annotation_as_stored() {
+        fresh_home("remove-returns");
+        let doc = "/m/remove.md";
+        add_annotation(doc.into(), ann("a")).unwrap();
+        add_annotation(doc.into(), ann("b")).unwrap();
+        add_reply(doc.into(), "b".into(), "later".into()).unwrap();
+        let removed = remove_annotation(doc.into(), "b".into()).unwrap().unwrap();
+        assert_eq!(removed.number, 2);
+        assert_eq!(removed.replies.len(), 1);
+        assert_eq!(removed.replies[0].text, "later");
+        assert!(remove_annotation(doc.into(), "b".into()).unwrap().is_none());
+        assert_eq!(read_store(doc).unwrap().annotations.len(), 1);
     }
 
     #[test]

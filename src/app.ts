@@ -279,21 +279,26 @@ function renderRailFor(): void {
     onRemove: (a) => {
       // Optimistic local remove (fresh from state), then the locked server-side
       // remove, then reconcile with the merged on-disk truth. Undo re-adds the
-      // same annotation (id and number intact) after the remove has landed, so
-      // the store stays consistent even if the app quits mid-toast.
+      // annotation as the store held it when removed (its assigned number, and
+      // replies or a resolution that landed after the rail rendered) once the
+      // remove has landed, so the store stays consistent even if the app quits
+      // mid-toast.
       const cur = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? doc.annotations;
+      const local = cur.find((x) => x.id === a.id) ?? a;
       state = setDocAnnotations(state, doc.absPath, removeAnnotation(cur, a.id));
       render();
-      const removed = persistComments(doc.absPath, cur, removeStoredAnnotation(doc.absPath, a.id));
-      showToast(a.number > 0 ? `Comment ${a.number} deleted` : "Comment deleted", {
+      const removal = removeStoredAnnotation(doc.absPath, a.id);
+      const removed = persistComments(doc.absPath, cur, removal);
+      showToast(local.number > 0 ? `Comment ${local.number} deleted` : "Comment deleted", {
         actionLabel: "Undo",
         onAction: () => {
-          void removed.then((ok) => {
+          void removed.then(async (ok) => {
             if (!ok) return; // the remove was rolled back; nothing to undo
+            const restored = (await removal) ?? local;
             const now = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? [];
-            state = setDocAnnotations(state, doc.absPath, addAnnotation(now, a));
+            state = setDocAnnotations(state, doc.absPath, addAnnotation(now, restored));
             render();
-            return persistComments(doc.absPath, now, addStoredAnnotation(doc.absPath, a));
+            return persistComments(doc.absPath, now, addStoredAnnotation(doc.absPath, restored));
           });
         },
       });
