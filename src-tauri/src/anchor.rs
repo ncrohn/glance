@@ -58,14 +58,16 @@ fn offset_to_line(text: &str, byte_offset: usize) -> usize {
     text[..byte_offset].bytes().filter(|&b| b == b'\n').count() + 1
 }
 
+/// Every byte offset where `needle` starts, overlapping matches included, so
+/// `"x\nx"` in `"x\nx\nx"` is found on lines 1 and 2.
 fn find_all(text: &str, needle: &str) -> Vec<usize> {
     let mut out = Vec::new();
     let mut start = 0usize;
     while let Some(i) = text[start..].find(needle) {
         let abs = start + i;
         out.push(abs);
-        start = abs + needle.len().max(1);
-        if start > text.len() {
+        start = abs + text[abs..].chars().next().map_or(1, char::len_utf8);
+        if start >= text.len() {
             break;
         }
     }
@@ -74,11 +76,13 @@ fn find_all(text: &str, needle: &str) -> Vec<usize> {
 
 fn located(a: &Annotation, text: &str, quote_offset: usize, kind: &str) -> Resolution {
     let start = offset_to_line(text, quote_offset);
-    let newlines_in_quote = a.quote.bytes().filter(|&b| b == b'\n').count();
+    // A trailing newline ends the quote's last line; it doesn't start another.
+    let body = a.quote.strip_suffix('\n').unwrap_or(&a.quote);
+    let newlines_in_quote = body.bytes().filter(|&b| b == b'\n').count();
     Resolution {
         id: a.id.clone(),
         start_line: Some(start),
-        end_line: Some(start + newlines_in_quote),
+        end_line: Some(start.saturating_add(newlines_in_quote)),
         anchor: kind.to_string(),
     }
 }
@@ -108,12 +112,15 @@ pub fn resolve_anchor(text: &str, a: &Annotation) -> Resolution {
     let occurrences = find_all(text, &a.quote);
     match occurrences.len() {
         0 => {
-            let total_lines = text.lines().count().max(1);
-            if a.line_hint.start >= 1 && a.line_hint.start <= total_lines {
+            // Count lines the way offset_to_line numbers them: the empty line
+            // after a trailing newline is a line too.
+            let total_lines = text.bytes().filter(|&b| b == b'\n').count() + 1;
+            let start = a.line_hint.start;
+            if start >= 1 && start <= total_lines {
                 Resolution {
                     id: a.id.clone(),
-                    start_line: Some(a.line_hint.start),
-                    end_line: Some(a.line_hint.end),
+                    start_line: Some(start),
+                    end_line: Some(a.line_hint.end.clamp(start, total_lines)),
                     anchor: "drifted".to_string(),
                 }
             } else {
@@ -122,10 +129,10 @@ pub fn resolve_anchor(text: &str, a: &Annotation) -> Resolution {
         }
         1 => located(a, text, occurrences[0], "quote-only"),
         _ => {
-            let hint = a.line_hint.start as i64;
+            let hint = a.line_hint.start;
             let best = occurrences
                 .iter()
-                .min_by_key(|&&off| (offset_to_line(text, off) as i64 - hint).abs())
+                .min_by_key(|&&off| offset_to_line(text, off).abs_diff(hint))
                 .copied()
                 .unwrap();
             located(a, text, best, "quote-only")
@@ -209,5 +216,52 @@ mod tests {
         assert_eq!(r.anchor, "exact");
         assert_eq!(r.start_line, Some(2));
         assert_eq!(r.end_line, Some(3));
+    }
+
+    #[test]
+    fn overlapping_repeats_are_all_candidates() {
+        // "x\nx" starts on line 1 and, overlapping, on line 2; the hint picks line 2.
+        let r = resolve_anchor("x\nx\nx\n", &ann("x\nx", "", "", 2));
+        assert_eq!(r.anchor, "quote-only");
+        assert_eq!(r.start_line, Some(2));
+        assert_eq!(r.end_line, Some(3));
+        assert_eq!(find_all("aaa", "aa"), vec![0, 1]);
+        assert_eq!(find_all("éé", "é"), vec![0, 2]);
+    }
+
+    #[test]
+    fn quote_ending_in_newline_ends_on_its_own_line() {
+        let r = resolve_anchor("a\nb\nc\n", &ann("c\n", "", "", 1));
+        assert_eq!((r.start_line, r.end_line), (Some(3), Some(3)));
+        let r = resolve_anchor("a\nb\nc\n", &ann("b\nc\n", "", "", 1));
+        assert_eq!((r.start_line, r.end_line), (Some(2), Some(3)));
+    }
+
+    #[test]
+    fn hint_on_the_line_after_a_trailing_newline_is_in_range() {
+        // offset_to_line calls the spot after the last "\n" line 4, so a hint there drifts.
+        let r = resolve_anchor("a\nb\nc\n", &ann("gone", "", "", 4));
+        assert_eq!(r.anchor, "drifted");
+        assert_eq!(resolve_anchor("a\nb\nc\n", &ann("gone", "", "", 5)).anchor, "orphaned");
+    }
+
+    #[test]
+    fn drifted_end_is_clamped_to_the_file_and_never_before_start() {
+        let mut a = ann("gone", "", "", 2);
+        a.line_hint.end = usize::MAX;
+        let r = resolve_anchor("a\nb\nc", &a);
+        assert_eq!((r.start_line, r.end_line), (Some(2), Some(3)));
+        a.line_hint.end = 1;
+        let r = resolve_anchor("a\nb\nc", &a);
+        assert_eq!((r.start_line, r.end_line), (Some(2), Some(2)));
+    }
+
+    #[test]
+    fn huge_hint_start_with_repeated_quote_does_not_overflow() {
+        let a = ann("dup", "", "", usize::MAX);
+        let r = resolve_anchor("dup\nx\ndup\n", &a);
+        assert_eq!(r.start_line, Some(3)); // nearest to the (huge) hint
+        let a = ann("dup", "", "", (i64::MAX as usize) + 1);
+        assert_eq!(resolve_anchor("dup\nx\ndup\n", &a).start_line, Some(3));
     }
 }
