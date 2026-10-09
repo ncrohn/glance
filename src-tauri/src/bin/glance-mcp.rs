@@ -73,7 +73,7 @@ fn context_around(text: &str, start: usize, end: usize, n: usize) -> Context {
     let before_to = start.saturating_sub(1).min(lines.len());
     let before_from = before_to.saturating_sub(n);
     let after_from = end.min(lines.len());
-    let after_to = (end + n).min(lines.len());
+    let after_to = end.saturating_add(n).min(lines.len());
     Context {
         before: lines[before_from..before_to].iter().map(|l| l.to_string()).collect(),
         after: lines[after_from..after_to].iter().map(|l| l.to_string()).collect(),
@@ -169,11 +169,28 @@ fn claude_annotation(path: &str, quote: &str, note: &str, prefix: &str, suffix: 
     }
 }
 
-fn line_hint_arg(v: Option<&Value>) -> Option<LineHint> {
-    let v = v?;
-    let start = v.get("start")?.as_u64()? as usize;
-    let end = v.get("end").and_then(|e| e.as_u64()).map(|e| e as usize).unwrap_or(start);
-    Some(LineHint { start, end })
+/// Parse `add_annotation`'s optional `lineHint` against a doc of `total_lines`
+/// lines (numbered as the anchor resolver numbers them). Anything but whole
+/// numbers with 1 <= start <= end <= total_lines is an error, so no stored hint
+/// can be negative, inverted, or large enough to overflow later arithmetic.
+fn line_hint_arg(v: Option<&Value>, total_lines: usize) -> Result<Option<LineHint>, String> {
+    let Some(v) = v.filter(|v| !v.is_null()) else { return Ok(None) };
+    let bad = || format!("'lineHint' must be {{\"start\": n, \"end\": m}} with 1 <= start <= end <= {total_lines}, the file's line count");
+    let obj = v.as_object().ok_or_else(bad)?;
+    let line = |key: &str| match obj.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(n) => n.as_u64().filter(|&n| n >= 1 && n <= total_lines as u64).map(|n| Some(n as usize)).ok_or_else(bad),
+    };
+    let start = line("start")?.ok_or_else(bad)?;
+    let end = line("end")?.unwrap_or(start);
+    if end < start {
+        return Err(bad());
+    }
+    Ok(Some(LineHint { start, end }))
+}
+
+fn line_count(text: &str) -> usize {
+    text.bytes().filter(|&b| b == b'\n').count() + 1
 }
 
 /// Most docs a `--pending` run will mention. Keeps the injected context short.
@@ -455,6 +472,55 @@ mod tests {
     }
 
     #[test]
+    fn context_around_huge_end_does_not_overflow() {
+        let c = context_around(NINE, 5, usize::MAX, 3);
+        assert_eq!(c.before, strs(&["l2", "l3", "l4"]));
+        assert!(c.after.is_empty());
+        let c = context_around(NINE, usize::MAX, usize::MAX, 3);
+        assert_eq!(c.before, strs(&["l7", "l8", "l9"]));
+    }
+
+    #[test]
+    fn line_hint_arg_accepts_only_sane_ranges() {
+        let parse = |v: Value| line_hint_arg(Some(&v), 9);
+        assert_eq!(parse(json!({ "start": 2 })), Ok(Some(LineHint { start: 2, end: 2 })));
+        assert_eq!(parse(json!({ "start": 2, "end": 9 })), Ok(Some(LineHint { start: 2, end: 9 })));
+        assert_eq!(parse(Value::Null), Ok(None));
+        assert_eq!(line_hint_arg(None, 9), Ok(None));
+        for bad in [
+            json!({ "start": -3 }),
+            json!({ "start": 0 }),
+            json!({ "start": 7, "end": 2 }),
+            json!({ "start": 2, "end": 10 }),
+            json!({ "start": 2, "end": 18446744073709551615u64 }),
+            json!({ "start": 9223372036854775808u64 }),
+            json!({ "start": 2.5 }),
+            json!({ "start": "2" }),
+            json!({ "end": 3 }),
+            json!(3),
+        ] {
+            let err = parse(bad.clone()).unwrap_err();
+            assert!(err.contains("lineHint"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn get_annotation_survives_a_stored_hint_end_near_u64_max() {
+        let home = fresh_home("huge-hint");
+        let doc = home.join("doc.md").to_string_lossy().into_owned();
+        std::fs::write(&doc, NINE).unwrap();
+        let mut a = ann("big", "GONE", "open");
+        a.line_hint = LineHint { start: 2, end: usize::MAX };
+        mutate_store(&doc, |s| s.annotations.push(a.clone())).unwrap();
+        let out = call_tool("get_annotation", &json!({ "path": doc, "id": "big" })).unwrap();
+        let detail = tool_json(&out);
+        assert_eq!(detail["anchor"], "drifted");
+        assert_eq!((detail["lineStart"].as_u64(), detail["lineEnd"].as_u64()), (Some(2), Some(10)));
+        assert_eq!(detail["context"]["before"], json!(["l1"]));
+    }
+
+    #[test]
     fn detail_of_orphaned_has_no_context() {
         let mut a = ann("a", "NOTINTEXTEVER", "open");
         a.line_hint = LineHint { start: 99, end: 99 };
@@ -534,9 +600,9 @@ mod tests {
         let err = call_tool("add_annotation", &json!({ "path": doc, "quote": "NOTINTEXTEVER", "note": "x" })).unwrap_err();
         assert!(err.contains("quote not found"), "{err}");
         assert_eq!(read_store(&doc).unwrap().annotations.len(), 2);
-        // Same with a line hint out of range ("orphaned").
+        // A line hint past the end of the file is refused before anything is written.
         let err = call_tool("add_annotation", &json!({ "path": doc, "quote": "NOTINTEXTEVER", "note": "x", "lineHint": { "start": 99 } })).unwrap_err();
-        assert!(err.contains("quote not found"), "{err}");
+        assert!(err.contains("lineHint"), "{err}");
         assert_eq!(read_store(&doc).unwrap().annotations.len(), 2);
 
         // list_annotations shows both, numbered.
@@ -914,15 +980,17 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             let note = args.get("note").and_then(|v| v.as_str()).map(str::trim).filter(|n| !n.is_empty()).ok_or("missing 'note'")?;
             let prefix = args.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
             let suffix = args.get("suffix").and_then(|v| v.as_str()).unwrap_or("");
-            let mut a = claude_annotation(path, quote, note, prefix, suffix, line_hint_arg(args.get("lineHint")));
             let text = read_doc(path)?;
+            let hint = line_hint_arg(args.get("lineHint"), line_count(&text))?;
+            let has_hint = hint.is_some();
+            let mut a = claude_annotation(path, quote, note, prefix, suffix, hint);
             let r = resolve_anchor(&text, &a);
             // A missing quote resolves to "drifted" when the line hint is in
             // range and "orphaned" otherwise; neither means the text is there.
             if r.anchor == "orphaned" || r.anchor == "drifted" {
                 return Err("quote not found in file; pass the exact text".to_string());
             }
-            if args.get("lineHint").is_none() {
+            if !has_hint {
                 if let (Some(s), Some(e)) = (r.start_line, r.end_line) {
                     a.line_hint = LineHint { start: s, end: e };
                 }
