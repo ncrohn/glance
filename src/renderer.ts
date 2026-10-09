@@ -34,6 +34,21 @@ const md = new MarkdownIt({
 
 md.use(taskLists);
 
+// Fuzzy linkify turns filenames like AGENTS.md or setup.sh into links to
+// http://AGENTS.md. Link only URLs with a scheme, plus `www.` hosts as GFM does.
+md.linkify.set({ fuzzyLink: false });
+md.linkify.add("www.", {
+  validate(text, pos, self) {
+    const re = self.re as Record<string, string | RegExp | undefined>;
+    re.www ??= new RegExp(`^${re.src_host_port_strict}${re.src_path}`, "i");
+    const m = (re.www as RegExp).exec(text.slice(pos));
+    return m ? m[0].length : 0;
+  },
+  normalize(match) {
+    match.url = `http://${match.url}`;
+  },
+});
+
 // HTML comments are hidden, as on GitHub and in Obsidian. Raw HTML stays off,
 // so only comments get this treatment; code spans and fences run first and keep
 // any comment inside them visible.

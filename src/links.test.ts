@@ -87,6 +87,24 @@ describe("parseWikilink", () => {
   });
 });
 
+describe("renderMarkdown linkify", () => {
+  it("leaves bare filenames as text", () => {
+    const html = renderMarkdown("See AGENTS.md and src/lib.rs, run setup.sh, open Calculator.app");
+    expect(html).not.toContain("<a");
+    expect(html).not.toContain("http://");
+  });
+
+  it("still links URLs with a scheme and www. hosts", () => {
+    const html = renderMarkdown("Go to https://example.com/a?b=1 or www.example.com/docs.");
+    expect(html).toContain('<a href="https://example.com/a?b=1">https://example.com/a?b=1</a>');
+    expect(html).toContain('<a href="http://www.example.com/docs">www.example.com/docs</a>.');
+  });
+
+  it("doesn't link www. in the middle of a word", () => {
+    expect(renderMarkdown("notwww.example.com")).not.toContain("<a");
+  });
+});
+
 describe("renderMarkdown wikilinks and comments", () => {
   it("renders [[links]] with their target", () => {
     const html = renderMarkdown("See [[decisions]] and [[../x/index|X]].");
