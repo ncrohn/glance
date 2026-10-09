@@ -49,6 +49,12 @@ md.linkify.add("www.", {
   },
 });
 
+// markdown-it rejects file: URLs outright. Let file: links through to
+// classifyLink, whose open path asks before running anything; file: images are
+// mapped onto the asset protocol by the image rule below or dropped.
+const defaultValidateLink = md.validateLink;
+md.validateLink = (url) => /^file:/i.test(url.trim()) || defaultValidateLink(url);
+
 // HTML comments are hidden, as on GitHub and in Obsidian. Raw HTML stays off,
 // so only comments get this treatment; code spans and fences run first and keep
 // any comment inside them visible.
@@ -113,10 +119,9 @@ const defaultImage = md.renderer.rules.image!;
 md.renderer.rules.image = (tokens, idx, options, env, self) => {
   const resolve = env?.resolveImage as ((src: string) => string | null) | undefined;
   const src = tokens[idx].attrGet("src");
-  if (resolve && src) {
-    const next = resolve(src);
-    if (next) tokens[idx].attrSet("src", next);
-  }
+  const next = resolve && src ? resolve(src) : null;
+  if (next) tokens[idx].attrSet("src", next);
+  else if (src && /^file:/i.test(src.trim())) tokens[idx].attrSet("src", "");
   return defaultImage(tokens, idx, options, env, self);
 };
 

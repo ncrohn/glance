@@ -105,6 +105,40 @@ describe("renderMarkdown linkify", () => {
   });
 });
 
+describe("renderMarkdown file: links", () => {
+  it("renders file:// links and autolinks so clicks reach classifyLink", () => {
+    const html = renderMarkdown("[f](file:///Users/me/a.md) <file:///Users/me/b%20c.pdf>");
+    expect(html).toContain('<a href="file:///Users/me/a.md">f</a>');
+    expect(html).toContain('<a href="file:///Users/me/b%20c.pdf">');
+    expect(classifyLink("file:///Users/me/a.md", base)).toEqual({ kind: "markdown", path: "/Users/me/a.md" });
+    expect(classifyLink("file:///Users/me/b%20c.pdf", null)).toEqual({ kind: "file", path: "/Users/me/b c.pdf" });
+  });
+
+  it("maps file:// images through the resolver and drops them without one", () => {
+    const resolve = (src: string) => {
+      const path = resolveLocalPath(base, src);
+      return path ? `asset://localhost${path}` : null;
+    };
+    const md = "![i](file:///Users/me/a.png)";
+    expect(renderMarkdown(md, undefined, undefined, resolve)).toContain('src="asset://localhost/Users/me/a.png"');
+    expect(renderMarkdown(md)).toContain('<img src="" alt="i">');
+  });
+
+  it("keeps script and non-image data URLs out of links", () => {
+    for (const md of [
+      "[x](javascript:alert(1))",
+      "[x](jav&#x61;script:alert(1))",
+      "[x](vbscript:msgbox)",
+      "[x](data:text/html,hi)",
+      "<javascript:alert(1)>",
+      "[x][r]\n\n[r]: javascript:alert(1)",
+    ]) {
+      expect(renderMarkdown(md), md).not.toContain("<a");
+    }
+    expect(renderMarkdown("![x](data:image/png;base64,AA)")).toContain('src="data:image/png;base64,AA"');
+  });
+});
+
 describe("renderMarkdown wikilinks and comments", () => {
   it("renders [[links]] with their target", () => {
     const html = renderMarkdown("See [[decisions]] and [[../x/index|X]].");
