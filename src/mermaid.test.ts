@@ -12,7 +12,7 @@ const render = vi.fn(async (id: string) => ({
 vi.mock("mermaid", () => ({ default: { initialize: vi.fn(), render } }));
 
 import { renderMermaidBlocks } from "./mermaid";
-import { closeMermaidZoom, openMermaidZoom } from "./mermaid-zoom";
+import { closeMermaidZoom, openMermaidZoom, uniquifySvgIds } from "./mermaid-zoom";
 
 function placeholder(src: string): string {
   return `<pre class="mermaid-block">${src}</pre>`;
@@ -71,5 +71,17 @@ describe("mermaid diagram ids", () => {
     expect(new Set(all).size).toBe(all.length);
     referencesStayInside(clone);
     referencesStayInside(original);
+  });
+
+  it("renames ids in style selectors but leaves colours that look like ids", () => {
+    const host = document.createElement("div");
+    host.innerHTML =
+      '<svg id="d"><style>#d .node{fill:#fff;stroke:url(#g)} #fff{opacity:1}</style>' +
+      '<g id="fff"></g><linearGradient id="g"></linearGradient></svg>';
+    uniquifySvgIds(host.querySelector("svg")!);
+    const css = host.querySelector("style")!.textContent!;
+    const id = (old: string) => host.querySelector(`[id^="${old}-g"]`)!.id;
+    expect(css).toContain(`#${id("d")} .node{fill:#fff;stroke:url(#${id("g")})}`);
+    expect(css).toContain(`#${id("fff")}{opacity:1}`);
   });
 });

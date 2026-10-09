@@ -169,6 +169,19 @@ describe("renderMarkdown HTML comments in containers", () => {
     expect(html).toContain('<li data-sourceline="5" data-sourceline-end="5">b</li>');
   });
 
+  it("keeps hiding a list item's comment whose body is flush left", () => {
+    const html = renderMarkdown("- a\n- <!--\nHidden reviewer note.\n-->\n- next");
+    expect(html).not.toContain("Hidden reviewer note");
+    expect(html.match(/<ul/g)).toHaveLength(1);
+    expect(html).toContain("next</li>");
+  });
+
+  it("keeps hiding a blockquote comment that continues on a lazy line", () => {
+    const html = renderMarkdown("> <!-- note\ncontinued -->\n\nafter");
+    expect(html).not.toContain("continued");
+    expect(html).toContain("after");
+  });
+
   it("ends an unclosed comment with its blockquote", () => {
     const html = renderMarkdown("> - <!-- a\n> - b\n\nafter");
     expect(html).not.toContain("&lt;!--");

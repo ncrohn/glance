@@ -57,9 +57,12 @@ md.validateLink = (url) => /^file:/i.test(url.trim()) || defaultValidateLink(url
 
 // HTML comments are hidden, as on GitHub and in Obsidian. Raw HTML stays off,
 // so only comments get this treatment; code spans and fences run first and keep
-// any comment inside them visible. Like CommonMark's HTML block type 2, a
-// comment runs to the line holding `-->` but ends with the list item or
-// blockquote it started in, so it can't swallow the next item.
+// any comment inside them visible. A comment runs to the line holding `-->`,
+// but one that started in a list item or blockquote stops at a line that opens
+// the next item or quote, so it can't swallow it. Unindented lines that don't
+// open one stay hidden: agents often leave a comment's body flush left.
+const CONTAINER_START = /^(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)|^>/;
+
 md.block.ruler.before(
   "html_block",
   "html_comment",
@@ -69,7 +72,10 @@ md.block.ruler.before(
     if (!state.src.startsWith("<!--", start)) return false;
     let line = startLine;
     for (; line < endLine; line++) {
-      if (line > startLine && state.sCount[line] < state.blkIndent && !state.isEmpty(line)) break;
+      if (
+        line > startLine && state.sCount[line] < state.blkIndent && !state.isEmpty(line)
+        && CONTAINER_START.test(state.src.slice(state.bMarks[line] + state.tShift[line], state.eMarks[line]))
+      ) break;
       const from = line === startLine ? start + 4 : state.bMarks[line];
       const text = state.src.slice(from, state.eMarks[line]);
       const close = text.indexOf("-->");
