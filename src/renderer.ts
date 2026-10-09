@@ -98,7 +98,11 @@ md.inline.ruler.before("html_inline", "html_comment", (state) => {
 
 // Obsidian-style [[note]], [[note|label]] and [[note#Heading]]. The link is
 // resolved on click (see app.ts), since finding the file needs the filesystem.
+// Inside link text a wikilink would nest one <a> in another, so it stays plain
+// text there. Silent calls come only from the link-label scan, which has to
+// step over the brackets one at a time to find where `[text]` ends.
 md.inline.ruler.before("link", "wikilink", (state, silent) => {
+  if (silent || (state as { linkLevel?: number }).linkLevel) return false;
   if (!state.src.startsWith("[[", state.pos)) return false;
   const end = state.src.indexOf("]]", state.pos + 2);
   if (end === -1 || end > state.posMax) return false;

@@ -139,6 +139,21 @@ describe("renderMarkdown file: links", () => {
   });
 });
 
+describe("renderMarkdown wikilinks inside links", () => {
+  it("keeps the outer link and shows the wikilink as text", () => {
+    expect(renderMarkdown("[see [[note]] here](https://x.example)")).toContain(
+      '<a href="https://x.example">see [[note]] here</a>',
+    );
+  });
+
+  it("still renders a wikilink next to an ordinary link", () => {
+    const html = renderMarkdown("[a](https://x.example) [[note]] [b [c]](y.md)");
+    expect(html).toContain('<a href="https://x.example">a</a>');
+    expect(html).toContain('<a class="wikilink" data-wikilink="note">note</a>');
+    expect(html).toContain('<a href="y.md">b [c]</a>');
+  });
+});
+
 describe("renderMarkdown HTML comments in containers", () => {
   it("ends an unclosed comment with its list item", () => {
     const html = renderMarkdown("- <!-- start\n- second item -->\n- third");
