@@ -33,14 +33,37 @@ if [[ ! -x "$APP_BIN" ]]; then
 fi
 BINDIR="$HOME/.local/bin"
 mkdir -p "$BINDIR"
-cat > "$BINDIR/mdview" <<EOF
+MDVIEW="$BINDIR/mdview"
+is_wrapper() { [[ "$(head -c 23 "$1" 2>/dev/null)" == $'#!/bin/sh\n# Glance CLI:' ]]; }
+# Same rules as the in-app installer: update a Glance wrapper in place
+# (through a dotfiles symlink), replace an old symlink to the app binary
+# (writing through it would overwrite the app), leave anything else alone.
+not_ours() { echo "$MDVIEW exists and isn't Glance's mdview wrapper; left it alone." >&2; exit 1; }
+if [[ -L "$MDVIEW" ]]; then
+  if is_wrapper "$MDVIEW"; then DEST="$(realpath "$MDVIEW")"
+  elif [[ "$(readlink "$MDVIEW")" == *.app/Contents/MacOS/glance ]]; then DEST="$MDVIEW"
+  else not_ours; fi
+elif [[ -e "$MDVIEW" ]] && ! is_wrapper "$MDVIEW"; then
+  not_ours
+else
+  DEST="$MDVIEW"
+fi
+Q_APP="'${APP_BIN//\'/\'\\\'\'}'"
+TMP="$(mktemp "$(dirname "$DEST")/.mdview.XXXXXX")"
+cat > "$TMP" <<EOF
 #!/bin/sh
 # Glance CLI: launch/forward to Glance detached so the terminal returns
 # immediately even on a cold start (when this invocation becomes the app).
-"$APP_BIN" "\$@" >/dev/null 2>&1 &
+GLANCE_APP=$Q_APP
+if [ ! -x "\$GLANCE_APP" ]; then
+  echo "mdview: Glance not found at \$GLANCE_APP. Reinstall Glance, then run its AI integration setup again." >&2
+  exit 1
+fi
+"\$GLANCE_APP" "\$@" >/dev/null 2>&1 &
 EOF
-chmod +x "$BINDIR/mdview"
-echo "Installed mdview -> $BINDIR/mdview (launches $APP_BIN)"
+chmod 755 "$TMP"
+mv -f "$TMP" "$DEST"
+echo "Installed mdview -> $MDVIEW (launches $APP_BIN)"
 case ":${PATH}:" in
   *":${BINDIR}:"*) echo "Done. Try: mdview README.md" ;;
   *) echo "Done. Add ~/.local/bin to your shell PATH, then: mdview README.md" ;;
