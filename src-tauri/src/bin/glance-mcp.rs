@@ -781,6 +781,67 @@ mod tests {
         assert!(handle("tools/call", &json!({ "name": "list_annotations" })).unwrap().unwrap()["isError"] == true);
     }
 
+    fn serve_lines(input: &[u8]) -> Vec<Value> {
+        let mut out = Vec::new();
+        serve(std::io::Cursor::new(input.to_vec()), &mut out);
+        String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    }
+
+    fn ping(id: i64) -> String {
+        format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"ping"}}"#)
+    }
+
+    #[test]
+    fn bad_bytes_and_bad_json_get_parse_errors_and_serving_continues() {
+        let mut input = b"\xff\xfe garbage\n".to_vec();
+        input.extend(format!("{}\n", ping(1)).bytes());
+        input.extend(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\",\"x\":\"\xc3\x28\"}\n");
+        input.extend(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"\n");
+        input.extend(format!("{}\r\n\n", ping(4)).bytes());
+        input.extend(ping(5).bytes()); // no newline at EOF
+        let out = serve_lines(&input);
+        assert_eq!(out.len(), 6, "{out:?}");
+        for i in [0, 2, 3] {
+            assert_eq!(out[i]["error"]["code"], -32700, "{}", out[i]);
+            assert_eq!(out[i]["id"], Value::Null);
+        }
+        assert_eq!((out[1]["id"].clone(), out[1]["result"].clone()), (json!(1), json!({})));
+        assert_eq!(out[4]["id"], 4);
+        assert_eq!(out[5]["id"], 5);
+    }
+
+    #[test]
+    fn batches_client_responses_and_invalid_requests() {
+        let note = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        let out = serve_lines(format!("[{},{note},{}]\n", ping(1), ping(2)).as_bytes());
+        assert_eq!(out.len(), 1);
+        let ids: Vec<Value> = out[0].as_array().unwrap().iter().map(|r| r["id"].clone()).collect();
+        assert_eq!(ids, vec![json!(1), json!(2)]);
+        // A batch of notifications gets no answer at all.
+        assert!(serve_lines(format!("[{note}]\n").as_bytes()).is_empty());
+        // An invalid member is answered in place.
+        let out = serve_lines(format!("[5,{}]\n", ping(8)).as_bytes());
+        let answers = out[0].as_array().unwrap();
+        assert_eq!((answers[0]["error"]["code"].clone(), answers[0]["id"].clone()), (json!(-32600), Value::Null));
+        assert_eq!(answers[1]["id"], 8);
+        assert_eq!(serve_lines(b"[]\n")[0]["error"]["code"], -32600);
+
+        // Responses from the client are never answered.
+        let responses = b"{\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":98,\"error\":{\"code\":1,\"message\":\"x\"}}\n";
+        assert!(serve_lines(responses).is_empty());
+
+        let out = serve_lines(b"5\n{\"jsonrpc\":\"2.0\",\"id\":7}\n{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":3}\n");
+        assert_eq!(out.len(), 3);
+        assert_eq!((out[0]["error"]["code"].clone(), out[0]["id"].clone()), (json!(-32600), Value::Null));
+        assert_eq!((out[1]["error"]["code"].clone(), out[1]["id"].clone()), (json!(-32600), json!(7)));
+        assert_eq!((out[2]["error"]["code"].clone(), out[2]["id"].clone()), (json!(-32600), json!(6)));
+
+        // Unknown method: -32601 for a request, silence for a notification.
+        let out = serve_lines(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"foo/bar\"}\n{\"jsonrpc\":\"2.0\",\"method\":\"foo/bar\"}\n");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["error"]["code"], -32601);
+    }
+
     #[test]
     fn percent_decode_handles_escapes_and_rejects_bad_ones() {
         assert_eq!(percent_decode("%2FUsers%2Fme%2Fmy%20doc.md").unwrap(), "/Users/me/my doc.md");
@@ -1281,45 +1342,84 @@ fn handle(method: &str, params: &Value) -> Option<Result<Value, (i64, String)>> 
     }
 }
 
+fn rpc_error(id: Value, code: i64, message: &str) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+/// Answer one JSON-RPC message, or return `None` when nothing may be sent: a
+/// notification (no id), or a response from the client (result or error and
+/// no method), which must not itself be answered.
+fn handle_message(msg: &Value) -> Option<Value> {
+    let Some(obj) = msg.as_object() else {
+        return Some(rpc_error(Value::Null, -32600, "Invalid Request: expected a JSON-RPC object"));
+    };
+    let id = obj.get("id").cloned();
+    let method = match obj.get("method") {
+        Some(Value::String(m)) => m.as_str(),
+        None if obj.contains_key("result") || obj.contains_key("error") => return None,
+        Some(_) => return Some(rpc_error(id.unwrap_or(Value::Null), -32600, "Invalid Request: 'method' must be a string")),
+        None => return Some(rpc_error(id.unwrap_or(Value::Null), -32600, "Invalid Request: missing 'method'")),
+    };
+    let empty = json!({});
+    let params = obj.get("params").unwrap_or(&empty);
+    let response = handle(method, params);
+    let id = id?; // notification: never answered
+    Some(match response {
+        Some(Ok(result)) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        Some(Err((code, message))) => rpc_error(id, code, &message),
+        None => rpc_error(id, -32601, &format!("Method not found: {method}")),
+    })
+}
+
+/// Answer one line of input. Bytes that aren't UTF-8 or text that isn't JSON
+/// get a -32700 parse error with a null id; a batch (array) gets an array of
+/// the answers to its members, or nothing if all were notifications.
+fn handle_line(bytes: &[u8]) -> Option<Value> {
+    let Ok(line) = std::str::from_utf8(bytes) else {
+        return Some(rpc_error(Value::Null, -32700, "Parse error: input is not valid UTF-8"));
+    };
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let msg: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(e) => return Some(rpc_error(Value::Null, -32700, &format!("Parse error: {e}"))),
+    };
+    match msg {
+        Value::Array(items) if items.is_empty() => Some(rpc_error(Value::Null, -32600, "Invalid Request: empty batch")),
+        Value::Array(items) => {
+            let answers: Vec<Value> = items.iter().filter_map(handle_message).collect();
+            (!answers.is_empty()).then_some(Value::Array(answers))
+        }
+        msg => handle_message(&msg),
+    }
+}
+
+/// Serve newline-delimited JSON-RPC until EOF. Lines are read as bytes so one
+/// bad line is answered with an error instead of ending the server.
+fn serve(mut input: impl BufRead, mut output: impl Write) {
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match input.read_until(b'\n', &mut buf) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+        if let Some(resp) = handle_line(&buf) {
+            let _ = writeln!(output, "{resp}");
+            let _ = output.flush();
+        }
+    }
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
     if argv.get(1).map(String::as_str) == Some("--pending") {
         run_pending(&argv);
         return;
     }
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) if !l.trim().is_empty() => l,
-            Ok(_) => continue,
-            Err(_) => break,
-        };
-        let msg: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let id = msg.get("id").cloned();
-        let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-        let empty = json!({});
-        let params = msg.get("params").unwrap_or(&empty);
-
-        let response = match handle(method, params) {
-            Some(Ok(result)) => id.map(|id| json!({ "jsonrpc": "2.0", "id": id, "result": result })),
-            Some(Err((code, message))) => {
-                id.map(|id| json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }))
-            }
-            // Notification (no id): stay silent. Unknown method WITH id: return -32601.
-            None => id.map(|id| json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32601, "message": format!("Method not found: {method}") }
-            })),
-        };
-
-        if let Some(resp) = response {
-            let _ = writeln!(stdout, "{}", resp);
-            let _ = stdout.flush();
-        }
-    }
+    serve(std::io::stdin().lock(), std::io::stdout());
 }
