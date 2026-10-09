@@ -60,7 +60,12 @@ const annotationStorePaths = new Map<string, string>();
 function loadRecent(): string[] {
   try { return JSON.parse(localStorage.getItem(LS_RECENT) || "[]"); } catch { return []; }
 }
+// True while start() reopens the saved session. render() runs per opened tab,
+// and saving then would replace the saved list with a partial one.
+let restoringSession = false;
+
 function saveSession(): void {
+  if (restoringSession) return;
   localStorage.setItem(LS_OPEN, JSON.stringify(openPaths(state)));
 }
 
@@ -907,14 +912,21 @@ export async function start(): Promise<void> {
       if (doc && doc.viewMode === "rendered") { toolbar?.hide(); startComment(doc.absPath); }
     }
   });
-  const launchPaths = await takeLaunchArgs();
-  for (const p of launchPaths) {
-    try { await openPath(p); } catch { /* file gone or unreadable; skip */ }
-  }
-  let toRestore: string[] = [];
+  let toRestore: unknown = [];
   try { toRestore = JSON.parse(localStorage.getItem(LS_OPEN) || "[]"); } catch { /* ignore */ }
-  for (const p of toRestore) {
-    try { await openPath(p); } catch { /* file gone; skip */ }
+  const launchPaths = await takeLaunchArgs();
+  restoringSession = true;
+  try {
+    for (const p of Array.isArray(toRestore) ? toRestore : []) {
+      if (typeof p !== "string") continue;
+      try { await openPath(p); } catch { /* file gone; skip */ }
+    }
+    // Launch files last, so the file just opened ends up as the active tab.
+    for (const p of launchPaths) {
+      try { await openPath(p); } catch { /* file gone or unreadable; skip */ }
+    }
+  } finally {
+    restoringSession = false;
   }
   await refreshIntegration();
   render();

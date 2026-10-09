@@ -10,6 +10,7 @@ const env = {
   launch: [] as string[],
   writes: [] as Array<[string, string]>,
   writeGate: null as null | Promise<void>,
+  readGates: new Map<string, Promise<void>>(),
   annotations: new Map<string, Annotation[]>(),
   storeError: null as null | string,
   calls: [] as string[],
@@ -21,6 +22,7 @@ function resetEnv(): void {
   env.launch = [];
   env.writes = [];
   env.writeGate = null;
+  env.readGates = new Map();
   env.annotations = new Map();
   env.storeError = null;
   env.calls = [];
@@ -35,6 +37,7 @@ vi.mock("./ipc", () => ({
   localFileUrl: (p: string) => p, resolveWikilink: async () => null,
   setShowInFinderEnabled: async () => {}, revealInFinder: async () => {},
   readFile: async (p: string) => {
+    await env.readGates.get(p);
     if (!env.fs.has(p)) throw new Error("No such file or directory (os error 2)");
     return env.fs.get(p)!;
   },
@@ -72,11 +75,13 @@ async function boot() {
     <div id="workspace"><main id="content"></main><div id="rail-grip"></div><aside id="rail"></aside></div>
     <div id="modal-root"></div>`;
   const app = await import("./app");
-  await app.start();
-  await flush();
+  const started = app.start();
+  return started.then(flush);
 }
 
 const tabs = () => Array.from(document.querySelectorAll<HTMLElement>("#tabs .tab")).map((t) => t.dataset.id!);
+const activeTab = () => document.querySelector<HTMLElement>("#tabs .tab.active")?.dataset.id ?? null;
+const savedSession = () => JSON.parse(localStorage.getItem("glance.openPaths") ?? "null");
 const toastText = () => document.querySelector(".toast-text")?.textContent ?? "";
 
 beforeEach(() => {
@@ -96,6 +101,49 @@ function annotation(id: string): Annotation {
     status: "open", author: "user", createdAt: "t", replies: [],
   };
 }
+
+describe("session restore", () => {
+  it("no launch files: restores the saved session", async () => {
+    env.fs.set("/a.md", "a\n"); env.fs.set("/b.md", "b\n");
+    localStorage.setItem("glance.openPaths", JSON.stringify(["/a.md", "/b.md"]));
+    await boot();
+    expect(tabs()).toEqual(["/a.md", "/b.md"]);
+  });
+
+  it("a cold launch with a file keeps the saved tabs and makes the launched file active", async () => {
+    env.fs.set("/a.md", "a\n"); env.fs.set("/b.md", "b\n"); env.fs.set("/c.md", "c\n");
+    localStorage.setItem("glance.openPaths", JSON.stringify(["/a.md", "/b.md"]));
+    env.launch = ["/c.md"];
+    await boot();
+    expect(tabs()).toEqual(["/a.md", "/b.md", "/c.md"]);
+    expect(activeTab()).toBe("/c.md");
+    expect(savedSession()).toEqual(["/a.md", "/b.md", "/c.md"]);
+  });
+
+  it("a launched file already in the session is focused, not duplicated", async () => {
+    env.fs.set("/a.md", "a\n"); env.fs.set("/b.md", "b\n");
+    localStorage.setItem("glance.openPaths", JSON.stringify(["/a.md", "/b.md"]));
+    env.launch = ["/a.md"];
+    await boot();
+    expect(tabs()).toEqual(["/a.md", "/b.md"]);
+    expect(activeTab()).toBe("/a.md");
+  });
+
+  it("the saved session is not overwritten while the restore is still running", async () => {
+    env.fs.set("/a.md", "a\n"); env.fs.set("/b.md", "b\n"); env.fs.set("/c.md", "c\n");
+    localStorage.setItem("glance.openPaths", JSON.stringify(["/a.md", "/b.md"]));
+    env.launch = ["/c.md"];
+    let release!: () => void;
+    env.readGates.set("/b.md", new Promise<void>((r) => { release = r; }));
+    const booted = boot();
+    await flush();
+    expect(tabs()).toEqual(["/a.md"]); // mid-restore: /b.md is still loading
+    expect(savedSession()).toEqual(["/a.md", "/b.md"]);
+    release();
+    await booted;
+    expect(savedSession()).toEqual(["/a.md", "/b.md", "/c.md"]);
+  });
+});
 
 describe("damaged annotation store", () => {
   it("shows the read error instead of an empty rail with no explanation", async () => {
