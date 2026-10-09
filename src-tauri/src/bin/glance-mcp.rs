@@ -190,11 +190,16 @@ fn pending_lines(
     stores: Vec<(PathBuf, AnnotationStore)>,
     read_doc: impl Fn(&str) -> Option<String>,
 ) -> Vec<String> {
-    let cwd = cwd.to_string_lossy();
-    let prefix = format!("{}/", cwd.trim_end_matches('/'));
+    // Stores record the doc's canonical path (older ones the app's spelling),
+    // so match the cwd as given and canonicalized.
+    let prefix_of = |p: &Path| format!("{}/", p.to_string_lossy().trim_end_matches('/'));
+    let mut prefixes = vec![prefix_of(cwd)];
+    if let Ok(canonical) = std::fs::canonicalize(cwd) {
+        prefixes.push(prefix_of(&canonical));
+    }
     let mut found: Vec<(std::time::SystemTime, String)> = Vec::new();
     for (store_path, store) in stores {
-        let Some(rel) = store.doc_path.strip_prefix(&prefix) else { continue };
+        let Some(rel) = prefixes.iter().find_map(|p| store.doc_path.strip_prefix(p.as_str())) else { continue };
         let Some(text) = read_doc(&store.doc_path) else { continue };
         let n = build_views(&store, &text, Some("open")).len();
         if n == 0 {
@@ -468,11 +473,11 @@ mod tests {
     #[serial_test::serial]
     fn get_annotation_tool_returns_context_from_disk() {
         let home = "/tmp/glance-test-mcp-context";
+        let _ = std::fs::remove_dir_all(home);
         std::env::set_var("HOME", home);
         std::fs::create_dir_all(home).unwrap();
         let doc = format!("{home}/doc.md");
         std::fs::write(&doc, NINE).unwrap();
-        let _ = std::fs::remove_file(glance_lib::annotations::store_path_for(&doc).unwrap());
         mutate_store(&doc, |s| s.annotations.push(ann("mid", "l5", "open"))).unwrap();
 
         let out = call_tool("get_annotation", &json!({ "path": doc, "id": "mid" })).unwrap();
@@ -493,11 +498,11 @@ mod tests {
     #[serial_test::serial]
     fn add_annotation_tool_creates_claude_pointers_and_rejects_missing_quotes() {
         let home = "/tmp/glance-test-mcp-add";
+        let _ = std::fs::remove_dir_all(home);
         std::env::set_var("HOME", home);
         std::fs::create_dir_all(home).unwrap();
         let doc = format!("{home}/doc.md");
         std::fs::write(&doc, NINE).unwrap();
-        let _ = std::fs::remove_file(glance_lib::annotations::store_path_for(&doc).unwrap());
 
         let out = call_tool("add_annotation", &json!({ "path": doc, "quote": "l5", "note": "see here" })).unwrap();
         let first: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -657,6 +662,21 @@ mod tests {
             pending_lines(Path::new("/proj"), three, any_doc),
             vec!["Glance: 3 open review comments on docs/plan.md. Read them with list_annotations before continuing."]
         );
+    }
+
+    #[test]
+    fn pending_lines_matches_a_symlinked_cwd_against_canonical_doc_paths() {
+        let dir = Path::new("/tmp").join(format!("glance-test-pending-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        assert_ne!(canonical, dir); // /tmp -> /private/tmp
+        let stores = vec![
+            store_at(&format!("{}/new.md", canonical.display()), vec![ann("a", "hello", "open")]),
+            store_at(&format!("{}/old.md", dir.display()), vec![ann("b", "hello", "open")]),
+        ];
+        let lines = pending_lines(&dir, stores, any_doc);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
