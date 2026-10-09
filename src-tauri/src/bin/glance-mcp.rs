@@ -115,23 +115,31 @@ fn build_views(store: &AnnotationStore, text: &str, status_filter: Option<&str>)
     views
 }
 
-/// Mark one annotation resolved in-place, recording that Claude did it and
-/// when. A non-empty `note` is appended to the thread as a Claude reply first,
-/// so the card shows what changed. Returns true if it was found.
-fn apply_resolve(store: &mut AnnotationStore, id: &str, note: Option<&str>) -> bool {
-    for a in store.annotations.iter_mut() {
-        if a.id == id {
-            let now = now_iso8601();
-            if let Some(n) = note.map(str::trim).filter(|n| !n.is_empty()) {
-                apply_reply(a, "claude", n, &now);
-            }
-            a.status = "resolved".to_string();
-            a.resolved_by = Some("claude".to_string());
-            a.resolved_at = Some(now);
-            return true;
-        }
+#[derive(Debug, PartialEq)]
+enum ResolveOutcome {
+    Resolved,
+    /// Someone (usually the user) resolved it first; nothing was changed.
+    AlreadyResolved { by: Option<String>, at: Option<String> },
+    NotFound,
+}
+
+/// Mark one open annotation resolved in-place, recording that Claude did it
+/// and when. A non-empty `note` is appended to the thread as a Claude reply
+/// first, so the card shows what changed. An annotation that is already
+/// resolved is left exactly as it is, so the user's resolution stands.
+fn apply_resolve(store: &mut AnnotationStore, id: &str, note: Option<&str>) -> ResolveOutcome {
+    let Some(a) = store.annotations.iter_mut().find(|a| a.id == id) else { return ResolveOutcome::NotFound };
+    if a.status == "resolved" {
+        return ResolveOutcome::AlreadyResolved { by: a.resolved_by.clone(), at: a.resolved_at.clone() };
     }
-    false
+    let now = now_iso8601();
+    if let Some(n) = note.map(str::trim).filter(|n| !n.is_empty()) {
+        apply_reply(a, "claude", n, &now);
+    }
+    a.status = "resolved".to_string();
+    a.resolved_by = Some("claude".to_string());
+    a.resolved_at = Some(now);
+    ResolveOutcome::Resolved
 }
 
 /// Append a Claude reply to one annotation in-place, leaving its status alone.
@@ -338,20 +346,54 @@ mod tests {
     #[test]
     fn apply_resolve_sets_status_and_records_claude() {
         let mut store = store_of(vec![ann("a", "hello", "open")]);
-        assert!(apply_resolve(&mut store, "a", None));
+        assert_eq!(apply_resolve(&mut store, "a", None), ResolveOutcome::Resolved);
         let a = &store.annotations[0];
         assert_eq!(a.status, "resolved");
         assert_eq!(a.resolved_by.as_deref(), Some("claude"));
         assert_eq!(a.resolved_at.as_ref().map(|t| t.len()), Some(20));
         assert!(a.resolved_at.as_deref().unwrap().ends_with('Z'));
         assert!(a.replies.is_empty());
-        assert!(!apply_resolve(&mut store, "missing", None));
+        assert_eq!(apply_resolve(&mut store, "missing", None), ResolveOutcome::NotFound);
+    }
+
+    #[test]
+    fn apply_resolve_leaves_an_already_resolved_annotation_alone() {
+        let mut done = ann("u1", "hello", "resolved");
+        done.resolved_by = Some("user".into());
+        done.resolved_at = Some("2026-01-02T00:00:00Z".into());
+        let mut store = store_of(vec![done]);
+        let before = store.clone();
+        assert_eq!(
+            apply_resolve(&mut store, "u1", Some("I changed it")),
+            ResolveOutcome::AlreadyResolved { by: Some("user".into()), at: Some("2026-01-02T00:00:00Z".into()) }
+        );
+        assert_eq!(store, before);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_tool_reports_who_already_resolved_and_writes_nothing() {
+        let home = fresh_home("already");
+        let doc = home.join("doc.md").to_string_lossy().into_owned();
+        std::fs::write(&doc, NINE).unwrap();
+        let mut done = ann("u1", "l1", "resolved");
+        done.resolved_by = Some("user".into());
+        done.resolved_at = Some("2026-01-02T00:00:00Z".into());
+        mutate_store(&doc, |s| s.annotations.push(done.clone())).unwrap();
+        let store_path = glance_lib::annotations::store_path_for(&doc).unwrap();
+        let on_disk = std::fs::read_to_string(&store_path).unwrap();
+        let out = call_tool("resolve_annotation", &json!({ "path": doc, "id": "u1", "note": "done" })).unwrap();
+        let res = tool_json(&out);
+        assert_eq!(res["alreadyResolved"], true);
+        assert_eq!(res["resolvedBy"], "user");
+        assert!(res["message"].as_str().unwrap().contains("Already resolved by user"));
+        assert_eq!(std::fs::read_to_string(&store_path).unwrap(), on_disk);
     }
 
     #[test]
     fn apply_resolve_with_note_appends_claude_reply_then_resolves() {
         let mut store = store_of(vec![ann("a", "hello", "open")]);
-        assert!(apply_resolve(&mut store, "a", Some("Cut the cap to 5 min; batch keeps 10")));
+        assert_eq!(apply_resolve(&mut store, "a", Some("Cut the cap to 5 min; batch keeps 10")), ResolveOutcome::Resolved);
         let a = &store.annotations[0];
         assert_eq!(a.status, "resolved");
         assert_eq!(a.replies.len(), 1);
@@ -360,7 +402,7 @@ mod tests {
         assert_eq!(a.replies[0].created_at, a.resolved_at.clone().unwrap());
         // An empty or whitespace note is not a reply.
         let mut store = store_of(vec![ann("b", "hello", "open")]);
-        assert!(apply_resolve(&mut store, "b", Some("   ")));
+        assert_eq!(apply_resolve(&mut store, "b", Some("   ")), ResolveOutcome::Resolved);
         assert!(store.annotations[0].replies.is_empty());
     }
 
@@ -898,7 +940,7 @@ fn tool_schemas() -> Value {
         },
         {
             "name": "resolve_annotation",
-            "description": "Mark an annotation resolved after you have applied the requested change. Pass `note` so the user sees what changed on the card.",
+            "description": "Mark an annotation resolved after you have applied the requested change. Pass `note` so the user sees what changed on the card. One that is already resolved is left as it is.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1043,10 +1085,20 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
             let note = str_arg(args, "note")?;
             // Read-modify-write under the shared cross-process lock so a
             // concurrent add/remove from the GUI isn't clobbered.
-            if mutate_store(path, |store| apply_resolve(store, id, note))? {
-                Ok(text_result(json!({ "ok": true, "id": id })))
-            } else {
-                Err(format!("no annotation '{id}'"))
+            match mutate_store(path, |store| apply_resolve(store, id, note))? {
+                ResolveOutcome::Resolved => Ok(text_result(json!({ "ok": true, "id": id }))),
+                ResolveOutcome::AlreadyResolved { by, at } => {
+                    let who = by.as_deref().unwrap_or("someone");
+                    Ok(text_result(json!({
+                        "ok": true,
+                        "id": id,
+                        "alreadyResolved": true,
+                        "resolvedBy": by,
+                        "resolvedAt": at,
+                        "message": format!("Already resolved by {who}; left unchanged and no note added. Use reply_annotation to comment on it."),
+                    })))
+                }
+                ResolveOutcome::NotFound => Err(format!("no annotation '{id}'")),
             }
         }
         "add_annotation" => {
