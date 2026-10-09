@@ -34,7 +34,15 @@ fn vault_root(doc_dir: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-fn search(root: &Path, suffix: &Path) -> Option<PathBuf> {
+/// What a lookup found. `capped` is set when the vault search stopped at its
+/// entry limit, so a miss doesn't prove the note is absent.
+#[derive(Debug, PartialEq, serde::Serialize)]
+pub struct Lookup {
+    pub path: Option<PathBuf>,
+    pub capped: bool,
+}
+
+fn search(root: &Path, suffix: &Path, limit: usize) -> Lookup {
     let mut best: Option<PathBuf> = None;
     let mut stack = vec![root.to_path_buf()];
     let mut seen = 0;
@@ -42,7 +50,7 @@ fn search(root: &Path, suffix: &Path) -> Option<PathBuf> {
         let Ok(entries) = fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
             seen += 1;
-            if seen > MAX_ENTRIES { return best; }
+            if seen > limit { return Lookup { path: best, capped: true }; }
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if name.starts_with('.') || name == "node_modules" { continue; }
@@ -59,30 +67,40 @@ fn search(root: &Path, suffix: &Path) -> Option<PathBuf> {
             }
         }
     }
-    best
+    Lookup { path: best, capped: false }
 }
 
-pub fn resolve(doc_path: &Path, target: &str) -> Option<PathBuf> {
+#[cfg(test)]
+fn resolve(doc_path: &Path, target: &str) -> Option<PathBuf> {
+    lookup(doc_path, target, MAX_ENTRIES).path
+}
+
+fn lookup(doc_path: &Path, target: &str, limit: usize) -> Lookup {
+    let miss = Lookup { path: None, capped: false };
     let target = target.trim();
-    if target.is_empty() { return None; }
+    if target.is_empty() { return miss; }
     let rel = PathBuf::from(with_extension(target));
-    let doc_dir = doc_path.parent()?;
+    let Some(doc_dir) = doc_path.parent() else { return miss };
     let root = vault_root(doc_dir);
 
     let mut candidates = vec![normalize(&doc_dir.join(&rel))];
     if let Some(root) = &root { candidates.push(normalize(&root.join(&rel))); }
     if let Some(hit) = candidates.into_iter().find(|p| p.is_file()) {
-        return Some(hit);
+        return Lookup { path: Some(hit), capped: false };
     }
     if rel.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir)) {
-        return None;
+        return miss;
     }
-    search(root.as_deref().unwrap_or(doc_dir), &rel)
+    search(root.as_deref().unwrap_or(doc_dir), &rel, limit)
 }
 
+/// Async so the vault walk runs on a blocking worker, not the main thread
+/// (sync commands run on the main thread and would freeze the UI meanwhile).
 #[tauri::command]
-pub fn resolve_wikilink(doc_path: String, target: String) -> Option<String> {
-    resolve(Path::new(&doc_path), &target).map(|p| p.to_string_lossy().into_owned())
+pub async fn resolve_wikilink(doc_path: String, target: String) -> Result<Lookup, String> {
+    tauri::async_runtime::spawn_blocking(move || lookup(Path::new(&doc_path), &target, MAX_ENTRIES))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -133,5 +151,16 @@ mod tests {
         assert_eq!(resolve(&doc, "nope"), None);
         assert_eq!(resolve(&doc, "../nope"), None);
         assert_eq!(resolve(&doc, ""), None);
+        assert_eq!(lookup(&doc, "nope", MAX_ENTRIES), Lookup { path: None, capped: false });
+    }
+
+    #[test]
+    fn a_miss_past_the_search_limit_says_the_search_was_capped() {
+        let root = vault("capped");
+        let doc = root.join("meetings/m1.md");
+        // The vault root alone has four entries, so a limit of three stops the
+        // walk before it reaches projects/a.
+        assert_eq!(lookup(&doc, "decisions", 3), Lookup { path: None, capped: true });
+        assert_eq!(lookup(&doc, "decisions", MAX_ENTRIES).path, Some(root.join("projects/a/decisions.md")));
     }
 }
