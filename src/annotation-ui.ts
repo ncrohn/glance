@@ -598,10 +598,25 @@ export function mountSelectionToolbar(
   };
 }
 
+/** Attribute selector matching `id` exactly. Ids come from the store (an agent
+ *  can write any string), so they're escaped rather than trusted in a selector. */
+export function annotationIdSelector(id: string): string {
+  return `[data-annotation-id="${cssEscape(id)}"]`;
+}
+
+function cssEscape(s: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(s);
+  // Enough for a double-quoted CSS string: escape quotes and backslashes, and
+  // write control characters as hex escapes.
+  return s.replace(/["\\]/g, "\\$&")
+    .replace(/[\u0000-\u001f\u007f]/g, (c) => (c === "\0" ? "\uFFFD" : `\\${c.charCodeAt(0).toString(16)} `));
+}
+
 /** Bidirectional hover emphasis between rendered blocks/markers and rail cards. */
 export function linkAnnotationHovers(renderedEl: HTMLElement, railEl: HTMLElement): () => void {
   const setEmphasis = (id: string, on: boolean) => {
-    const sel = `mark.anno-highlight[data-annotation-id="${id}"], .anno-gutter-marker[data-annotation-id="${id}"], .note-card[data-annotation-id="${id}"]`;
+    const attr = annotationIdSelector(id);
+    const sel = `mark.anno-highlight${attr}, .anno-gutter-marker${attr}, .note-card${attr}`;
     renderedEl.querySelectorAll(sel).forEach((n) => (n as HTMLElement).classList.toggle("anno-emphasis", on));
     railEl.querySelectorAll(sel).forEach((n) => (n as HTMLElement).classList.toggle("anno-emphasis", on));
   };
@@ -639,7 +654,7 @@ export function pulseBlock(node: Element | null): void {
 
 /** Scroll the rail to an annotation's card and pulse it (text → card). */
 export function focusRailCard(railEl: HTMLElement, id: string): void {
-  const card = railEl.querySelector<HTMLElement>(`.note-card[data-annotation-id="${id}"]`);
+  const card = railEl.querySelector<HTMLElement>(`.note-card${annotationIdSelector(id)}`);
   if (!card) return;
   card.scrollIntoView({ block: "nearest", behavior: "smooth" });
   card.classList.remove("anno-emphasis", "anno-pulse-card");

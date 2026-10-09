@@ -35,6 +35,7 @@ import {
   renderRail, applyHighlights, mountSelectionToolbar, assignMarkers, markerColor, linkAnnotationHovers, pulseBlock,
   focusRailCard, parseRailPref,
 } from "./annotation-ui";
+import { annotationIdSelector } from "./annotation-ui";
 import { mountEditor, type EditorHandle } from "./editor";
 import { decideReload } from "./reload";
 import { restoreTarget, lineAtOffset, offsetForLine, type LineBlock } from "./scroll-restore";
@@ -234,7 +235,7 @@ function renderRailFor(): void {
     onScrollTo: (a) => {
       const r = doc.resolutions[a.id];
       if (r?.startLine == null) return;
-      const node = document.querySelector(`mark.anno-highlight[data-annotation-id="${a.id}"]`)
+      const node = document.querySelector(`mark.anno-highlight${annotationIdSelector(a.id)}`)
         ?? document.querySelector(`[data-sourceline="${r.startLine}"]`);
       node?.scrollIntoView({ behavior: "smooth", block: "center" });
       pulseBlock(node);
@@ -246,7 +247,7 @@ function renderRailFor(): void {
       patch(a, { status: "open", resolvedBy: undefined, resolvedAt: undefined }, true);
     },
     onEdit: (a) => {
-      const card = host.querySelector<HTMLElement>(`.note-card[data-annotation-id="${a.id}"]`);
+      const card = host.querySelector<HTMLElement>(`.note-card${annotationIdSelector(a.id)}`);
       const rect = card?.getBoundingClientRect() ?? ({ top: 120, bottom: 140, left: 120 } as DOMRect);
       showCommentComposer({
         quote: a.quote,
