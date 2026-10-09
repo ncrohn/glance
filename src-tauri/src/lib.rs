@@ -518,7 +518,9 @@ pub fn run() {
             let paths: Vec<String> = urls
                 .iter()
                 .filter_map(|u| u.to_file_path().ok())
-                .map(|p| cli::canonical(&p))
+                // As given: the frontend resolves it, and the store needs the
+                // old spelling to move comments filed under it.
+                .map(|p| p.to_string_lossy().into_owned())
                 .collect();
             deliver_open_files(app, paths);
         }

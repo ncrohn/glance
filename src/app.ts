@@ -877,8 +877,11 @@ export async function openPath(requested: string): Promise<void> {
   // can only release watchers that exist by then, so each step checks and
   // releases its own.
   const isOpen = () => state.docs.some((d) => d.absPath === absPath);
+  // The first baseline and store calls use the spelling the doc arrived with:
+  // older versions filed its data under that spelling, and the backend moves
+  // it to the resolved path when it sees it. Later calls use absPath.
   try {
-    const baseline = await readReviewed(absPath);
+    const baseline = await readReviewed(requested);
     if (baseline != null) state = setReviewedBaseline(state, absPath, baseline);
   } catch (err) {
     console.warn("readReviewed failed for", absPath, err);
@@ -892,7 +895,7 @@ export async function openPath(requested: string): Promise<void> {
   const recent = pushRecent(loadRecent().filter((p) => p !== requested), absPath);
   localStorage.setItem(LS_RECENT, JSON.stringify(recent));
   try {
-    const storePath = await ensureAnnotationStore(absPath);
+    const storePath = await ensureAnnotationStore(requested);
     if (!isOpen()) return;
     annotationStorePaths.set(absPath, storePath);
     await watchAnnotations(storePath, absPath);

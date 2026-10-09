@@ -1,9 +1,13 @@
 use std::path::{Path, PathBuf};
 
+/// An absolute spelling of `path`, cleaned up lexically but not resolved. The
+/// frontend resolves it (see [`canonical`]) when it opens the doc; keeping the
+/// caller's spelling until then lets the annotation store find comments filed
+/// under it by older versions and move them to the resolved path.
 pub fn to_abs(path: &str, cwd: &Path) -> String {
     let p = Path::new(path);
     let joined = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
-    canonical(&joined)
+    normalize(&joined)
 }
 
 /// One spelling per file, so a symlink, `/tmp` vs `/private/tmp`, `x/../` or
@@ -135,18 +139,21 @@ mod tests {
         std::fs::write(dir.join("real/Notes.md"), "x").unwrap();
         symlink(dir.join("real"), dir.join("link")).unwrap();
         let want = dir.join("real/Notes.md").to_string_lossy().into_owned();
-        assert_eq!(to_abs("link/Notes.md", &dir), want);
-        assert_eq!(to_abs("./real/../link/Notes.md", &dir), want);
+        assert_eq!(canonical(&dir.join("link/Notes.md")), want);
+        assert_eq!(canonical(&dir.join("./real/../link/Notes.md")), want);
         // APFS and HFS+ are case-insensitive by default; realpath returns the
         // on-disk case there.
         if dir.join("real/notes.md").exists() {
-            assert_eq!(to_abs("real/notes.md", &dir), want);
+            assert_eq!(canonical(&dir.join("real/notes.md")), want);
         }
         // A file that doesn't exist yet still gets a clean absolute path.
         assert_eq!(
-            to_abs("real/./new.md", &dir),
+            canonical(&dir.join("real/./new.md")),
             dir.join("real/new.md").to_string_lossy().into_owned()
         );
+        // to_abs keeps the caller's spelling (only cleaned up) for the store's
+        // migration; the frontend resolves it when opening.
+        assert_eq!(to_abs("link/Notes.md", &dir), dir.join("link/Notes.md").to_string_lossy());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
