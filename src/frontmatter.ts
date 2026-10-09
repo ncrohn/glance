@@ -1,7 +1,7 @@
 // Pure YAML-frontmatter splitter for the common Obsidian/Jekyll preamble:
-// a leading `---` fence holding flat `key: value` lines. Values are scalars or
-// inline arrays (`[a, b]`); nested/multiline YAML is out of scope and falls
-// back to a raw scalar string. Anchor resolution needs the body's source lines
+// a leading `---` fence holding flat `key: value` lines. Values are scalars,
+// inline arrays (`[a, b]`) or block lists (`key:` then `- a` lines); nested
+// maps and multiline strings are out of scope. Anchor resolution needs the body's source lines
 // to stay 1:1 with the original file, so `lineOffset` reports how many lines
 // the fence consumed for the renderer to add back.
 
@@ -17,12 +17,15 @@ export interface ParsedFrontmatter {
 }
 
 export function parseFrontmatter(src: string): ParsedFrontmatter {
-  const none: ParsedFrontmatter = { entries: [], body: src, lineOffset: 0 };
+  // A leading UTF-8 BOM would hide the fence. It isn't a line, so dropping it
+  // leaves lineOffset unchanged.
+  const text = src.startsWith("﻿") ? src.slice(1) : src;
+  const none: ParsedFrontmatter = { entries: [], body: text, lineOffset: 0 };
 
   // Fence must open on the very first line.
-  if (!/^---[ \t]*\r?\n/.test(src)) return none;
+  if (!/^---[ \t]*\r?\n/.test(text)) return none;
 
-  const lines = src.split("\n");
+  const lines = text.split("\n");
   let close = -1;
   for (let i = 1; i < lines.length; i++) {
     if (/^---[ \t]*\r?$/.test(lines[i]) || lines[i].trimEnd() === "---") {
@@ -35,7 +38,20 @@ export function parseFrontmatter(src: string): ParsedFrontmatter {
   const entries: FrontmatterEntry[] = [];
   for (let i = 1; i < close; i++) {
     const entry = parseLine(lines[i]);
-    if (entry) entries.push(entry);
+    if (entry) {
+      entries.push(entry);
+      continue;
+    }
+    // `key:` followed by `- item` lines is a YAML block list.
+    const key = /^([^\s:-][^:]*):\s*$/.exec(lines[i])?.[1].trim();
+    if (!key) continue;
+    const items: string[] = [];
+    while (i + 1 < close && /^\s*-(\s|$)/.test(lines[i + 1])) {
+      i++;
+      const item = unquote(lines[i].replace(/^\s*-/, "").trim());
+      if (item !== "") items.push(item);
+    }
+    if (items.length) entries.push({ key, value: items });
   }
 
   const lineOffset = close + 1; // fence lines: open (0) .. close inclusive

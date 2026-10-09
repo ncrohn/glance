@@ -171,6 +171,19 @@ describe("renderMarkdown frontmatter", () => {
     const html = renderMarkdown(src, new Set([7]));
     expect(/<p[^>]*data-changed[^>]*>body on line 7<\/p>/.test(html)).toBe(true);
   });
+
+  it("renders the card for a file that starts with a BOM", () => {
+    const html = renderMarkdown(`﻿${src}`);
+    expect(html).toContain("frontmatter-card");
+    expect(html).not.toContain("<hr");
+    expect(html).toMatch(/<h1[^>]*data-sourceline="5"/);
+  });
+
+  it("renders block-list frontmatter as chips", () => {
+    const html = renderMarkdown("---\ntags:\n  - alpha\n  - beta\n---\nbody");
+    expect(html).toContain('<span class="frontmatter-chip">alpha</span><span class="frontmatter-chip">beta</span>');
+    expect(html).toMatch(/<p[^>]*data-sourceline="6"/);
+  });
 });
 
 describe("renderMarkdown leading meta paragraph", () => {
