@@ -24,6 +24,7 @@ import {
   addAnnotation, removeAnnotation, patchAnnotation, appendReply, genId, type Annotation, type AnnotationPatch,
 } from "./annotations";
 import { captureSelection } from "./anchor-capture";
+import { resolveOpenTarget } from "./ipc";
 import { showCommentComposer } from "./composer";
 import { showToast } from "./toast";
 import { applyRailWidth, mountRailResizer, parseRailWidth } from "./rail-resize";
@@ -37,7 +38,7 @@ import {
 import { mountEditor, type EditorHandle } from "./editor";
 import { decideReload } from "./reload";
 import { restoreTarget, lineAtOffset, offsetForLine, type LineBlock } from "./scroll-restore";
-import { confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker, showWhatsNew } from "./modal";
+import { confirmOpenFile, confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker, showWhatsNew } from "./modal";
 import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
 } from "./theme";
@@ -716,17 +717,22 @@ export async function openPath(absPath: string): Promise<void> {
 // Every link click is routed here: the webview must never navigate away from
 // the app. Web links go to the default browser, .md links open as Glance tabs,
 // other local files open in their default app, and #fragments scroll in place.
+// Mermaid renders diagram links as SVG <a xlink:href>, which `a[href]` misses.
+const XLINK = "http://www.w3.org/1999/xlink";
+
 function handleLinkClick(ev: MouseEvent): void {
   if (ev.defaultPrevented || ev.button !== 0) return;
-  const a = (ev.target as Element | null)?.closest?.<HTMLElement>("a[href], a[data-wikilink]");
+  const a = (ev.target as Element | null)?.closest?.("a[href], a[data-wikilink], a[*|href]");
   if (!a) return;
   ev.preventDefault();
   const doc = getActive(state);
-  if (a.dataset.wikilink !== undefined) {
-    if (doc) void followWikilink(doc.absPath, a.dataset.wikilink);
+  const wikilink = a.getAttribute("data-wikilink");
+  if (wikilink !== null) {
+    if (doc) void followWikilink(doc.absPath, wikilink);
     return;
   }
-  const target = classifyLink(a.getAttribute("href") ?? "", doc ? dirname(doc.absPath) : null);
+  const href = a.getAttribute("href") ?? a.getAttributeNS(XLINK, "href") ?? "";
+  const target = classifyLink(href, doc ? dirname(doc.absPath) : null);
   switch (target.kind) {
     case "external":
       void openExternal(target.url).catch(() => showNotice(`Couldn't open ${target.url}.`, false));
@@ -735,11 +741,21 @@ function handleLinkClick(ev: MouseEvent): void {
       void openPath(target.path).catch(() => showNotice(`Couldn't open ${target.path}.`, false));
       break;
     case "file":
-      void openFileExternal(target.path).catch(() => showNotice(`Couldn't open ${target.path}.`, false));
+      void openLinkedFile(target.path);
       break;
     case "anchor":
       scrollToHeading(target.id);
       break;
+  }
+}
+
+async function openLinkedFile(path: string): Promise<void> {
+  try {
+    const target = await resolveOpenTarget(path);
+    if (target.confirm && !(await confirmOpenFile(target.path))) return;
+    await openFileExternal(target.path);
+  } catch {
+    showNotice(`Couldn't open ${path}.`, false);
   }
 }
 
@@ -759,7 +775,7 @@ async function followWikilink(docPath: string, raw: string): Promise<void> {
   const path = await resolveWikilink(docPath, link.note).catch(() => null);
   if (!path) { showNotice(`No note named "${link.note}" was found.`, false); return; }
   if (!/\.(md|markdown)$/i.test(path)) {
-    void openFileExternal(path).catch(() => showNotice(`Couldn't open ${path}.`, false));
+    void openLinkedFile(path);
     return;
   }
   await openPath(path).catch(() => showNotice(`Couldn't open ${path}.`, false));
@@ -823,7 +839,9 @@ export async function start(): Promise<void> {
   if (grip && railEl) mountRailResizer(grip, railEl, (w) => localStorage.setItem(LS_RAIL_W, String(w)));
 
   document.addEventListener("click", handleLinkClick);
-  await onOpenFile((absPath) => { void openPath(absPath); });
+  await onOpenFile((absPath) => {
+    void openPath(absPath).catch((err) => showNotice(`Couldn't open ${absPath}: ${err}`, false));
+  });
   await onFileRemoved((path) => { state = markRemoved(state, path); render(); });
   await onShowIntegrationPicker((action) => { void openIntegrationPicker(action); });
   await onShowAbout(async () => { showAbout(await appVersion()); });

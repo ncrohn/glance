@@ -123,6 +123,24 @@ fn acquire_launch_lock(_identifier: &str) -> Option<std::fs::File> {
     None
 }
 
+/// Keeps the window on Glance's own pages. A link the frontend's click handler
+/// misses would otherwise replace the whole UI with a web page; web URLs go to
+/// the default browser instead, and anything else is refused.
+fn navigation_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("navigation-guard")
+        .on_navigation(|webview, url| {
+            let own = url.scheme() == "tauri"
+                || url.host_str() == Some("tauri.localhost")
+                || (cfg!(debug_assertions) && url.host_str() == Some("localhost"));
+            if !own && matches!(url.scheme(), "http" | "https" | "mailto") {
+                use tauri_plugin_opener::OpenerExt;
+                let _ = webview.opener().open_url(url.as_str(), None::<&str>);
+            }
+            own
+        })
+        .build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let context = tauri::generate_context!();
@@ -142,6 +160,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(navigation_guard())
         .plugin(tauri_plugin_dialog::init())
         .manage(watcher::Watchers::default())
         .manage(LaunchArgs::default())
@@ -149,6 +168,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::read_file,
             commands::write_file,
+            commands::resolve_open_target,
             watcher::watch_file,
             watcher::unwatch_file,
             watcher::watch_annotations,

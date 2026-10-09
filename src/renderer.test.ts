@@ -82,6 +82,19 @@ describe("renderMarkdown", () => {
     expect(html).toMatch(/<p[^>]*data-sourceline="3"/);
   });
 
+  it("keeps a hostile fence language out of the markup", () => {
+    for (const lang of ['x"><img/src=x/onerror=alert(1)>', 'js"><img/src=x/onerror=alert(1)>']) {
+      const html = renderMarkdown("```" + lang + "\ncode\n```");
+      expect(html).not.toContain("<img");
+      expect(html).toContain('class="hljs language-plaintext"');
+    }
+  });
+
+  it("still highlights ordinary fence languages", () => {
+    expect(renderMarkdown("```ts\nconst a = 1\n```")).toContain('class="hljs language-ts"');
+    expect(renderMarkdown("```c++\nint a;\n```")).toContain('class="hljs language-c++"');
+  });
+
   it("renders GFM tables", () => {
     const html = renderMarkdown("| a | b |\n|---|---|\n| 1 | 2 |");
     expect(html).toContain("<table");
