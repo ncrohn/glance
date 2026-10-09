@@ -16,6 +16,43 @@ export function closeMermaidZoom(): void {
   closeCurrent?.();
 }
 
+let idSeq = 0;
+
+/** Give every id in this copy of a diagram a fresh suffix and repoint the
+ *  references to them. Cached SVG and zoom clones put the same markup on the
+ *  page more than once, and `url(#marker)` would otherwise resolve to the
+ *  first copy. */
+export function uniquifySvgIds(svg: Element): void {
+  const suffix = `-g${idSeq++}`;
+  const renamed = new Map<string, string>();
+  for (const el of [svg, ...Array.from(svg.querySelectorAll("[id]"))]) {
+    const id = el.getAttribute("id");
+    if (!id) continue;
+    renamed.set(id, id + suffix);
+    el.setAttribute("id", id + suffix);
+  }
+  if (renamed.size === 0) return;
+
+  const swap = (id: string) => renamed.get(id) ?? id;
+  const urls = (value: string) =>
+    value.replace(/url\(\s*(['"]?)#([^'")\s]+)\1\s*\)/g, (_m, q: string, id: string) => `url(${q}#${swap(id)}${q})`);
+  for (const el of [svg, ...Array.from(svg.querySelectorAll("*"))]) {
+    if (el.localName === "style") {
+      el.textContent = (el.textContent ?? "").replace(/#([\w-]+)/g, (_m, id: string) => `#${swap(id)}`);
+      continue;
+    }
+    for (const attr of Array.from(el.attributes)) {
+      let value = urls(attr.value);
+      if (attr.localName === "href" && value.startsWith("#")) {
+        value = `#${swap(value.slice(1))}`;
+      } else if (attr.name === "aria-labelledby" || attr.name === "aria-describedby") {
+        value = value.split(/\s+/).map(swap).join(" ");
+      }
+      if (value !== attr.value) attr.value = value;
+    }
+  }
+}
+
 export function openMermaidZoom(diagram: HTMLElement): void {
   const svg = diagram.querySelector("svg");
   if (!svg) return;
@@ -38,6 +75,7 @@ export function openMermaidZoom(diagram: HTMLElement): void {
   clone.style.width = `${baseW}px`;
   clone.style.height = `${baseH}px`;
   clone.style.display = "block";
+  uniquifySvgIds(clone);
   stage.appendChild(clone);
   overlay.appendChild(stage);
 
