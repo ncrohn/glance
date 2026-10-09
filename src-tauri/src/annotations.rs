@@ -126,13 +126,24 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// silently clobbering each other's full-file writes.
 ///
 /// A store that fails to parse is an error and is left untouched. A mutation
-/// that changes nothing (an unknown id) writes nothing.
+/// that changes nothing (an unknown id) writes nothing, and on a doc with no
+/// store yet it creates no store or lock file either: `f` is first tried on
+/// the empty store without the lock, and only runs again under the lock if it
+/// changed something.
 pub fn mutate_store<T>(
     doc_path: &str,
-    f: impl FnOnce(&mut AnnotationStore) -> T,
+    mut f: impl FnMut(&mut AnnotationStore) -> T,
 ) -> Result<T, String> {
     let store_path = store_path_for(doc_path)
         .ok_or_else(|| "Could not determine $HOME for annotation store".to_string())?;
+    if !store_path.exists() {
+        let mut probe = read_store(doc_path)?;
+        let before = probe.clone();
+        let out = f(&mut probe);
+        if probe == before {
+            return Ok(out);
+        }
+    }
     with_store_lock(&store_path, || {
         let mut store = read_store(doc_path)?;
         let before = store.clone();
@@ -205,7 +216,7 @@ pub fn read_annotations(path: String) -> Result<AnnotationStore, String> {
 /// from glance-mcp can't be lost.
 #[tauri::command]
 pub fn add_annotation(doc_path: String, annotation: Annotation) -> Result<(), String> {
-    mutate_store(&doc_path, move |s| push_annotation(s, annotation))
+    mutate_store(&doc_path, move |s| push_annotation(s, annotation.clone()))
 }
 
 /// Body of `add_annotation`, shared with glance-mcp: backfill, assign the
@@ -227,7 +238,7 @@ pub fn new_id(seed: &str) -> String {
 /// Remove one annotation by id under lock.
 #[tauri::command]
 pub fn remove_annotation(doc_path: String, id: String) -> Result<(), String> {
-    mutate_store(&doc_path, move |s| s.annotations.retain(|a| a.id != id))
+    mutate_store(&doc_path, |s| s.annotations.retain(|a| a.id != id))
 }
 
 /// Fields the GUI may change on a stored annotation. Every `Some` is applied;
@@ -814,10 +825,13 @@ mod tests {
         fresh_home("noop");
         let doc = "/m/noop.md";
         let path = store_path_for(doc).unwrap();
-        // Unknown doc + unknown id: no store file is created.
+        // Unknown doc + unknown id: no store file, lock file, or store dir is created.
         assert!(update_annotation(doc.into(), "zzz".into(), AnnotationPatch::default()).is_err());
+        assert!(add_reply(doc.into(), "zzz".into(), "x".into()).is_err());
         remove_annotation(doc.into(), "zzz".into()).unwrap();
         assert!(!path.exists());
+        assert!(!path.with_extension("json.lock").exists());
+        assert!(!path.parent().unwrap().exists());
         // Existing store: an unknown id leaves the file byte-for-byte alone.
         add_annotation(doc.into(), ann("a")).unwrap();
         let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
