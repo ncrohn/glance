@@ -190,9 +190,13 @@ export function onShowInFinder(cb: () => void): Promise<UnlistenFn> {
 }
 
 // Cmd+Q and the window's close button ask here first, so unsaved edits can be
-// dealt with; `quitApp` then does the actual exit.
+// dealt with; `quitApp` then does the actual exit. The ack goes out first: the
+// backend quits on its own if no ack arrives, in case the page has hung.
 export function onQuitRequested(cb: () => void): Promise<UnlistenFn> {
-  return listen("quit-requested", () => cb());
+  return listen("quit-requested", () => {
+    void invoke<void>("quit_ack");
+    cb();
+  });
 }
 export function quitApp(): Promise<void> {
   return invoke<void>("quit_app");

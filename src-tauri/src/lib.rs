@@ -9,7 +9,7 @@ mod watcher;
 mod wikilink;
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
 
@@ -80,6 +80,37 @@ fn current_quit_step(app: &tauri::AppHandle) -> QuitStep {
         app.state::<FrontendReady>().0.load(Ordering::SeqCst),
         app.state::<QuitApproved>().0.load(Ordering::SeqCst),
     )
+}
+
+/// Counts quit requests sent to the frontend and the last one it acknowledged.
+/// If the page has crashed or hung, no acknowledgement comes back and quit goes
+/// ahead anyway, so Glance never needs a Force Quit.
+#[derive(Default)]
+struct QuitRequests {
+    sent: AtomicU64,
+    acked: AtomicU64,
+}
+
+const QUIT_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn ask_frontend_to_quit(app: &tauri::AppHandle) {
+    let seq = app.state::<QuitRequests>().sent.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = app.emit("quit-requested", ());
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(QUIT_ACK_TIMEOUT);
+        if app.state::<QuitRequests>().acked.load(Ordering::SeqCst) < seq {
+            app.exit(0);
+        }
+    });
+}
+
+/// Sent by the frontend as soon as it receives `quit-requested`, before any
+/// unsaved-edits prompt, to show it is alive and handling the quit.
+#[tauri::command]
+fn quit_ack(requests: tauri::State<QuitRequests>) {
+    let sent = requests.sent.load(Ordering::SeqCst);
+    requests.acked.fetch_max(sent, Ordering::SeqCst);
 }
 
 /// The frontend's go-ahead after `quit-requested`: nothing was dirty, or the
@@ -184,12 +215,13 @@ pub fn run() {
         .manage(LaunchArgs::default())
         .manage(FrontendReady::default())
         .manage(QuitApproved::default())
+        .manage(QuitRequests::default())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
                 if current_quit_step(app) == QuitStep::AskFrontend {
                     api.prevent_close();
-                    let _ = app.emit("quit-requested", ());
+                    ask_frontend_to_quit(app);
                 }
             }
         })
@@ -213,6 +245,7 @@ pub fn run() {
             set_show_in_finder_enabled,
             take_launch_args,
             quit_app,
+            quit_ack,
             wikilink::resolve_wikilink,
         ])
         .on_menu_event(|app, event| {
@@ -253,9 +286,7 @@ pub fn run() {
                 }
                 "quit" => match current_quit_step(app) {
                     QuitStep::Proceed => app.exit(0),
-                    QuitStep::AskFrontend => {
-                        let _ = app.emit("quit-requested", ());
-                    }
+                    QuitStep::AskFrontend => ask_frontend_to_quit(app),
                 },
                 "save_file" => {
                     let _ = app.emit("menu-save", ());
