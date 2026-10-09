@@ -9,7 +9,7 @@ mod watcher;
 mod wikilink;
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
 
@@ -51,6 +51,74 @@ fn deliver_open_files(app: &tauri::AppHandle, paths: Vec<String>) {
     } else {
         stored.extend(paths);
     }
+}
+
+/// Set by `quit_app` once the frontend has dealt with unsaved edits, so the
+/// window close that follows isn't held again.
+#[derive(Default)]
+struct QuitApproved(AtomicBool);
+
+#[derive(Debug, PartialEq)]
+enum QuitStep {
+    Proceed,
+    AskFrontend,
+}
+
+/// Cmd+Q and the window's close button go through the frontend, which knows
+/// about unsaved edits. Before the frontend is up there is nothing to save
+/// and no listener to ask, so quit goes ahead.
+fn quit_step(frontend_ready: bool, approved: bool) -> QuitStep {
+    if approved || !frontend_ready {
+        QuitStep::Proceed
+    } else {
+        QuitStep::AskFrontend
+    }
+}
+
+fn current_quit_step(app: &tauri::AppHandle) -> QuitStep {
+    quit_step(
+        app.state::<FrontendReady>().0.load(Ordering::SeqCst),
+        app.state::<QuitApproved>().0.load(Ordering::SeqCst),
+    )
+}
+
+/// Counts quit requests sent to the frontend and the last one it acknowledged.
+/// If the page has crashed or hung, no acknowledgement comes back and quit goes
+/// ahead anyway, so Glance never needs a Force Quit.
+#[derive(Default)]
+struct QuitRequests {
+    sent: AtomicU64,
+    acked: AtomicU64,
+}
+
+const QUIT_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn ask_frontend_to_quit(app: &tauri::AppHandle) {
+    let seq = app.state::<QuitRequests>().sent.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = app.emit("quit-requested", ());
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(QUIT_ACK_TIMEOUT);
+        if app.state::<QuitRequests>().acked.load(Ordering::SeqCst) < seq {
+            app.exit(0);
+        }
+    });
+}
+
+/// Sent by the frontend as soon as it receives `quit-requested`, before any
+/// unsaved-edits prompt, to show it is alive and handling the quit.
+#[tauri::command]
+fn quit_ack(requests: tauri::State<QuitRequests>) {
+    let sent = requests.sent.load(Ordering::SeqCst);
+    requests.acked.fetch_max(sent, Ordering::SeqCst);
+}
+
+/// The frontend's go-ahead after `quit-requested`: nothing was dirty, or the
+/// user saved or let go of every unsaved doc.
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle, approved: tauri::State<QuitApproved>) {
+    approved.0.store(true, Ordering::SeqCst);
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -165,6 +233,17 @@ pub fn run() {
         .manage(watcher::Watchers::default())
         .manage(LaunchArgs::default())
         .manage(FrontendReady::default())
+        .manage(QuitApproved::default())
+        .manage(QuitRequests::default())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                if current_quit_step(app) == QuitStep::AskFrontend {
+                    api.prevent_close();
+                    ask_frontend_to_quit(app);
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::read_file,
             commands::write_file,
@@ -185,6 +264,8 @@ pub fn run() {
             setup::run_integration,
             set_show_in_finder_enabled,
             take_launch_args,
+            quit_app,
+            quit_ack,
             wikilink::resolve_wikilink,
         ])
         .on_menu_event(|app, event| {
@@ -223,6 +304,10 @@ pub fn run() {
                 "close_tab" => {
                     let _ = app.emit("close-active-tab", ());
                 }
+                "quit" => match current_quit_step(app) {
+                    QuitStep::Proceed => app.exit(0),
+                    QuitStep::AskFrontend => ask_frontend_to_quit(app),
+                },
                 "save_file" => {
                     let _ = app.emit("menu-save", ());
                 }
@@ -283,6 +368,16 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
+            // Custom, not PredefinedMenuItem::quit: the predefined item sends
+            // terminate: straight to NSApp, which nothing here can intercept,
+            // so unsaved edits would be dropped without a prompt.
+            let quit_item = MenuItem::with_id(
+                handle,
+                "quit",
+                "Quit Glance",
+                true,
+                Some("CmdOrCtrl+Q"),
+            )?;
             let app_menu = Submenu::with_items(
                 handle,
                 "Glance",
@@ -295,7 +390,7 @@ pub fn run() {
                     &remove_cli_item,
                     &PredefinedMenuItem::separator(handle)?,
                     &PredefinedMenuItem::hide(handle, None)?,
-                    &PredefinedMenuItem::quit(handle, None)?,
+                    &quit_item,
                 ],
             )?;
             let new_item = MenuItem::with_id(
@@ -416,4 +511,16 @@ pub fn run() {
             deliver_open_files(app, paths);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quit_asks_the_frontend_only_once_it_is_up_and_until_it_approves() {
+        assert_eq!(quit_step(false, false), QuitStep::Proceed);
+        assert_eq!(quit_step(true, false), QuitStep::AskFrontend);
+        assert_eq!(quit_step(true, true), QuitStep::Proceed);
+    }
 }

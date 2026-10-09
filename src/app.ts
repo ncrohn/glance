@@ -3,7 +3,7 @@ import {
   State, emptyState, openDoc, closeDoc, setActive, getActive,
   toggleViewMode, updateEditorContent, markSaved, applyDiskChange, markRemoved,
   setDocAnnotations, setDocResolutions, setDocActivity, clearDocActivity,
-  markReviewed, setReviewedBaseline, canRevealActive,
+  markReviewed, setReviewedBaseline, canRevealActive, setDiskContent,
 } from "./store";
 import { isDirty, basename, changedLines, deletedBefore, hasUnreviewedChanges, type Doc } from "./document";
 import { parseFrontmatter } from "./frontmatter";
@@ -16,7 +16,7 @@ import {
   readAnnotations, addStoredAnnotation, removeStoredAnnotation, updateStoredAnnotation, addStoredReply, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
   onShowAbout, onShowWhatsNew, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
-  onShowInFinder, revealInFinder, setShowInFinderEnabled,
+  onShowInFinder, revealInFinder, setShowInFinderEnabled, onQuitRequested, quitApp,
   readReviewed, writeReviewed, openExternal, openFileExternal, localFileUrl, resolveWikilink,
 } from "./ipc";
 import { classifyLink, dirname, parseWikilink, resolveLocalPath, slugify } from "./links";
@@ -46,6 +46,7 @@ import { openPaths, pushRecent } from "./session";
 import { needsSetup } from "./integration";
 import { shouldShowCommentHint } from "./hint";
 import type { ClientInfo, IntegrationAction } from "./ipc";
+import { confirmUnsaved } from "./modal";
 
 const LS_OPEN = "glance.openPaths";
 const LS_RECENT = "glance.recent";
@@ -61,7 +62,12 @@ const annotationStorePaths = new Map<string, string>();
 function loadRecent(): string[] {
   try { return JSON.parse(localStorage.getItem(LS_RECENT) || "[]"); } catch { return []; }
 }
+// True while start() reopens the saved session. render() runs per opened tab,
+// and saving then would replace the saved list with a partial one.
+let restoringSession = false;
+
 function saveSession(): void {
+  if (restoringSession) return;
   localStorage.setItem(LS_OPEN, JSON.stringify(openPaths(state)));
 }
 
@@ -114,8 +120,16 @@ function el<K extends keyof HTMLElementTagNameMap>(
 // baseline to diff against, so it must not report Claude activity.
 const annotationsLoaded = new Set<string>();
 
+const ERROR_TOAST_MS = 12000;
+
 async function loadAnnotations(absPath: string): Promise<void> {
-  const store = await readAnnotations(absPath);
+  let store;
+  try {
+    store = await readAnnotations(absPath);
+  } catch (err) {
+    showToast(`Couldn't load comments for ${basename(absPath)}. ${err}`, { ms: ERROR_TOAST_MS });
+    return;
+  }
   const next = store.annotations;
   const before = state.docs.find((d) => d.absPath === absPath);
   const prev = before && annotationsLoaded.has(absPath) ? before.annotations : next;
@@ -137,6 +151,21 @@ async function loadAnnotations(absPath: string): Promise<void> {
     state = setDocActivity(state, doc.id, ids);
     render();
   }
+}
+
+// Land an optimistic comment change: on success reconcile with the merged
+// on-disk truth; on failure put back the list from before the change and say
+// why. Resolves true when the store accepted the write.
+function persistComments(absPath: string, before: Annotation[], write: Promise<unknown>): Promise<boolean> {
+  return write.then(
+    () => loadAnnotations(absPath).then(() => true),
+    (err) => {
+      state = setDocAnnotations(state, absPath, before);
+      render();
+      showToast(`Couldn't save the comment change on ${basename(absPath)}. ${err}`, { ms: ERROR_TOAST_MS });
+      return false;
+    },
+  );
 }
 
 async function refreshResolutions(absPath: string): Promise<void> {
@@ -174,7 +203,7 @@ function startComment(absPath: string): void {
       const cur = state.docs.find((d) => d.absPath === absPath)?.annotations ?? doc.annotations;
       state = setDocAnnotations(state, absPath, addAnnotation(cur, annotation));
       render();
-      void addStoredAnnotation(absPath, annotation).then(() => loadAnnotations(absPath));
+      void persistComments(absPath, cur, addStoredAnnotation(absPath, annotation));
     },
     onCancel: () => {},
   });
@@ -199,7 +228,7 @@ function renderRailFor(): void {
     state = setDocAnnotations(state, doc.absPath, patchAnnotation(cur, a.id, local));
     render();
     const stored = clearResolution ? { ...local, clearResolution } : local;
-    void updateStoredAnnotation(doc.absPath, a.id, stored).then(() => loadAnnotations(doc.absPath));
+    void persistComments(doc.absPath, cur, updateStoredAnnotation(doc.absPath, a.id, stored));
   };
   renderRail(host, doc.annotations, doc.resolutions, markers, {
     onScrollTo: (a) => {
@@ -244,7 +273,7 @@ function renderRailFor(): void {
       const reply = { author: "user" as const, text, createdAt: new Date().toISOString() };
       state = setDocAnnotations(state, doc.absPath, appendReply(cur, a.id, reply));
       render();
-      void addStoredReply(doc.absPath, a.id, text).then(() => loadAnnotations(doc.absPath));
+      void persistComments(doc.absPath, cur, addStoredReply(doc.absPath, a.id, text));
     },
     onRemove: (a) => {
       // Optimistic local remove (fresh from state), then the locked server-side
@@ -254,24 +283,27 @@ function renderRailFor(): void {
       const cur = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? doc.annotations;
       state = setDocAnnotations(state, doc.absPath, removeAnnotation(cur, a.id));
       render();
-      const removed = removeStoredAnnotation(doc.absPath, a.id).then(() => loadAnnotations(doc.absPath));
+      const removed = persistComments(doc.absPath, cur, removeStoredAnnotation(doc.absPath, a.id));
       showToast(a.number > 0 ? `Comment ${a.number} deleted` : "Comment deleted", {
         actionLabel: "Undo",
         onAction: () => {
-          const now = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? [];
-          state = setDocAnnotations(state, doc.absPath, addAnnotation(now, a));
-          render();
-          void removed.then(() => addStoredAnnotation(doc.absPath, a)).then(() => loadAnnotations(doc.absPath));
+          void removed.then((ok) => {
+            if (!ok) return; // the remove was rolled back; nothing to undo
+            const now = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? [];
+            state = setDocAnnotations(state, doc.absPath, addAnnotation(now, a));
+            render();
+            return persistComments(doc.absPath, now, addStoredAnnotation(doc.absPath, a));
+          });
         },
       });
     },
     onClearResolved: (ids) => {
-      let cur = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? doc.annotations;
+      const before = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? doc.annotations;
+      let cur = before;
       for (const id of ids) cur = removeAnnotation(cur, id);
       state = setDocAnnotations(state, doc.absPath, cur);
       render();
-      void Promise.all(ids.map((id) => removeStoredAnnotation(doc.absPath, id)))
-        .then(() => loadAnnotations(doc.absPath));
+      void persistComments(doc.absPath, before, Promise.all(ids.map((id) => removeStoredAnnotation(doc.absPath, id))));
     },
   }, {
     pref: railPref,
@@ -299,7 +331,7 @@ function bindTabBar(bar: HTMLElement): void {
     const tab = target.closest<HTMLElement>(".tab");
     const id = tab?.dataset.id;
     if (!id) return;
-    if (target.closest(".close")) { closeTab(id); return; }
+    if (target.closest(".close")) { void closeTab(id); return; }
     if (id !== state.activeId) { state = setActive(state, id); render(); }
   });
   bindTabHover(bar);
@@ -658,7 +690,34 @@ function selectAllContent(): void {
   sel.addRange(range);
 }
 
-function closeTab(id: string): void {
+// Ask what to do with a doc's unsaved edits. Resolves true when the doc can go:
+// it was clean, it saved, or the user chose Don't Save.
+async function settleUnsaved(id: string): Promise<boolean> {
+  const doc = state.docs.find((d) => d.id === id);
+  if (!doc || !isDirty(doc)) return true;
+  closeMermaidZoom(); // the zoom overlay sits above the modal layer
+  const choice = await confirmUnsaved(doc.fileName);
+  if (choice === "cancel") return false;
+  // Another prompt for this doc (Cmd+W, then Cmd+Q) may have settled it already.
+  const now = state.docs.find((d) => d.id === id);
+  if (!now || !isDirty(now) || choice === "discard") return true;
+  return saveDoc(id);
+}
+
+// Tabs with an unsaved-changes prompt open, so a repeated Cmd+W doesn't stack
+// a second prompt for the same doc.
+const closing = new Set<string>();
+
+async function closeTab(id: string): Promise<void> {
+  if (closing.has(id)) return;
+  closing.add(id);
+  try {
+    if (!(await settleUnsaved(id))) return;
+  } finally {
+    closing.delete(id);
+  }
+  const pending = pendingReloads.get(id);
+  if (pending) { pending.live = false; pendingReloads.delete(id); }
   const doc = state.docs.find((d) => d.id === id);
   if (doc) {
     void unwatchFile(doc.absPath);
@@ -671,19 +730,111 @@ function closeTab(id: string): void {
   scrollPositions.delete(id); // after render(), which re-saves the outgoing doc's position
 }
 
-// Save the active doc to disk. Shared by the File▸Save menu item (⌘S). On
-// failure the doc stays dirty (markSaved never runs) and the error is surfaced.
+// absPath → texts our saves are writing right now. The watcher can report a
+// save's own write before the write call returns; matching it here keeps that
+// echo from looking like an outside change.
+const inFlightWrites = new Map<string, string[]>();
+
+// doc id → newest disk text seen while a "changed on disk" prompt is open for
+// that doc. Save is refused meanwhile (it would overwrite the change being
+// asked about), and further changes update the open prompt instead of opening
+// another. Closing the tab marks the entry dead: the doc id is its path, so a
+// reopened tab must not inherit a prompt that was about the closed one.
+interface PendingReload { latest: string; live: boolean }
+const pendingReloads = new Map<string, PendingReload>();
+
+// Write a doc to disk. On failure the doc stays dirty (markSaved never runs)
+// and the error is surfaced. Resolves true once the text is on disk.
+async function saveDoc(id: string): Promise<boolean> {
+  const doc = state.docs.find((d) => d.id === id);
+  if (!doc) return false;
+  if (pendingReloads.has(id)) {
+    showToast(`${doc.fileName} changed on disk. Choose Keep mine or Load disk before saving.`);
+    return false;
+  }
+  const written = doc.editorContent;
+  const writes = inFlightWrites.get(doc.absPath) ?? [];
+  writes.push(written);
+  inFlightWrites.set(doc.absPath, writes);
+  try {
+    await writeFile(doc.absPath, written);
+  } catch (err) {
+    showNotice(`Couldn't save ${doc.fileName}: ${err}`, false);
+    return false;
+  } finally {
+    writes.splice(writes.indexOf(written), 1);
+    if (!writes.length) inFlightWrites.delete(doc.absPath);
+  }
+  state = markSaved(state, id, written);
+  const saved = state.docs.find((d) => d.id === id);
+  if (saved) void writeReviewed(saved.absPath, saved.reviewedContent);
+  render();
+  return true;
+}
+
+// File▸Save (⌘S).
 function saveActive(): void {
   const doc = getActive(state);
+  if (doc) void saveDoc(doc.id);
+}
+
+let quitting = false;
+
+// Cmd+Q / the window's close button. Walks the dirty docs one at a time
+// (showing each), and quits only if every one was saved or let go.
+async function requestQuit(): Promise<void> {
+  if (quitting) return;
+  quitting = true;
+  try {
+    for (const doc of state.docs.filter(isDirty)) {
+      if (state.activeId !== doc.id) { state = setActive(state, doc.id); render(); }
+      if (!(await settleUnsaved(doc.id))) return;
+    }
+    await quitApp().catch((err) => showNotice(`Couldn't quit: ${err}`, false));
+  } finally {
+    quitting = false;
+  }
+}
+
+// A change event whose text we already account for: what we last saw on disk,
+// what the editor holds, or what one of our saves is writing.
+function isKnownContent(doc: Doc, contents: string): boolean {
+  if (inFlightWrites.get(doc.absPath)?.includes(contents)) return true;
+  // Guard on existsOnDisk so a file that was deleted and then recreated with
+  // content identical to the editor still clears the "(deleted)" state.
+  if (!doc.existsOnDisk) return false;
+  return contents === doc.diskContent || contents === doc.editorContent;
+}
+
+async function handleDiskChange(path: string, contents: string): Promise<void> {
+  const doc = state.docs.find((d) => d.absPath === path);
   if (!doc) return;
-  void writeFile(doc.absPath, doc.editorContent).then(() => {
-    state = markSaved(state, doc.id);
-    const saved = state.docs.find((d) => d.id === doc.id);
-    if (saved) void writeReviewed(saved.absPath, saved.reviewedContent);
+  const open = pendingReloads.get(doc.id);
+  if (open) { open.latest = contents; return; }
+  if (isKnownContent(doc, contents)) return;
+  if (decideReload(doc) === "auto-reload") {
+    state = applyDiskChange(state, doc.id, contents);
     render();
-  }).catch((err) => {
-    showNotice(`Couldn't save ${doc.fileName}: ${err}`, false);
-  });
+    return;
+  }
+  const pending: PendingReload = { latest: contents, live: true };
+  pendingReloads.set(doc.id, pending);
+  // Dismiss any open zoom overlay first — it sits above the modal layer, so
+  // the reload prompt would otherwise be unreachable underneath it.
+  closeMermaidZoom();
+  const choice = await confirmReload(doc.fileName);
+  if (pendingReloads.get(doc.id) === pending) pendingReloads.delete(doc.id);
+  if (!pending.live || !state.docs.some((d) => d.id === doc.id)) return;
+  const latest = pending.latest;
+  if (choice === "disk") {
+    state = applyDiskChange(state, doc.id, latest);
+    render();
+  } else {
+    // "mine": keep the editor text (still dirty) but record what disk holds now.
+    state = setDiskContent(state, doc.id, latest);
+    renderTabBar();
+    renderActions();
+  }
 }
 
 export async function openPath(absPath: string): Promise<void> {
@@ -852,7 +1003,8 @@ export async function start(): Promise<void> {
       onCommit: changeTheme,
     });
   });
-  await onCloseActiveTab(() => { const d = getActive(state); if (d) closeTab(d.id); });
+  await onCloseActiveTab(() => { const d = getActive(state); if (d) void closeTab(d.id); });
+  await onQuitRequested(() => { void requestQuit(); });
   await onMenuSave(() => saveActive());
   await onSelectAll(() => selectAllContent());
   await onShowInFinder(() => {
@@ -864,28 +1016,7 @@ export async function start(): Promise<void> {
     void revealInFinder(d.absPath).catch(() => showNotice(`Couldn't show ${d.absPath} in Finder.`, false));
   });
   await onAnnotationsChanged((docPath) => { void loadAnnotations(docPath); });
-  await onFileChanged(async (e) => {
-    const doc = state.docs.find((d) => d.absPath === e.path);
-    if (!doc) return;
-    // Our own save echo — no-op. Guard on existsOnDisk so a file that was
-    // deleted and then recreated with content identical to the editor still
-    // clears the "(deleted)" state instead of being swallowed as an echo.
-    if (doc.existsOnDisk && doc.editorContent === e.contents) return;
-    if (decideReload(doc) === "auto-reload") {
-      state = applyDiskChange(state, doc.id, e.contents);
-      render();
-    } else {
-      // Dismiss any open zoom overlay first — it sits above the modal layer, so
-      // the reload prompt would otherwise be unreachable underneath it.
-      closeMermaidZoom();
-      const choice = await confirmReload(doc.fileName);
-      if (choice === "disk") {
-        state = applyDiskChange(state, doc.id, e.contents);
-        render();
-      }
-      // "mine" → keep editor content; user's edits stay dirty
-    }
-  });
+  await onFileChanged((e) => handleDiskChange(e.path, e.contents));
   window.addEventListener("keydown", (e) => {
     if (e.metaKey && (e.key === "e" || e.key === "E")) {
       e.preventDefault();
@@ -899,14 +1030,21 @@ export async function start(): Promise<void> {
       if (doc && doc.viewMode === "rendered") { toolbar?.hide(); startComment(doc.absPath); }
     }
   });
-  const launchPaths = await takeLaunchArgs();
-  for (const p of launchPaths) {
-    try { await openPath(p); } catch { /* file gone or unreadable; skip */ }
-  }
-  let toRestore: string[] = [];
+  let toRestore: unknown = [];
   try { toRestore = JSON.parse(localStorage.getItem(LS_OPEN) || "[]"); } catch { /* ignore */ }
-  for (const p of toRestore) {
-    try { await openPath(p); } catch { /* file gone; skip */ }
+  const launchPaths = await takeLaunchArgs();
+  restoringSession = true;
+  try {
+    for (const p of Array.isArray(toRestore) ? toRestore : []) {
+      if (typeof p !== "string") continue;
+      try { await openPath(p); } catch { /* file gone; skip */ }
+    }
+    // Launch files last, so the file just opened ends up as the active tab.
+    for (const p of launchPaths) {
+      try { await openPath(p); } catch (err) { showNotice(`Couldn't open ${p}: ${err}`, false); }
+    }
+  } finally {
+    restoringSession = false;
   }
   await refreshIntegration();
   render();

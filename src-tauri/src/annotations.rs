@@ -5,7 +5,7 @@ use sha1::{Digest, Sha1};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AnnotationStore {
     #[serde(rename = "docPath")]
     pub doc_path: String,
@@ -29,7 +29,11 @@ pub fn store_path_for(doc_path: &str) -> Option<PathBuf> {
     store_dir().map(|d| d.join(format!("{}.json", sha1_hex(doc_path))))
 }
 
-pub fn read_store(doc_path: &str) -> AnnotationStore {
+/// Load a doc's store. A store that doesn't exist yet is empty. One that exists
+/// but can't be read or parsed is an error, never an empty store: a caller that
+/// took it for "no comments" would show nothing, and a mutation would write the
+/// empty store over every comment in the file.
+pub fn read_store(doc_path: &str) -> Result<AnnotationStore, String> {
     let empty = || AnnotationStore {
         doc_path: doc_path.to_string(),
         annotations: Vec::new(),
@@ -37,14 +41,21 @@ pub fn read_store(doc_path: &str) -> AnnotationStore {
     };
     let path = match store_path_for(doc_path) {
         Some(p) => p,
-        None => return empty(),
+        None => return Ok(empty()),
     };
     let mut store = match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|_| empty()),
-        Err(_) => empty(),
+        Ok(text) if text.trim().is_empty() => empty(),
+        Ok(text) => serde_json::from_str(&text).map_err(|e| {
+            format!(
+                "The annotation store {} is damaged ({e}). Glance won't change it until it is fixed or moved aside.",
+                path.display()
+            )
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => empty(),
+        Err(e) => return Err(format!("Couldn't read the annotation store {}: {e}", path.display())),
     };
     backfill_numbers(&mut store);
-    store
+    Ok(store)
 }
 
 /// Give every unnumbered annotation a permanent number and push `next_number`
@@ -87,18 +98,37 @@ pub fn write_store(store: &AnnotationStore) -> Result<(), String> {
 /// standalone `glance-mcp` subprocess (`resolve_annotation`) — funnel every
 /// change through here, so their read-modify-write cycles serialize instead of
 /// silently clobbering each other's full-file writes.
+///
+/// A store that fails to parse is an error and is left untouched. A mutation
+/// that changes nothing (an unknown id) writes nothing.
 pub fn mutate_store<T>(
     doc_path: &str,
     f: impl FnOnce(&mut AnnotationStore) -> T,
 ) -> Result<T, String> {
     let store_path = store_path_for(doc_path)
         .ok_or_else(|| "Could not determine $HOME for annotation store".to_string())?;
+    with_store_lock(&store_path, || {
+        let mut store = read_store(doc_path)?;
+        let before = store.clone();
+        let out = f(&mut store);
+        if store != before {
+            write_store(&store)?;
+        }
+        Ok(out)
+    })
+}
+
+/// Run `f` holding the store's exclusive cross-process lock. The lock is on a
+/// stable sibling file (never renamed), so it is held across a read and the
+/// temp-file+rename write. flock on the store file itself wouldn't work: the
+/// rename swaps the inode out from under it.
+fn with_store_lock<T>(
+    store_path: &std::path::Path,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     if let Some(parent) = store_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    // Lock a stable sibling file (never renamed), so the exclusive lock is held
-    // across the read and the temp-file+rename write below. flock on the store
-    // file itself wouldn't work: the rename swaps the inode out from under it.
     let lock_path = store_path.with_extension("json.lock");
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
@@ -107,16 +137,13 @@ pub fn mutate_store<T>(
         .open(&lock_path)
         .map_err(|e| e.to_string())?;
     lock_file.lock_exclusive().map_err(|e| e.to_string())?;
-
-    let mut store = read_store(doc_path);
-    let out = f(&mut store);
-    let write_res = write_store(&store);
+    let out = f();
     let _ = lock_file.unlock(); // also released when lock_file drops
-    write_res.map(|_| out)
+    out
 }
 
 #[tauri::command]
-pub fn read_annotations(path: String) -> AnnotationStore {
+pub fn read_annotations(path: String) -> Result<AnnotationStore, String> {
     read_store(&path)
 }
 
@@ -287,10 +314,14 @@ pub fn ensure_annotation_store(path: String) -> Result<String, String> {
     let store_path =
         store_path_for(&path).ok_or_else(|| "Could not determine $HOME".to_string())?;
     if !store_path.exists() {
-        // Create under the same lock as mutations: a no-op mutate reads the
-        // (missing → empty) store and writes it back, so a concurrent first
-        // mutation from another process can't be clobbered by this creation.
-        mutate_store(&path, |_| {})?;
+        // Create under the same lock as mutations and re-check inside it, so a
+        // concurrent first mutation from another process can't be clobbered.
+        with_store_lock(&store_path, || {
+            if store_path.exists() {
+                return Ok(());
+            }
+            write_store(&read_store(&path)?)
+        })?;
     }
     Ok(store_path.to_string_lossy().to_string())
 }
@@ -323,7 +354,7 @@ mod tests {
     #[serial]
     fn read_missing_store_returns_empty_with_doc_path() {
         std::env::set_var("HOME", "/tmp/glance-test-home-empty");
-        let store = read_store("/no/such/file.md");
+        let store = read_store("/no/such/file.md").unwrap();
         assert_eq!(store.doc_path, "/no/such/file.md");
         assert!(store.annotations.is_empty());
     }
@@ -388,7 +419,7 @@ mod tests {
         for id in ["a", "b", "c"] {
             add_annotation(doc.into(), ann(id)).unwrap();
         }
-        let store = read_store(doc);
+        let store = read_store(doc).unwrap();
         let nums: Vec<u32> = store.annotations.iter().map(|a| a.number).collect();
         assert_eq!(nums, vec![1, 2, 3]);
         assert_eq!(store.next_number, 4);
@@ -398,7 +429,7 @@ mod tests {
         let mut undo = ann("d");
         undo.number = 9;
         add_annotation(doc.into(), undo).unwrap();
-        let store = read_store(doc);
+        let store = read_store(doc).unwrap();
         assert_eq!(store.annotations[3].number, 9);
         assert_eq!(store.next_number, 10);
     }
@@ -413,12 +444,12 @@ mod tests {
         std::fs::write(&path, r#"{"docPath":"/m/old.md","annotations":[
             {"id":"late","quote":"q","prefix":"","suffix":"","lineHint":{"start":1,"end":1},"note":"n","status":"open","author":"user","createdAt":"2026-02"},
             {"id":"early","quote":"q","prefix":"","suffix":"","lineHint":{"start":1,"end":1},"note":"n","status":"open","author":"user","createdAt":"2026-01"}]}"#).unwrap();
-        let store = read_store(doc);
+        let store = read_store(doc).unwrap();
         assert_eq!(store.annotations[0].number, 2);
         assert_eq!(store.annotations[1].number, 1);
         assert_eq!(store.next_number, 3);
         add_annotation(doc.into(), ann("new")).unwrap();
-        let store = read_store(doc);
+        let store = read_store(doc).unwrap();
         let nums: Vec<(String, u32)> = store.annotations.iter().map(|a| (a.id.clone(), a.number)).collect();
         assert_eq!(nums, vec![("late".into(), 2), ("early".into(), 1), ("new".into(), 3)]);
         assert!(std::fs::read_to_string(&path).unwrap().contains("\"nextNumber\": 4"));
@@ -560,7 +591,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let a = &read_store(doc).annotations[0];
+        let a = &read_store(doc).unwrap().annotations[0];
         assert_eq!(a.status, "resolved");
         assert_eq!(a.resolved_by.as_deref(), Some("user"));
         assert_eq!(a.number, 1);
@@ -573,7 +604,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let a = &read_store(doc).annotations[0];
+        let a = &read_store(doc).unwrap().annotations[0];
         assert_eq!((a.status.as_str(), a.note.as_str()), ("open", "edited"));
         assert_eq!(a.resolved_by, None);
         assert!(!std::fs::read_to_string(&path).unwrap().contains("resolvedBy"));
@@ -602,7 +633,7 @@ mod tests {
         add_annotation(doc.into(), ann("a")).unwrap();
         assert!(!std::fs::read_to_string(&path).unwrap().contains("replies"));
         add_reply(doc.into(), "a".into(), "what did you mean?".into()).unwrap();
-        let a = &read_store(doc).annotations[0];
+        let a = &read_store(doc).unwrap().annotations[0];
         assert_eq!(a.replies.len(), 1);
         assert_eq!(a.replies[0].author, "user");
         assert_eq!(a.replies[0].text, "what did you mean?");
@@ -624,7 +655,7 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, r#"{"docPath":"/m/noreplies.md","annotations":[
             {"id":"a","quote":"q","prefix":"","suffix":"","lineHint":{"start":1,"end":1},"note":"n","status":"open","author":"user","createdAt":"2026-01","number":1}],"nextNumber":2}"#).unwrap();
-        let store = read_store(doc);
+        let store = read_store(doc).unwrap();
         assert_eq!(store.annotations.len(), 1);
         assert!(store.annotations[0].replies.is_empty());
     }
@@ -637,9 +668,9 @@ mod tests {
         let _ = std::fs::remove_file(store_path_for(doc).unwrap());
         mutate_store(doc, |s| s.annotations.push(ann("a"))).unwrap();
         mutate_store(doc, |s| s.annotations.push(ann("b"))).unwrap();
-        assert_eq!(read_store(doc).annotations.len(), 2);
+        assert_eq!(read_store(doc).unwrap().annotations.len(), 2);
         mutate_store(doc, |s| s.annotations.retain(|a| a.id != "a")).unwrap();
-        let ids: Vec<_> = read_store(doc).annotations.iter().map(|a| a.id.clone()).collect();
+        let ids: Vec<_> = read_store(doc).unwrap().annotations.iter().map(|a| a.id.clone()).collect();
         assert_eq!(ids, vec!["b"]);
     }
 
@@ -660,6 +691,97 @@ mod tests {
         })
         .unwrap();
         assert!(found);
-        assert_eq!(read_store(doc).annotations[0].status, "resolved");
+        assert_eq!(read_store(doc).unwrap().annotations[0].status, "resolved");
+    }
+
+    fn fresh_home(name: &str) {
+        let home = std::env::temp_dir().join("glance-test-dataloss").join(name);
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+    }
+
+    #[test]
+    #[serial]
+    fn store_that_fails_to_parse_is_an_error_and_is_never_overwritten() {
+        fresh_home("corrupt");
+        let doc = "/m/corrupt.md";
+        for id in ["a", "b", "c"] {
+            add_annotation(doc.into(), ann(id)).unwrap();
+        }
+        let path = store_path_for(doc).unwrap();
+        let broken = std::fs::read_to_string(&path).unwrap().replacen("\"number\": 2", "\"number\": -2", 1);
+        std::fs::write(&path, &broken).unwrap();
+
+        let err = read_store(doc).unwrap_err();
+        assert!(err.contains("damaged") && err.contains(&path.display().to_string()), "{err}");
+        assert!(read_annotations(doc.into()).is_err());
+        assert!(add_annotation(doc.into(), ann("d")).is_err());
+        assert!(remove_annotation(doc.into(), "a".into()).is_err());
+        assert!(add_reply(doc.into(), "a".into(), "x".into()).is_err());
+        assert!(update_annotation(doc.into(), "a".into(), AnnotationPatch::default()).is_err());
+        assert!(ensure_annotation_store(doc.into()).is_ok());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+    }
+
+    #[test]
+    #[serial]
+    fn one_annotation_missing_a_field_keeps_the_whole_store() {
+        fresh_home("missing-field");
+        let doc = "/m/missing.md";
+        let path = store_path_for(doc).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text = r#"{"docPath":"/m/missing.md","nextNumber":3,"annotations":[
+            {"id":"a","quote":"q","prefix":"","suffix":"","lineHint":{"start":1,"end":1},"note":"keep me","status":"open","author":"user","createdAt":"t","number":1},
+            {"id":"b","quote":"q","lineHint":{"start":1,"end":1},"note":"no prefix/suffix","status":"open","author":"claude","createdAt":"t","number":2}]}"#;
+        std::fs::write(&path, text).unwrap();
+        let res = mutate_store(doc, |s| s.annotations.retain(|a| a.id != "a"));
+        assert!(res.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    #[serial]
+    fn missing_or_blank_store_is_empty_not_an_error() {
+        fresh_home("blank");
+        let doc = "/m/blank.md";
+        assert!(read_store(doc).unwrap().annotations.is_empty());
+        let path = store_path_for(doc).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "").unwrap();
+        assert!(read_store(doc).unwrap().annotations.is_empty());
+        add_annotation(doc.into(), ann("a")).unwrap();
+        assert_eq!(read_store(doc).unwrap().annotations.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn mutation_that_changes_nothing_writes_nothing() {
+        fresh_home("noop");
+        let doc = "/m/noop.md";
+        let path = store_path_for(doc).unwrap();
+        // Unknown doc + unknown id: no store file is created.
+        assert!(update_annotation(doc.into(), "zzz".into(), AnnotationPatch::default()).is_err());
+        remove_annotation(doc.into(), "zzz".into()).unwrap();
+        assert!(!path.exists());
+        // Existing store: an unknown id leaves the file byte-for-byte alone.
+        add_annotation(doc.into(), ann("a")).unwrap();
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        remove_annotation(doc.into(), "zzz".into()).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+    }
+
+    #[test]
+    #[serial]
+    fn ensure_annotation_store_creates_an_empty_store_once() {
+        fresh_home("ensure");
+        let doc = "/m/ensure.md";
+        let path = ensure_annotation_store(doc.into()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"docPath\": \"/m/ensure.md\""), "{text}");
+        add_annotation(doc.into(), ann("a")).unwrap();
+        ensure_annotation_store(doc.into()).unwrap();
+        assert_eq!(read_store(doc).unwrap().annotations.len(), 1);
     }
 }

@@ -1,7 +1,7 @@
 {
   "name": "glance",
   "private": true,
-  "version": "0.8.4",
+  "version": "0.8.5",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -31,6 +31,7 @@
     "@tauri-apps/cli": "^2",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^24.13.3",
+    "jsdom": "30.1.1",
     "typescript": "~5.6.2",
     "vite": "^6.0.3",
     "vitest": "^4.1.9"

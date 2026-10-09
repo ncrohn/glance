@@ -16,10 +16,31 @@ interface ModalParts {
   close: () => void;
 }
 
-function openModal(opts: { title: string; tone?: "default" | "error"; onEscape?: () => void }): ModalParts {
-  const root = document.getElementById("modal-root")!;
-  root.innerHTML = "";
+// One modal shows at a time. A modal that waits on a decision (no onEscape, or
+// `decision: true`) is never replaced: later modals queue behind it, so every
+// prompt's promise resolves. Any other modal is dismissed through its onEscape
+// when a new one opens, as before.
+interface Entry {
+  overlay: HTMLDivElement;
+  replaceable: boolean;
+  onEscape?: () => void;
+  close: () => void;
+}
+let shown: Entry | null = null;
+const queue: Entry[] = [];
 
+function presentNext(): void {
+  const next = queue.shift();
+  if (!next) return;
+  shown = next;
+  document.getElementById("modal-root")!.appendChild(next.overlay);
+  // A queued modal's builder ran its focus() while detached; redo it.
+  next.overlay.querySelector<HTMLElement>("input, .modal-btn.primary")?.focus();
+}
+
+function openModal(opts: {
+  title: string; tone?: "default" | "error"; onEscape?: () => void; decision?: boolean;
+}): ModalParts {
   const overlay = document.createElement("div");
   overlay.className = "modal";
 
@@ -39,10 +60,7 @@ function openModal(opts: { title: string; tone?: "default" | "error"; onEscape?:
   footer.className = "modal-footer";
   card.appendChild(footer);
 
-  const close = () => { root.innerHTML = ""; };
-
   overlay.appendChild(card);
-  root.appendChild(overlay);
 
   overlay.onkeydown = (e) => {
     if (e.key === "Escape") { e.preventDefault(); opts.onEscape?.(); }
@@ -50,7 +68,28 @@ function openModal(opts: { title: string; tone?: "default" | "error"; onEscape?:
   // Backdrop click closes only when there's a safe default (an Escape handler).
   overlay.onclick = (e) => { if (e.target === overlay) opts.onEscape?.(); };
 
-  return { overlay, card, body, footer, close };
+  const entry: Entry = {
+    overlay,
+    replaceable: !!opts.onEscape && !opts.decision,
+    onEscape: opts.onEscape,
+    close: () => {
+      const i = queue.indexOf(entry);
+      if (i !== -1) { queue.splice(i, 1); return; }
+      if (shown !== entry) return;
+      overlay.remove();
+      shown = null;
+      presentNext();
+    },
+  };
+  queue.push(entry);
+  const current = shown;
+  if (current?.replaceable) {
+    current.onEscape!(); // its close() presents the next queued modal
+    if (shown === current) current.close();
+  }
+  if (!shown) presentNext();
+
+  return { overlay, card, body, footer, close: entry.close };
 }
 
 function button(label: string, primary = false): HTMLButtonElement {
@@ -76,6 +115,28 @@ export function confirmReload(fileName: string): Promise<"mine" | "disk"> {
     keep.onclick = () => done("mine");
     load.onclick = () => done("disk");
     m.footer.append(load, keep);
+  });
+}
+
+export type UnsavedChoice = "save" | "discard" | "cancel";
+
+// Closing a tab or quitting with unsaved edits. Escape and the backdrop cancel.
+export function confirmUnsaved(fileName: string): Promise<UnsavedChoice> {
+  return new Promise((resolve) => {
+    const done = (r: UnsavedChoice) => { m.close(); resolve(r); };
+    const m = openModal({ title: `Save changes to ${fileName}?`, onEscape: () => done("cancel"), decision: true });
+    const msg = document.createElement("p");
+    msg.textContent = "Your changes will be lost if you don't save them.";
+    m.body.appendChild(msg);
+
+    const discard = button("Don't Save");
+    const cancel = button("Cancel");
+    const save = button("Save", true);
+    discard.onclick = () => done("discard");
+    cancel.onclick = () => done("cancel");
+    save.onclick = () => done("save");
+    m.footer.append(discard, cancel, save);
+    save.focus();
   });
 }
 

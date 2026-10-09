@@ -56,16 +56,24 @@ export function toggleViewMode(s: State, id: string): State {
   return mapDoc(s, id, (d) => ({ ...d, viewMode: next[d.viewMode] }));
 }
 
-export function markSaved(s: State, id: string): State {
+// `written` is the exact text the save sent to disk, not the editor's text now:
+// anything typed while the write was in flight stays dirty.
+export function markSaved(s: State, id: string, written: string): State {
   // Saving your own edits counts as having reviewed them: advance the
   // reviewed baseline too, so a save never leaves a tab dot / highlight for
   // changes the user just made themselves.
   return mapDoc(s, id, (d) => ({
     ...d,
-    diskContent: d.editorContent,
-    reviewedContent: d.editorContent,
+    diskContent: written,
+    reviewedContent: written,
     existsOnDisk: true,
   }));
+}
+
+// Record what is on disk now without touching the editor (the user chose to
+// keep their edits over an outside change).
+export function setDiskContent(s: State, id: string, diskContent: string): State {
+  return mapDoc(s, id, (d) => ({ ...d, diskContent, existsOnDisk: true }));
 }
 
 export function markReviewed(s: State, id: string): State {

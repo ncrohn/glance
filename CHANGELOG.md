@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.5
+
+Safer documents, and Glance stops losing your work.
+
+### Documents can't run code
+
+- A document can no longer run code inside Glance, or read and write files through it.
+- Glance only opens and saves markdown and plain-text files.
+- A link to anything that could run a program — a script, an app, a `.command` file, or a file disguised as one — now asks before opening it.
+- Links in mermaid diagrams open in your browser instead of replacing the Glance window.
+
+### Your work is kept
+
+- Closing a tab or quitting with unsaved edits asks whether to save them first.
+- Opening a file while Glance is closed keeps your other tabs.
+- If an annotation file is damaged, Glance shows an error and leaves the file alone, instead of replacing it with an empty one.
+- Saving while an agent writes the same file no longer loses your typing or the agent's change, and no longer asks about your own save.
+
 ## 0.8.4
 
 Opening many files at once no longer starts several copies of Glance.
