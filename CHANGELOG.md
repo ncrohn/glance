@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.8.6
+
+Comments stay put, editing is steadier, and AI Integration leaves your config alone.
+
+### Comments
+
+- A document's comments now follow the file itself, so they show up whether you open it through a symlink, a different letter case, or `/tmp`. Comments saved under an older spelling move over the next time that spelling is opened.
+- A comment attaches to the passage you selected, even when the same text appears elsewhere in the document.
+- Undoing a comment delete brings it back with its replies and its number.
+- An emoji near your selection no longer makes a new comment disappear.
+
+### Editing
+
+- The editor keeps your cursor, selection and undo history when you save or when comments change.
+- Undo only undoes your own typing, never an agent's change to the file.
+- Saving is atomic, keeps Finder tags, and keeps Windows (CRLF) and classic Mac line endings.
+- Glance notices when an open file is moved, renamed or sent to the Trash.
+- Long documents no longer stall on every change.
+
+### AI Integration
+
+- Setup edits your config files in place: your settings, key order and formatting are kept, and anything unexpected is refused rather than overwritten.
+- Remove only deletes what Glance installed, and keeps a guidance block you edited.
+- Setup now runs only when Glance is in Applications, so it never records a temporary path.
+
+### Agents and rendering
+
+- The Glance MCP server only reads markdown and text files, keeps running through bad input, and reports errors to the agent clearly.
+- Filenames like `AGENTS.md` are no longer turned into web links.
+- Hidden HTML comments no longer swallow the next list item.
+
 ## 0.8.5
 
 Safer documents, and Glance stops losing your work.
