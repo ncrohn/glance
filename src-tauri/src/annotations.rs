@@ -2,7 +2,9 @@ use crate::anchor::{resolve_anchor, Annotation, LineHint, Reply, Resolution};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -71,24 +73,49 @@ pub fn backfill_numbers(store: &mut AnnotationStore) {
         (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id))
     });
     for i in unnumbered {
-        max += 1;
+        max = max.saturating_add(1);
         store.annotations[i].number = max;
     }
-    store.next_number = store.next_number.max(max + 1);
+    store.next_number = store.next_number.max(max.saturating_add(1));
 }
 
 pub fn write_store(store: &AnnotationStore) -> Result<(), String> {
     let path = store_path_for(&store.doc_path)
         .ok_or_else(|| "Could not determine $HOME for annotation store".to_string())?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
     let json = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
-    // Write to a sibling temp file then rename, so a crash mid-write can't leave
-    // a truncated/corrupt store on disk (rename is atomic within the directory).
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    write_atomic(&path, json.as_bytes())
+}
+
+static SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A suffix no other call in any process will produce: pid, nanos, counter.
+fn unique_suffix() -> String {
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    format!("{}.{nanos}.{}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Replace `path` with `bytes` so a reader or a crash sees the old file or the
+/// new one, never a torn one: write a temp file in the same directory, fsync
+/// it, rename it over `path`, then fsync the directory so the rename sticks.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let dir = path.parent().ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.{}.tmp", unique_suffix()));
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("Couldn't write {}: {e}", path.display()));
+    }
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
 }
 
 /// Run `f` against the current on-disk store under an exclusive **cross-process**
@@ -162,7 +189,7 @@ pub fn push_annotation(store: &mut AnnotationStore, mut a: Annotation) {
     if a.number == 0 {
         a.number = store.next_number;
     }
-    store.next_number = store.next_number.max(a.number + 1);
+    store.next_number = store.next_number.max(a.number.saturating_add(1));
     store.annotations.push(a);
 }
 
@@ -694,11 +721,12 @@ mod tests {
         assert_eq!(read_store(doc).unwrap().annotations[0].status, "resolved");
     }
 
-    fn fresh_home(name: &str) {
+    fn fresh_home(name: &str) -> PathBuf {
         let home = std::env::temp_dir().join("glance-test-dataloss").join(name);
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
         std::env::set_var("HOME", &home);
+        home
     }
 
     #[test]
@@ -770,6 +798,55 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         remove_annotation(doc.into(), "zzz".into()).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+    }
+
+    #[test]
+    #[serial]
+    fn numbers_at_u32_max_saturate_instead_of_overflowing() {
+        fresh_home("overflow");
+        let doc = "/m/of.md";
+        let path = store_path_for(doc).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"docPath":"/m/of.md","annotations":[
+            {"id":"a","quote":"q","prefix":"","suffix":"","lineHint":{"start":1,"end":1},"note":"n","status":"open","author":"user","createdAt":"t","number":4294967295},
+            {"id":"b","quote":"q","prefix":"","suffix":"","lineHint":{"start":1,"end":1},"note":"n","status":"open","author":"user","createdAt":"t"}]}"#).unwrap();
+        let store = read_store(doc).unwrap();
+        assert_eq!(store.next_number, u32::MAX);
+        assert_eq!(store.annotations[1].number, u32::MAX);
+        let mut carried = ann("c");
+        carried.number = u32::MAX;
+        add_annotation(doc.into(), carried).unwrap();
+        assert_eq!(read_store(doc).unwrap().annotations.len(), 3);
+    }
+
+    #[test]
+    #[serial]
+    fn store_writes_leave_no_temp_files_behind() {
+        let home = fresh_home("atomic");
+        let doc = "/m/atomic.md";
+        for id in ["a", "b"] {
+            add_annotation(doc.into(), ann(id)).unwrap();
+        }
+        let names: Vec<String> = std::fs::read_dir(home.join(".glance/annotations")).unwrap()
+            .flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+        assert_eq!(read_store(doc).unwrap().annotations.len(), 2);
+    }
+
+    #[test]
+    fn write_atomic_replaces_content_and_reports_failure() {
+        let dir = std::env::temp_dir().join(format!("glance-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("f.json");
+        write_atomic(&file, b"one").unwrap();
+        write_atomic(&file, b"two").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "two");
+        // Renaming over a directory fails; the temp file is cleaned up.
+        std::fs::create_dir_all(dir.join("sub.json")).unwrap();
+        assert!(write_atomic(&dir.join("sub.json"), b"x").is_err());
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left.len(), 2, "{left:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
