@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(second["number"], 2);
         assert_ne!(second["id"], first["id"]);
 
-        let store = read_store(&doc);
+        let store = read_store(&doc).unwrap();
         assert_eq!(store.annotations.len(), 2);
         assert!(store.annotations.iter().all(|a| a.author == "claude" && a.status == "open"));
         assert_eq!(store.annotations[0].line_hint, LineHint { start: 5, end: 5 });
@@ -520,17 +520,48 @@ mod tests {
         // A quote not in the file errors and writes nothing (line hint in range → "drifted").
         let err = call_tool("add_annotation", &json!({ "path": doc, "quote": "NOTINTEXTEVER", "note": "x" })).unwrap_err();
         assert!(err.contains("quote not found"), "{err}");
-        assert_eq!(read_store(&doc).annotations.len(), 2);
+        assert_eq!(read_store(&doc).unwrap().annotations.len(), 2);
         // Same with a line hint out of range ("orphaned").
         let err = call_tool("add_annotation", &json!({ "path": doc, "quote": "NOTINTEXTEVER", "note": "x", "lineHint": { "start": 99 } })).unwrap_err();
         assert!(err.contains("quote not found"), "{err}");
-        assert_eq!(read_store(&doc).annotations.len(), 2);
+        assert_eq!(read_store(&doc).unwrap().annotations.len(), 2);
 
         // list_annotations shows both, numbered.
         let out = call_tool("list_annotations", &json!({ "path": doc })).unwrap();
         let list: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(list.as_array().unwrap().len(), 2);
         assert_eq!(list[1]["number"], 2);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn damaged_store_errors_on_every_tool_and_is_left_alone() {
+        let home = std::env::temp_dir().join("glance-test-mcp-damaged");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        let doc = home.join("doc.md").to_string_lossy().to_string();
+        std::fs::write(&doc, NINE).unwrap();
+        mutate_store(&doc, |s| s.annotations.push(ann("mid", "l5", "open"))).unwrap();
+        let store_path = glance_lib::annotations::store_path_for(&doc).unwrap();
+        let damaged = std::fs::read_to_string(&store_path).unwrap().replacen("\"prefix\"", "\"prefx\"", 1);
+        std::fs::write(&store_path, &damaged).unwrap();
+
+        for (tool, extra) in [
+            ("list_annotations", json!({})),
+            ("get_annotation", json!({ "id": "mid" })),
+            ("resolve_annotation", json!({ "id": "mid", "note": "done" })),
+            ("reply_annotation", json!({ "id": "mid", "text": "why?" })),
+            ("add_annotation", json!({ "quote": "l7", "note": "x" })),
+        ] {
+            let mut args = extra;
+            args["path"] = json!(doc);
+            let err = call_tool(tool, &args).unwrap_err();
+            assert!(err.contains("damaged"), "{tool}: {err}");
+        }
+        let uri = format!("glance://annotations/{doc}");
+        assert!(matches!(handle("resources/read", &json!({ "uri": uri })), Some(Err(_))));
+        assert_eq!(std::fs::read_to_string(&store_path).unwrap(), damaged);
     }
 
     #[test]
@@ -723,13 +754,13 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
     match name {
         "list_annotations" => {
             let status = args.get("status").and_then(|v| v.as_str());
-            let store = read_store(path);
+            let store = read_store(path)?;
             let views = build_views(&store, &read_doc(path), status);
             Ok(text_result(serde_json::to_value(views).unwrap()))
         }
         "get_annotation" => {
             let id = args.get("id").and_then(|v| v.as_str()).ok_or("missing 'id'")?;
-            let store = read_store(path);
+            let store = read_store(path)?;
             let text = read_doc(path);
             match store.annotations.iter().find(|a| a.id == id) {
                 Some(a) => Ok(text_result(serde_json::to_value(detail_of(a, &text)).unwrap())),
@@ -810,7 +841,10 @@ fn handle(method: &str, params: &Value) -> Option<Result<Value, (i64, String)>> 
         "resources/read" => {
             let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
             let path = uri.strip_prefix("glance://annotations/").unwrap_or("");
-            let store = read_store(path);
+            let store = match read_store(path) {
+                Ok(s) => s,
+                Err(e) => return Some(Err((-32000, e))),
+            };
             let views = build_views(&store, &read_doc(path), Some("open"));
             Some(Ok(json!({
                 "contents": [ {

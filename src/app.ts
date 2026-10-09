@@ -113,8 +113,16 @@ function el<K extends keyof HTMLElementTagNameMap>(
 // baseline to diff against, so it must not report Claude activity.
 const annotationsLoaded = new Set<string>();
 
+const ERROR_TOAST_MS = 12000;
+
 async function loadAnnotations(absPath: string): Promise<void> {
-  const store = await readAnnotations(absPath);
+  let store;
+  try {
+    store = await readAnnotations(absPath);
+  } catch (err) {
+    showToast(`Couldn't load comments for ${basename(absPath)}. ${err}`, { ms: ERROR_TOAST_MS });
+    return;
+  }
   const next = store.annotations;
   const before = state.docs.find((d) => d.absPath === absPath);
   const prev = before && annotationsLoaded.has(absPath) ? before.annotations : next;
@@ -136,6 +144,21 @@ async function loadAnnotations(absPath: string): Promise<void> {
     state = setDocActivity(state, doc.id, ids);
     render();
   }
+}
+
+// Land an optimistic comment change: on success reconcile with the merged
+// on-disk truth; on failure put back the list from before the change and say
+// why. Resolves true when the store accepted the write.
+function persistComments(absPath: string, before: Annotation[], write: Promise<unknown>): Promise<boolean> {
+  return write.then(
+    () => loadAnnotations(absPath).then(() => true),
+    (err) => {
+      state = setDocAnnotations(state, absPath, before);
+      render();
+      showToast(`Couldn't save the comment change on ${basename(absPath)}. ${err}`, { ms: ERROR_TOAST_MS });
+      return false;
+    },
+  );
 }
 
 async function refreshResolutions(absPath: string): Promise<void> {
@@ -173,7 +196,7 @@ function startComment(absPath: string): void {
       const cur = state.docs.find((d) => d.absPath === absPath)?.annotations ?? doc.annotations;
       state = setDocAnnotations(state, absPath, addAnnotation(cur, annotation));
       render();
-      void addStoredAnnotation(absPath, annotation).then(() => loadAnnotations(absPath));
+      void persistComments(absPath, cur, addStoredAnnotation(absPath, annotation));
     },
     onCancel: () => {},
   });
@@ -198,7 +221,7 @@ function renderRailFor(): void {
     state = setDocAnnotations(state, doc.absPath, patchAnnotation(cur, a.id, local));
     render();
     const stored = clearResolution ? { ...local, clearResolution } : local;
-    void updateStoredAnnotation(doc.absPath, a.id, stored).then(() => loadAnnotations(doc.absPath));
+    void persistComments(doc.absPath, cur, updateStoredAnnotation(doc.absPath, a.id, stored));
   };
   renderRail(host, doc.annotations, doc.resolutions, markers, {
     onScrollTo: (a) => {
@@ -243,7 +266,7 @@ function renderRailFor(): void {
       const reply = { author: "user" as const, text, createdAt: new Date().toISOString() };
       state = setDocAnnotations(state, doc.absPath, appendReply(cur, a.id, reply));
       render();
-      void addStoredReply(doc.absPath, a.id, text).then(() => loadAnnotations(doc.absPath));
+      void persistComments(doc.absPath, cur, addStoredReply(doc.absPath, a.id, text));
     },
     onRemove: (a) => {
       // Optimistic local remove (fresh from state), then the locked server-side
@@ -253,24 +276,27 @@ function renderRailFor(): void {
       const cur = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? doc.annotations;
       state = setDocAnnotations(state, doc.absPath, removeAnnotation(cur, a.id));
       render();
-      const removed = removeStoredAnnotation(doc.absPath, a.id).then(() => loadAnnotations(doc.absPath));
+      const removed = persistComments(doc.absPath, cur, removeStoredAnnotation(doc.absPath, a.id));
       showToast(a.number > 0 ? `Comment ${a.number} deleted` : "Comment deleted", {
         actionLabel: "Undo",
         onAction: () => {
-          const now = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? [];
-          state = setDocAnnotations(state, doc.absPath, addAnnotation(now, a));
-          render();
-          void removed.then(() => addStoredAnnotation(doc.absPath, a)).then(() => loadAnnotations(doc.absPath));
+          void removed.then((ok) => {
+            if (!ok) return; // the remove was rolled back; nothing to undo
+            const now = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? [];
+            state = setDocAnnotations(state, doc.absPath, addAnnotation(now, a));
+            render();
+            return persistComments(doc.absPath, now, addStoredAnnotation(doc.absPath, a));
+          });
         },
       });
     },
     onClearResolved: (ids) => {
-      let cur = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? doc.annotations;
+      const before = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? doc.annotations;
+      let cur = before;
       for (const id of ids) cur = removeAnnotation(cur, id);
       state = setDocAnnotations(state, doc.absPath, cur);
       render();
-      void Promise.all(ids.map((id) => removeStoredAnnotation(doc.absPath, id)))
-        .then(() => loadAnnotations(doc.absPath));
+      void persistComments(doc.absPath, before, Promise.all(ids.map((id) => removeStoredAnnotation(doc.absPath, id))));
     },
   }, {
     pref: railPref,
