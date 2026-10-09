@@ -30,6 +30,7 @@ import { showCommentComposer } from "./composer";
 import { showToast } from "./toast";
 import { applyRailWidth, mountRailResizer, parseRailWidth } from "./rail-resize";
 import { sectionFor, shouldShowWhatsNew } from "./whats-new";
+import { isCheckDue, isNewer, parseRelease } from "./update-check";
 import changelog from "../CHANGELOG.md?raw";
 import { diffActivity, activityMessage } from "./activity";
 import {
@@ -41,6 +42,8 @@ import { mountEditor, type EditorHandle } from "./editor";
 import { decideReload } from "./reload";
 import { restoreTarget, lineAtOffset, offsetForLine, type LineBlock } from "./scroll-restore";
 import { confirmOpenFile, confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker, showWhatsNew } from "./modal";
+import { showUpdateAvailable, showUpToDate } from "./modal";
+import { fetchLatestRelease, onCheckForUpdates } from "./ipc";
 import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
 } from "./theme";
@@ -56,6 +59,7 @@ const LS_RAIL = "glance.rail";
 const LS_HINT = "glance.commentHintSeen";
 const LS_RAIL_W = "glance.railWidth";
 const LS_SEEN_VERSION = "glance.seenVersion";
+const LS_UPDATE_CHECKED = "glance.updateCheckedAt";
 
 // absPath → annotation store path, so closeTab can release the store's file
 // watcher (keyed by store path, not doc path) instead of leaking it until exit.
@@ -1059,6 +1063,7 @@ export async function start(): Promise<void> {
   await onShowIntegrationPicker((action) => { void openIntegrationPicker(action); });
   await onShowAbout(async () => { showAbout(await appVersion()); });
   await onShowWhatsNew(() => { void openWhatsNew(true); });
+  await onCheckForUpdates(() => { void checkForUpdates(true); });
   await onShowTheme(() => {
     showThemePicker(loadThemePref(), {
       onPreview: (pref) => applyTheme(pref, render),
@@ -1111,12 +1116,47 @@ export async function start(): Promise<void> {
   }
   await refreshIntegration();
   render();
-  void openWhatsNew(false);
+  // The update toast would draw under the What's New modal, so wait for it.
+  void openWhatsNew(false).finally(() => checkForUpdates(false));
+}
+
+// Compare the running version with the latest GitHub release. The menu item
+// (`manual`) always checks and always answers; the launch check runs at most
+// once a day and stays silent unless a newer version exists. A newer-version
+// toast only counts as checked once it ran its full time or was clicked, so a
+// toast replaced by another one shows again next launch.
+async function checkForUpdates(manual: boolean): Promise<void> {
+  if (!manual && !isCheckDue(localStorage.getItem(LS_UPDATE_CHECKED), Date.now())) return;
+  let current = "";
+  let release = null;
+  try {
+    current = await appVersion();
+    release = parseRelease(await fetchLatestRelease());
+    if (!release) throw new Error("GitHub didn't return a usable release");
+  } catch (err) {
+    if (manual) showNotice(`Couldn't check for updates. ${err instanceof Error ? err.message : err}`, false);
+    return;
+  }
+  const markChecked = () => localStorage.setItem(LS_UPDATE_CHECKED, String(Date.now()));
+  const { version, url } = release;
+  if (!isNewer(version, current)) {
+    markChecked();
+    if (manual) showUpToDate(current);
+    return;
+  }
+  if (manual) { markChecked(); showUpdateAvailable(current, version, url); return; }
+  showToast(`Glance ${version} is available.`, {
+    actionLabel: "Details",
+    onAction: () => { markChecked(); showUpdateAvailable(current, version, url); },
+    onExpire: markChecked,
+    ms: ERROR_TOAST_MS,
+  });
 }
 
 // Release notes for the running version. `force` (the menu item) always shows
 // them; otherwise only on the first launch of a version not yet seen. A version
-// with no changelog section is recorded silently so it never nags.
+// with no changelog section is recorded silently so it never nags. Resolves
+// once the modal closes, or right away when it isn't shown.
 async function openWhatsNew(force: boolean): Promise<void> {
   let version = "";
   try { version = await appVersion(); } catch { return; }
@@ -1124,5 +1164,6 @@ async function openWhatsNew(force: boolean): Promise<void> {
   const markSeen = () => localStorage.setItem(LS_SEEN_VERSION, version);
   const section = sectionFor(changelog, version);
   if (!section) { markSeen(); return; }
-  showWhatsNew(version, renderMarkdown(section), markSeen);
+  const html = renderMarkdown(section);
+  await new Promise<void>((resolve) => showWhatsNew(version, html, () => { markSeen(); resolve(); }));
 }

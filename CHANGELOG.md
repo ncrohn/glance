@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.0
+
+Glance now tells you when a new version is out.
+
+- Once a day, Glance checks GitHub for a newer release. If there is one, a notice in the corner offers the details.
+- **Glance → Check for Updates…** checks right away and tells you whether you're up to date.
+- The update dialog links to the download, and shows the `brew upgrade --cask glance` command if you installed with Homebrew.
+
 ## 0.8.6
 
 Comments stay put, editing is steadier, and AI Integration leaves your config alone.
