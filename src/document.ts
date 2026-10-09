@@ -21,21 +21,23 @@ export interface Doc {
   eol: LineEnding;
 }
 
-export type LineEnding = "\n" | "\r\n";
+// A lone "\r" is a line break to CodeMirror too (old Mac files), so it's
+// handled like the others; otherwise the editor and the stored text never agree.
+export type LineEnding = "\n" | "\r\n" | "\r";
 
 /** The line ending of the first line break, LF when there is none. */
 export function detectEol(text: string): LineEnding {
-  const nl = text.indexOf("\n");
-  return nl > 0 && text[nl - 1] === "\r" ? "\r\n" : "\n";
+  const m = /\r\n|\r|\n/.exec(text);
+  return m ? (m[0] as LineEnding) : "\n";
 }
 
 export function toLf(text: string): string {
-  return text.includes("\r\n") ? text.replace(/\r\n/g, "\n") : text;
+  return text.includes("\r") ? text.replace(/\r\n?/g, "\n") : text;
 }
 
 /** Editor text (LF) in the file's own line ending. */
 export function withEol(lfText: string, eol: LineEnding): string {
-  return eol === "\n" ? lfText : toLf(lfText).replace(/\n/g, "\r\n");
+  return eol === "\n" ? lfText : toLf(lfText).replace(/\n/g, eol);
 }
 
 export function basename(path: string): string {

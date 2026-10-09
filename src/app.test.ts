@@ -464,6 +464,34 @@ describe("the editor survives re-renders", () => {
     expect(v2.state.selection.main.head).toBe(308);
     expect(isDirtyTab("/a.md")).toBe(false);
   });
+
+  it("undo doesn't revert an outside change", async () => {
+    env.fs.set("/a.md", fifty);
+    env.launch = ["/a.md"];
+    await boot();
+    const { undo } = await import("@codemirror/commands");
+    const v = await editorView();
+    v.dispatch({ changes: { from: 0, insert: "MINE " }, userEvent: "input.type" });
+    await emit("menu-save");
+    await diskChange("/a.md", "AGENT\n" + env.fs.get("/a.md"));
+    undo(v);
+    expect(v.state.doc.toString()).toContain("AGENT\n");
+    expect(v.state.doc.toString()).not.toContain("MINE ");
+  });
+});
+
+describe("old-Mac CR files", () => {
+  it("an edit keeps lone-CR line endings and a re-render changes nothing", async () => {
+    env.fs.set("/m.md", "line1\rline2\r");
+    env.launch = ["/m.md"];
+    await boot();
+    const v = await editorView();
+    await emit("annotations-changed", "/m.md");
+    expect(isDirtyTab("/m.md")).toBe(false);
+    v.dispatch({ changes: { from: 0, insert: "X" } });
+    await emit("menu-save");
+    expect(env.fs.get("/m.md")).toBe("Xline1\rline2\r");
+  });
 });
 
 describe("CRLF files", () => {

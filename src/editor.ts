@@ -1,5 +1,5 @@
 import { EditorView, keymap } from "@codemirror/view";
-import { Annotation, Compartment, EditorState } from "@codemirror/state";
+import { Annotation, Compartment, EditorState, Transaction } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, selectAll } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
@@ -88,7 +88,14 @@ export function mountEditor(
     destroy: () => view.destroy(),
     setContent: (text: string) => {
       const change = minimalChange(view.state.doc.toString(), text);
-      if (change) view.dispatch({ changes: change, annotations: external.of(true) });
+      // Kept out of undo history: Cmd+Z must undo the user's own typing, not
+      // revert an agent's rewrite of the file (which a save would then write).
+      if (change) {
+        view.dispatch({
+          changes: change,
+          annotations: [external.of(true), Transaction.addToHistory.of(false)],
+        });
+      }
     },
     setDark: (next: boolean) => {
       if (next === isDark) return;

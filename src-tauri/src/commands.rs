@@ -52,6 +52,28 @@ pub fn canonicalize_path(path: String) -> String {
 /// link itself survives. The new inode takes the old file's permissions, but
 /// a hard link to the old file keeps the old text, and owner and extended
 /// attributes come from the writer, as with any editor's safe save.
+/// Carry Finder tags and other extended attributes, plus ACLs, over to the file
+/// that replaces `from`. Best effort: a failure here shouldn't block a save.
+#[cfg(target_os = "macos")]
+fn copy_metadata(from: &Path, to: &Path) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let (Ok(src), Ok(dst)) = (
+        CString::new(from.as_os_str().as_bytes()),
+        CString::new(to.as_os_str().as_bytes()),
+    ) else {
+        return;
+    };
+    unsafe {
+        libc::copyfile(
+            src.as_ptr(),
+            dst.as_ptr(),
+            std::ptr::null_mut(),
+            libc::COPYFILE_XATTR | libc::COPYFILE_ACL,
+        );
+    }
+}
+
 fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -59,12 +81,10 @@ fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 
     let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let existing = fs::metadata(&target).ok();
-    // A rename would replace a read-only file the in-place write was refused.
-    if existing.as_ref().is_some_and(|m| m.permissions().readonly()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("{} is read-only", target.display()),
-        ));
+    // A rename only needs the directory to be writable, so it would replace a
+    // file the user can't write (read-only, or owned by root). Ask the file.
+    if existing.is_some() {
+        fs::OpenOptions::new().write(true).open(&target)?;
     }
     let name = target
         .file_name()
@@ -84,13 +104,25 @@ fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
             // Private until it has the target's permissions.
             std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
         }
-        let mut file = opts.open(&tmp)?;
+        let mut file = match opts.open(&tmp) {
+            Ok(f) => f,
+            // The folder isn't writable but the file is: save in place, as
+            // before atomic saves, rather than refuse a save that used to work.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && existing.is_some() => {
+                return fs::write(&target, contents);
+            }
+            Err(e) => return Err(e),
+        };
         file.write_all(contents)?;
         if let Some(meta) = &existing {
             file.set_permissions(meta.permissions())?;
         }
         file.sync_all()?;
         drop(file);
+        #[cfg(target_os = "macos")]
+        if existing.is_some() {
+            copy_metadata(&target, &tmp);
+        }
         fs::rename(&tmp, &target)?;
         if let Ok(d) = fs::File::open(dir) {
             let _ = d.sync_all();
@@ -226,17 +258,40 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_write_leaves_the_old_file_and_no_temp() {
+    fn a_read_only_folder_still_saves_a_writable_file_in_place() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = scratch("atomic-fail");
+        let dir = scratch("atomic-rodir");
         let doc = dir.join("doc.md");
         fs::write(&doc, "old").unwrap();
-        // A read-only directory refuses the temp file.
+        // The folder refuses the temp file; the file itself is writable.
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
-        assert!(write_file(doc.to_string_lossy().into(), "new".into()).is_err());
+        let res = write_file(doc.to_string_lossy().into(), "new".into());
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(fs::read_to_string(&doc).unwrap(), "old");
+        res.unwrap();
+        assert_eq!(fs::read_to_string(&doc).unwrap(), "new");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_save_keeps_extended_attributes() {
+        let dir = scratch("atomic-xattr");
+        let doc = dir.join("doc.md");
+        fs::write(&doc, "old").unwrap();
+        let set = std::process::Command::new("xattr")
+            .args(["-w", "com.glance.test", "tagged"])
+            .arg(&doc)
+            .status()
+            .unwrap();
+        assert!(set.success());
+        write_file(doc.to_string_lossy().into(), "new".into()).unwrap();
+        let out = std::process::Command::new("xattr")
+            .args(["-p", "com.glance.test"])
+            .arg(&doc)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "tagged");
+        assert_eq!(fs::read_to_string(&doc).unwrap(), "new");
         fs::remove_dir_all(&dir).unwrap();
     }
 
