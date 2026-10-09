@@ -354,6 +354,12 @@ pub fn new_id(seed: &str) -> String {
     sha1_hex(seed)[..8].to_string()
 }
 
+/// A short id that differs on every call, even for the same seed in the same
+/// second: the seed is mixed with the pid, nanoseconds and a counter.
+pub fn unique_id(seed: &str) -> String {
+    new_id(&format!("{seed}\0{}", unique_suffix()))
+}
+
 /// Remove one annotation by id under lock.
 #[tauri::command]
 pub fn remove_annotation(doc_path: String, id: String) -> Result<(), String> {
@@ -662,6 +668,13 @@ mod tests {
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
         assert_eq!(a, new_id("/d.md quote note 2026-09-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn unique_id_differs_for_the_same_seed() {
+        let ids: std::collections::HashSet<String> = (0..200).map(|_| unique_id("/d.md same note")).collect();
+        assert_eq!(ids.len(), 200);
+        assert!(ids.iter().all(|id| id.len() == 8 && id.chars().all(|c| c.is_ascii_hexdigit())));
     }
 
     #[test]

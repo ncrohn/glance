@@ -4,7 +4,7 @@
 
 use glance_lib::anchor::{resolve_anchor, Annotation, LineHint, Reply};
 use glance_lib::annotations::{
-    apply_reply, mutate_store, new_id, now_iso8601, push_annotation, read_store, store_dir, AnnotationStore,
+    apply_reply, mutate_store, now_iso8601, push_annotation, read_store, store_dir, unique_id, AnnotationStore,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -152,7 +152,7 @@ fn apply_claude_reply(store: &mut AnnotationStore, id: &str, text: &str) -> bool
 fn claude_annotation(path: &str, quote: &str, note: &str, prefix: &str, suffix: &str, line_hint: Option<LineHint>) -> Annotation {
     let now = now_iso8601();
     Annotation {
-        id: new_id(&format!("{path}{quote}{note}{now}")),
+        id: unique_id(&format!("{path}{quote}{note}{now}")),
         quote: quote.to_string(),
         prefix: prefix.to_string(),
         suffix: suffix.to_string(),
@@ -519,6 +519,12 @@ mod tests {
         assert_eq!(second["number"], 2);
         assert_ne!(second["id"], first["id"]);
 
+        // The same quote and note twice in one second (a retry) still gets two ids.
+        let out = call_tool("add_annotation", &json!({ "path": doc, "quote": "l7", "note": "and here" })).unwrap();
+        let retry: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_ne!(retry["id"], second["id"]);
+        mutate_store(&doc, |s| s.annotations.retain(|a| a.id != retry["id"].as_str().unwrap())).unwrap();
+
         let store = read_store(&doc).unwrap();
         assert_eq!(store.annotations.len(), 2);
         assert!(store.annotations.iter().all(|a| a.author == "claude" && a.status == "open"));
@@ -820,7 +826,11 @@ fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
                 }
             }
             let stored = mutate_store(path, |store| {
-                push_annotation(store, a.clone());
+                let mut a = a.clone();
+                while store.annotations.iter().any(|b| b.id == a.id) {
+                    a.id = unique_id(&a.id);
+                }
+                push_annotation(store, a);
                 store.annotations.last().cloned().unwrap()
             })?;
             Ok(text_result(serde_json::to_value(view_of(&stored, &text)).unwrap()))
