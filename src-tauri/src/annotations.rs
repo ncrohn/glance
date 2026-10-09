@@ -5,7 +5,7 @@ use sha1::{Digest, Sha1};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AnnotationStore {
@@ -148,8 +148,18 @@ pub fn mutate_store<T>(
 /// stable sibling file (never renamed), so it is held across a read and the
 /// temp-file+rename write. flock on the store file itself wouldn't work: the
 /// rename swaps the inode out from under it.
-fn with_store_lock<T>(
-    store_path: &std::path::Path,
+fn with_store_lock<T>(store_path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    with_store_lock_within(store_path, LOCK_WAIT, f)
+}
+
+/// How long a mutation waits for another process to release a store's lock
+/// before giving up. Holders keep it for milliseconds; one that keeps it
+/// longer is stuck, and waiting forever would hang the caller with it.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
+
+fn with_store_lock_within<T>(
+    store_path: &Path,
+    wait: Duration,
     f: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     if let Some(parent) = store_path.parent() {
@@ -162,7 +172,23 @@ fn with_store_lock<T>(
         .truncate(false) // only used as a flock handle; never written to
         .open(&lock_path)
         .map_err(|e| e.to_string())?;
-    lock_file.lock_exclusive().map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + wait;
+    let contended = fs2::lock_contended_error().raw_os_error();
+    loop {
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(e) if e.raw_os_error() == contended && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) if e.raw_os_error() == contended => {
+                return Err(format!(
+                    "The annotation store {} is locked by another process. Try again in a moment.",
+                    store_path.display()
+                ));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
     let out = f();
     let _ = lock_file.unlock(); // also released when lock_file drops
     out
@@ -798,6 +824,24 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         remove_annotation(doc.into(), "zzz".into()).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+    }
+
+    #[test]
+    #[serial]
+    fn a_held_lock_times_out_with_a_clear_error() {
+        fresh_home("locked");
+        let doc = "/m/locked.md";
+        add_annotation(doc.into(), ann("a")).unwrap();
+        let store_path = store_path_for(doc).unwrap();
+        // flock is per open file, so a second handle in this process contends like another process.
+        let holder = std::fs::File::open(store_path.with_extension("json.lock")).unwrap();
+        holder.lock_exclusive().unwrap();
+        let started = Instant::now();
+        let err = with_store_lock_within(&store_path, Duration::from_millis(150), || Ok(())).unwrap_err();
+        assert!(err.contains("locked by another process"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+        holder.unlock().unwrap();
+        with_store_lock_within(&store_path, Duration::from_millis(150), || Ok(())).unwrap();
     }
 
     #[test]
