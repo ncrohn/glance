@@ -45,6 +45,11 @@ export function captureSelection(sourceText: string): CapturedSelection | null {
   // selected block(s), then at/after the block's line, so duplicate text
   // resolves to the selected instance.
   let span = locateInSource(sourceText, quote, lineStart(blockLine), blockSpan?.end);
+  // A match that starts outside the selected block(s) is a copy of the text
+  // somewhere else; the block itself is the better anchor.
+  if (span && blockSpan && (span.start < blockSpan.start || span.start > blockSpan.end)) {
+    span = blockSpan;
+  }
 
   // Last resort: the rendered view strips markup the source has — blockquote
   // `> ` prefixes, `**bold**`, `[links](…)`, headings — so the selection text
