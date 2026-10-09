@@ -139,6 +139,35 @@ describe("renderMarkdown file: links", () => {
   });
 });
 
+describe("renderMarkdown HTML comments in containers", () => {
+  it("ends an unclosed comment with its list item", () => {
+    const html = renderMarkdown("- <!-- start\n- second item -->\n- third");
+    expect(html).not.toContain("start");
+    expect(html).toContain("second item --&gt;</li>");
+    expect(html).toContain("third</li>");
+    expect(html.match(/<li/g)).toHaveLength(3);
+  });
+
+  it("hides a comment that closes inside its list item, across a blank line", () => {
+    const html = renderMarkdown("- a <!-- x -->\n- <!-- hidden\n\n  still hidden -->\n- b");
+    expect(html).not.toContain("hidden");
+    expect(html).toContain('<li data-sourceline="5" data-sourceline-end="5">b</li>');
+  });
+
+  it("ends an unclosed comment with its blockquote", () => {
+    const html = renderMarkdown("> - <!-- a\n> - b\n\nafter");
+    expect(html).not.toContain("&lt;!--");
+    expect(html).toContain("b</li>");
+    expect(html).toContain("after");
+  });
+
+  it("shows an unclosed top-level comment instead of hiding the rest", () => {
+    const html = renderMarkdown("<!-- oops\n\nBody");
+    expect(html).toContain("&lt;!-- oops");
+    expect(html).toContain("Body");
+  });
+});
+
 describe("renderMarkdown wikilinks and comments", () => {
   it("renders [[links]] with their target", () => {
     const html = renderMarkdown("See [[decisions]] and [[../x/index|X]].");

@@ -57,7 +57,9 @@ md.validateLink = (url) => /^file:/i.test(url.trim()) || defaultValidateLink(url
 
 // HTML comments are hidden, as on GitHub and in Obsidian. Raw HTML stays off,
 // so only comments get this treatment; code spans and fences run first and keep
-// any comment inside them visible.
+// any comment inside them visible. Like CommonMark's HTML block type 2, a
+// comment runs to the line holding `-->` but ends with the list item or
+// blockquote it started in, so it can't swallow the next item.
 md.block.ruler.before(
   "html_block",
   "html_comment",
@@ -65,7 +67,9 @@ md.block.ruler.before(
     if (state.sCount[startLine] - state.blkIndent >= 4) return false;
     const start = state.bMarks[startLine] + state.tShift[startLine];
     if (!state.src.startsWith("<!--", start)) return false;
-    for (let line = startLine; line < endLine; line++) {
+    let line = startLine;
+    for (; line < endLine; line++) {
+      if (line > startLine && state.sCount[line] < state.blkIndent && !state.isEmpty(line)) break;
       const from = line === startLine ? start + 4 : state.bMarks[line];
       const text = state.src.slice(from, state.eMarks[line]);
       const close = text.indexOf("-->");
@@ -74,7 +78,12 @@ md.block.ruler.before(
       if (!silent) state.line = line + 1;
       return true;
     }
-    return false;
+    // Unclosed. Inside a container it ends with the container, as on GitHub;
+    // at the end of the document, show the stray `<!--` rather than hide
+    // everything after it.
+    if (line === endLine) return false;
+    if (!silent) state.line = line;
+    return true;
   },
   { alt: ["paragraph", "reference", "blockquote"] },
 );
