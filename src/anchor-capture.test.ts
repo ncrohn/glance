@@ -83,6 +83,38 @@ describe("locateInSource", () => {
     expect(src.slice(span.start, span.end)).toBe("[[2026-note]] here");
   });
 
+  it("a markup-split selection anchors in its own block, not an earlier plain duplicate", () => {
+    const lines = ["# Intro", "", "We should ship the plan now.", ""];
+    for (let i = 0; i < 40; i++) lines.push(`filler line ${i}`, "");
+    lines.push("## Decision", "", "We should **ship the plan** now.");
+    const src = lines.join("\n");
+    const from = src.lastIndexOf("We should **");
+    const span = locateInSource(src, "ship the plan now", from)!;
+    expect(span.start).toBeGreaterThanOrEqual(from);
+    expect(src.slice(span.start, span.end)).toBe("ship the plan** now");
+  });
+
+  it("a markup-split selection beats a later plain duplicate inside the block window", () => {
+    const src = "We should **ship the plan** now.\n\nWe should ship the plan now.\n";
+    const blockEnd = src.indexOf("\n");
+    const span = locateInSource(src, "ship the plan now", 0, blockEnd)!;
+    expect(span.end).toBeLessThanOrEqual(blockEnd);
+    expect(src.slice(span.start, span.end)).toBe("ship the plan** now");
+  });
+
+  it("a hard-wrapped selection beats a later verbatim duplicate inside the block window", () => {
+    const src = "- ship the\n  plan now\n\nship the plan now\n";
+    const blockEnd = src.indexOf("\n\n");
+    const span = locateInSource(src, "ship the plan now", 0, blockEnd)!;
+    expect(span.start).toBe(2);
+  });
+
+  it("falls back to the whole document when the block offset is past every match", () => {
+    const src = "alpha beta\n\ngamma";
+    const span = locateInSource(src, "alpha", src.indexOf("gamma"));
+    expect(span).toEqual({ start: 0, end: 5 });
+  });
+
   it("returns null when the text isn't present", () => {
     expect(locateInSource("hello world", "nothing here")).toBeNull();
   });

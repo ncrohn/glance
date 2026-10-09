@@ -1,5 +1,5 @@
 import { buildAnchor } from "./build-anchor";
-import { buildVisible } from "./markdown-visible";
+import { buildVisible, type Visible } from "./markdown-visible";
 import type { LineHint } from "./annotations";
 
 export interface CapturedSelection {
@@ -27,31 +27,36 @@ export function captureSelection(sourceText: string): CapturedSelection | null {
   const startBlock = blockOf(range.startContainer) ?? blockOf(sel.anchorNode);
   const blockLine = startBlock ? parseInt(startBlock.dataset.sourceline ?? "1", 10) : 1;
 
-  // Locate the selection in the source, preferring an occurrence at/after the
-  // block's line so duplicate text resolves to the selected instance.
   const lines = sourceText.split("\n");
-  const lineStartOffset =
-    lines.slice(0, blockLine - 1).join("\n").length + (blockLine > 1 ? 1 : 0);
+  const lineStart = (l: number) => lines.slice(0, l - 1).join("\n").length + (l > 1 ? 1 : 0);
+  const lineEnd = (l: number) => lines.slice(0, l).join("\n").length;
 
-  let span = locateInSource(sourceText, quote, lineStartOffset);
-
-  // Last resort: the rendered view strips markup the source has — blockquote
-  // `> ` prefixes, `**bold**`, `[links](…)`, headings — so the selection text
-  // can't be found in the raw source at all. Anchor to the source line range of
-  // the covered block(s) via their data-sourceline stamps. Coarser (whole block)
-  // but always resolves, so the composer always opens.
-  if (!span && startBlock) {
+  // Source range of the covered block(s), from their data-sourceline stamps.
+  let blockSpan: Span | null = null;
+  if (startBlock) {
     const endBlock = blockOf(range.endContainer) ?? startBlock;
     const l0 = parseInt(startBlock.dataset.sourceline ?? "1", 10);
     const l1 = parseInt(
       endBlock.dataset.sourcelineEnd ?? endBlock.dataset.sourceline ?? String(l0), 10);
-    const a = Math.min(l0, l1);
-    const b = Math.max(l0, l1);
-    span = {
-      start: lines.slice(0, a - 1).join("\n").length + (a > 1 ? 1 : 0),
-      end: lines.slice(0, b).join("\n").length,
-    };
+    blockSpan = { start: lineStart(Math.min(l0, l1)), end: lineEnd(Math.max(l0, l1)) };
   }
+
+  // Locate the selection in the source, preferring an occurrence inside the
+  // selected block(s), then at/after the block's line, so duplicate text
+  // resolves to the selected instance.
+  let span = locateInSource(sourceText, quote, lineStart(blockLine), blockSpan?.end);
+  // A match that starts outside the selected block(s) is a copy of the text
+  // somewhere else; the block itself is the better anchor.
+  if (span && blockSpan && (span.start < blockSpan.start || span.start > blockSpan.end)) {
+    span = blockSpan;
+  }
+
+  // Last resort: the rendered view strips markup the source has — blockquote
+  // `> ` prefixes, `**bold**`, `[links](…)`, headings — so the selection text
+  // can't be found in the raw source at all. Anchor to the source line range of
+  // the covered block(s). Coarser (whole block) but always resolves, so the
+  // composer always opens.
+  if (!span && blockSpan) span = blockSpan;
   if (!span) return null;
   const { start, end } = span;
 
@@ -72,54 +77,74 @@ export function captureSelection(sourceText: string): CapturedSelection | null {
   };
 }
 
+interface Span { start: number; end: number }
+
 /**
  * Locate a rendered selection `quote` within the markdown `sourceText`, returning
  * the real source `[start, end)` or null. Tries a verbatim match first (fast path
- * for inline selections), then falls back to a whitespace-normalized match so
- * hard-wrapped source (a long list item / paragraph split across physical lines),
- * list markers, and inline markup still anchor. Exported for testing.
+ * for inline selections), then a whitespace-normalized match so hard-wrapped
+ * source (a long list item / paragraph split across physical lines) and list
+ * markers still anchor, then a markup-tolerant match for selections that cross
+ * inline markup. All three passes look inside the selected block first
+ * (`[fromOffset, toOffset]`), then anywhere at/after `fromOffset`, and only then
+ * anywhere in the document — a verbatim duplicate elsewhere must not beat a
+ * fuzzier match in the block the user actually selected. Exported for testing.
  */
 export function locateInSource(
   sourceText: string,
   quote: string,
   fromOffset = 0,
-): { start: number; end: number } | null {
-  const exact = indexFrom(sourceText, quote, fromOffset);
-  if (exact !== -1) return { start: exact, end: exact + quote.length };
-
-  // Whitespace-normalized: handles hard-wrapped source, list markers.
-  const nm = buildNorm(sourceText);
-  const segs = quote.split("\n").map((s) => s.trim()).filter(Boolean);
-  if (segs.length > 0) {
-    const first = findNorm(nm, segs[0], fromOffset);
-    if (first) {
-      if (segs.length === 1) return { start: first.start, end: first.end };
-      const last = findNorm(nm, segs[segs.length - 1], first.end);
-      return { start: first.start, end: last ? last.end : first.end };
+  toOffset?: number,
+): Span | null {
+  let nm: Norm | null = null;
+  let vis: Visible | null = null;
+  const passes: Array<(from: number) => Span | null> = [
+    (from) => {
+      const i = sourceText.indexOf(quote, from);
+      return i === -1 ? null : { start: i, end: i + quote.length };
+    },
+    // Whitespace-normalized: handles hard-wrapped source, list markers.
+    (from) => locateNorm((nm ??= buildNorm(sourceText)), quote, from),
+    // Markdown-tolerant: the rendered selection strips inline markup the source
+    // still has (**bold**, `code`, [links]), so a selection that crosses such a
+    // boundary matches neither pass above. Match against a "visible view" of the
+    // source — inline markup removed, whitespace collapsed — that carries an
+    // offset map back to real source positions, then map the hit back so the
+    // stored quote is a tight source slice the resolver can re-find.
+    (from) => locateInVisible((vis ??= buildVisible(sourceText)), quote, from),
+  ];
+  if (toOffset != null) {
+    for (const pass of passes) {
+      const hit = pass(fromOffset);
+      if (hit && hit.end <= toOffset) return hit;
     }
   }
-
-  // Markdown-tolerant: the rendered selection strips inline markup the source
-  // still has (**bold**, `code`, [links]), so a selection that crosses such a
-  // boundary matches neither pass above. Match against a "visible view" of the
-  // source — inline markup removed, whitespace collapsed — that carries an
-  // offset map back to real source positions, then map the hit back so the
-  // stored quote is a tight source slice the resolver can re-find.
-  return locateInVisible(sourceText, quote, fromOffset);
+  for (const from of fromOffset > 0 ? [fromOffset, 0] : [0]) {
+    for (const pass of passes) {
+      const hit = pass(from);
+      if (hit) return hit;
+    }
+  }
+  return null;
 }
 
-function locateInVisible(
-  source: string,
-  quote: string,
-  fromOffset: number,
-): { start: number; end: number } | null {
-  const { visible, map } = buildVisible(source);
+// A multi-line selection matches its first and last line separately, so the
+// list markers / indentation between them in the source don't matter.
+function locateNorm(nm: Norm, quote: string, from: number): Span | null {
+  const segs = quote.split("\n").map((s) => s.trim()).filter(Boolean);
+  if (segs.length === 0) return null;
+  const first = findNorm(nm, segs[0], from);
+  if (!first || segs.length === 1) return first;
+  const last = findNorm(nm, segs[segs.length - 1], first.end);
+  return { start: first.start, end: last ? last.end : first.end };
+}
+
+function locateInVisible({ visible, map }: Visible, quote: string, fromOffset: number): Span | null {
   const q = quote.replace(/\s+/g, " ").trim();
   if (!q) return null;
   let fromVis = 0;
   while (fromVis < map.length && map[fromVis] < fromOffset) fromVis++;
-  let i = visible.indexOf(q, fromVis);
-  if (i === -1) i = visible.indexOf(q);
+  const i = visible.indexOf(q, fromVis);
   if (i === -1) return null;
   return { start: map[i], end: map[i + q.length] };
 }
@@ -128,12 +153,6 @@ function locateInVisible(
 function blockOf(n: Node | null): HTMLElement | null {
   const e = n instanceof Element ? n : n?.parentElement ?? null;
   return (e?.closest("[data-sourceline]") as HTMLElement | null) ?? null;
-}
-
-// indexOf preferring a hit at/after `from`, else anywhere in the text.
-function indexFrom(haystack: string, needle: string, from: number): number {
-  const i = haystack.indexOf(needle, from);
-  return i === -1 ? haystack.indexOf(needle) : i;
 }
 
 interface Norm { norm: string; map: number[] }
@@ -159,13 +178,12 @@ function buildNorm(source: string): Norm {
 // Find `needle` in the normalized source (its own whitespace collapsed), at/after
 // source offset `fromSrc`, and return the matching real source range. `end` is the
 // offset of the char after the match (excludes trailing whitespace).
-function findNorm(nm: Norm, needle: string, fromSrc: number): { start: number; end: number } | null {
+function findNorm(nm: Norm, needle: string, fromSrc: number): Span | null {
   const nn = needle.replace(/\s+/g, " ").trim();
   if (!nn) return null;
   let fromNorm = 0;
   while (fromNorm < nm.map.length && nm.map[fromNorm] < fromSrc) fromNorm++;
-  let ni = nm.norm.indexOf(nn, fromNorm);
-  if (ni === -1) ni = nm.norm.indexOf(nn);
+  const ni = nm.norm.indexOf(nn, fromNorm);
   if (ni === -1) return null;
   return { start: nm.map[ni], end: nm.map[ni + nn.length] };
 }

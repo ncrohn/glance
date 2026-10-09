@@ -133,8 +133,10 @@ export function addStoredAnnotation(docPath: string, annotation: Annotation): Pr
   return invoke<void>("add_annotation", { docPath, annotation });
 }
 
-export function removeStoredAnnotation(docPath: string, id: string): Promise<void> {
-  return invoke<void>("remove_annotation", { docPath, id });
+/** Resolves to the annotation as the store held it when removed, or null when
+ *  the store had no annotation with `id`. */
+export function removeStoredAnnotation(docPath: string, id: string): Promise<Annotation | null> {
+  return invoke<Annotation | null>("remove_annotation", { docPath, id });
 }
 
 /** `clearResolution` drops resolvedBy/resolvedAt on the server (a reopen);

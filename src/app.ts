@@ -35,6 +35,7 @@ import {
   renderRail, applyHighlights, mountSelectionToolbar, assignMarkers, markerColor, linkAnnotationHovers, pulseBlock,
   focusRailCard, parseRailPref,
 } from "./annotation-ui";
+import { annotationIdSelector } from "./annotation-ui";
 import { mountEditor, type EditorHandle } from "./editor";
 import { decideReload } from "./reload";
 import { restoreTarget, lineAtOffset, offsetForLine, type LineBlock } from "./scroll-restore";
@@ -234,7 +235,7 @@ function renderRailFor(): void {
     onScrollTo: (a) => {
       const r = doc.resolutions[a.id];
       if (r?.startLine == null) return;
-      const node = document.querySelector(`mark.anno-highlight[data-annotation-id="${a.id}"]`)
+      const node = document.querySelector(`mark.anno-highlight${annotationIdSelector(a.id)}`)
         ?? document.querySelector(`[data-sourceline="${r.startLine}"]`);
       node?.scrollIntoView({ behavior: "smooth", block: "center" });
       pulseBlock(node);
@@ -246,7 +247,7 @@ function renderRailFor(): void {
       patch(a, { status: "open", resolvedBy: undefined, resolvedAt: undefined }, true);
     },
     onEdit: (a) => {
-      const card = host.querySelector<HTMLElement>(`.note-card[data-annotation-id="${a.id}"]`);
+      const card = host.querySelector<HTMLElement>(`.note-card${annotationIdSelector(a.id)}`);
       const rect = card?.getBoundingClientRect() ?? ({ top: 120, bottom: 140, left: 120 } as DOMRect);
       showCommentComposer({
         quote: a.quote,
@@ -278,21 +279,26 @@ function renderRailFor(): void {
     onRemove: (a) => {
       // Optimistic local remove (fresh from state), then the locked server-side
       // remove, then reconcile with the merged on-disk truth. Undo re-adds the
-      // same annotation (id and number intact) after the remove has landed, so
-      // the store stays consistent even if the app quits mid-toast.
+      // annotation as the store held it when removed (its assigned number, and
+      // replies or a resolution that landed after the rail rendered) once the
+      // remove has landed, so the store stays consistent even if the app quits
+      // mid-toast.
       const cur = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? doc.annotations;
+      const local = cur.find((x) => x.id === a.id) ?? a;
       state = setDocAnnotations(state, doc.absPath, removeAnnotation(cur, a.id));
       render();
-      const removed = persistComments(doc.absPath, cur, removeStoredAnnotation(doc.absPath, a.id));
-      showToast(a.number > 0 ? `Comment ${a.number} deleted` : "Comment deleted", {
+      const removal = removeStoredAnnotation(doc.absPath, a.id);
+      const removed = persistComments(doc.absPath, cur, removal);
+      showToast(local.number > 0 ? `Comment ${local.number} deleted` : "Comment deleted", {
         actionLabel: "Undo",
         onAction: () => {
-          void removed.then((ok) => {
+          void removed.then(async (ok) => {
             if (!ok) return; // the remove was rolled back; nothing to undo
+            const restored = (await removal) ?? local;
             const now = state.docs.find((d) => d.absPath === doc.absPath)?.annotations ?? [];
-            state = setDocAnnotations(state, doc.absPath, addAnnotation(now, a));
+            state = setDocAnnotations(state, doc.absPath, addAnnotation(now, restored));
             render();
-            return persistComments(doc.absPath, now, addStoredAnnotation(doc.absPath, a));
+            return persistComments(doc.absPath, now, addStoredAnnotation(doc.absPath, restored));
           });
         },
       });
