@@ -694,9 +694,12 @@ function selectAllContent(): void {
 async function settleUnsaved(id: string): Promise<boolean> {
   const doc = state.docs.find((d) => d.id === id);
   if (!doc || !isDirty(doc)) return true;
+  closeMermaidZoom(); // the zoom overlay sits above the modal layer
   const choice = await confirmUnsaved(doc.fileName);
   if (choice === "cancel") return false;
-  if (choice === "discard") return true;
+  // Another prompt for this doc (Cmd+W, then Cmd+Q) may have settled it already.
+  const now = state.docs.find((d) => d.id === id);
+  if (!now || !isDirty(now) || choice === "discard") return true;
   return saveDoc(id);
 }
 
@@ -712,6 +715,8 @@ async function closeTab(id: string): Promise<void> {
   } finally {
     closing.delete(id);
   }
+  const pending = pendingReloads.get(id);
+  if (pending) { pending.live = false; pendingReloads.delete(id); }
   const doc = state.docs.find((d) => d.id === id);
   if (doc) {
     void unwatchFile(doc.absPath);
@@ -732,8 +737,10 @@ const inFlightWrites = new Map<string, string[]>();
 // doc id → newest disk text seen while a "changed on disk" prompt is open for
 // that doc. Save is refused meanwhile (it would overwrite the change being
 // asked about), and further changes update the open prompt instead of opening
-// another.
-const pendingReloads = new Map<string, string>();
+// another. Closing the tab marks the entry dead: the doc id is its path, so a
+// reopened tab must not inherit a prompt that was about the closed one.
+interface PendingReload { latest: string; live: boolean }
+const pendingReloads = new Map<string, PendingReload>();
 
 // Write a doc to disk. On failure the doc stays dirty (markSaved never runs)
 // and the error is surfaced. Resolves true once the text is on disk.
@@ -791,32 +798,33 @@ async function requestQuit(): Promise<void> {
 // A change event whose text we already account for: what we last saw on disk,
 // what the editor holds, or what one of our saves is writing.
 function isKnownContent(doc: Doc, contents: string): boolean {
+  if (inFlightWrites.get(doc.absPath)?.includes(contents)) return true;
   // Guard on existsOnDisk so a file that was deleted and then recreated with
   // content identical to the editor still clears the "(deleted)" state.
   if (!doc.existsOnDisk) return false;
-  return contents === doc.diskContent
-    || contents === doc.editorContent
-    || (inFlightWrites.get(doc.absPath)?.includes(contents) ?? false);
+  return contents === doc.diskContent || contents === doc.editorContent;
 }
 
 async function handleDiskChange(path: string, contents: string): Promise<void> {
   const doc = state.docs.find((d) => d.absPath === path);
   if (!doc) return;
-  if (pendingReloads.has(doc.id)) { pendingReloads.set(doc.id, contents); return; }
+  const open = pendingReloads.get(doc.id);
+  if (open) { open.latest = contents; return; }
   if (isKnownContent(doc, contents)) return;
   if (decideReload(doc) === "auto-reload") {
     state = applyDiskChange(state, doc.id, contents);
     render();
     return;
   }
-  pendingReloads.set(doc.id, contents);
+  const pending: PendingReload = { latest: contents, live: true };
+  pendingReloads.set(doc.id, pending);
   // Dismiss any open zoom overlay first — it sits above the modal layer, so
   // the reload prompt would otherwise be unreachable underneath it.
   closeMermaidZoom();
   const choice = await confirmReload(doc.fileName);
-  const latest = pendingReloads.get(doc.id) ?? contents;
-  pendingReloads.delete(doc.id);
-  if (!state.docs.some((d) => d.id === doc.id)) return;
+  if (pendingReloads.get(doc.id) === pending) pendingReloads.delete(doc.id);
+  if (!pending.live || !state.docs.some((d) => d.id === doc.id)) return;
+  const latest = pending.latest;
   if (choice === "disk") {
     state = applyDiskChange(state, doc.id, latest);
     render();
@@ -1015,7 +1023,7 @@ export async function start(): Promise<void> {
     }
     // Launch files last, so the file just opened ends up as the active tab.
     for (const p of launchPaths) {
-      try { await openPath(p); } catch { /* file gone or unreadable; skip */ }
+      try { await openPath(p); } catch (err) { showNotice(`Couldn't open ${p}: ${err}`, false); }
     }
   } finally {
     restoringSession = false;
