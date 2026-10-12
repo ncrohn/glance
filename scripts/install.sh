@@ -19,13 +19,13 @@ echo "Installing Glance.app to /Applications…"
 rm -rf "/Applications/Glance.app"
 cp -R "$APP_SRC" "/Applications/Glance.app"
 
-# Install the `mdview` CLI as a tiny wrapper that launches the installed app
-# binary DETACHED. The binary resolves relative paths and forwards to the running
-# instance itself, so the wrapper's only job is backgrounding (`… & `): without
-# it, the first `mdview <file>` of a session would become the GUI process and
-# block the calling terminal. This matches the in-app "Install 'mdview' Command
-# Line Tool" menu item; both target the bundle binary, so the CLI is independent
-# of this repo and survives app updates.
+# Install the `mdview` CLI as a tiny wrapper that opens files in the installed
+# app through LaunchServices (`open -n -a … --args`). Running the binary from a
+# zellij, tmux or ssh shell can abort before Glance registers with the
+# WindowServer; `open` starts it in the login session. The app starts with / as
+# its working directory, so the wrapper passes absolute paths. This matches the
+# in-app "Install 'mdview' Command Line Tool" menu item (a test keeps the two
+# the same); both target the bundle, so the CLI survives app updates.
 APP_BIN="/Applications/Glance.app/Contents/MacOS/glance"
 if [[ ! -x "$APP_BIN" ]]; then
   echo "Expected app binary not found at $APP_BIN" >&2
@@ -50,20 +50,40 @@ else
 fi
 Q_APP="'${APP_BIN//\'/\'\\\'\'}'"
 TMP="$(mktemp "$(dirname "$DEST")/.mdview.XXXXXX")"
-cat > "$TMP" <<EOF
+{
+cat <<EOF
 #!/bin/sh
-# Glance CLI: launch/forward to Glance detached so the terminal returns
-# immediately even on a cold start (when this invocation becomes the app).
+# Glance CLI: open files in Glance through LaunchServices, so the app
+# starts in the login session even from a zellij, tmux or ssh shell.
 GLANCE_APP=$Q_APP
-if [ ! -x "\$GLANCE_APP" ]; then
-  echo "mdview: Glance not found at \$GLANCE_APP. Reinstall Glance, then run its AI integration setup again." >&2
+EOF
+cat <<'EOF'
+if [ ! -x "$GLANCE_APP" ]; then
+  echo "mdview: Glance not found at $GLANCE_APP. Reinstall Glance, then run its AI integration setup again." >&2
   exit 1
 fi
-"\$GLANCE_APP" "\$@" >/dev/null 2>&1 &
+# The app starts with / as its working directory: pass absolute paths,
+# from the resolved cwd so `..` after a symlinked dir means what it does here.
+here=$(pwd -P)
+paths_only=
+for a in "$@"; do
+  shift
+  if [ -z "$paths_only" ] && [ "$a" = -- ]; then
+    paths_only=1
+  elif [ -n "$a" ] && [ "${a#/}" = "$a" ]; then
+    case $a in
+      -*) if [ -n "$paths_only" ] || [ -f "$a" ]; then a="${here%/}/$a"; fi ;;
+      *) a="${here%/}/$a" ;;
+    esac
+  fi
+  set -- "$@" "$a"
+done
+exec '/usr/bin/open' -n -a "${GLANCE_APP%/Contents/MacOS/*}" --args "$@" >/dev/null
 EOF
+} > "$TMP"
 chmod 755 "$TMP"
 mv -f "$TMP" "$DEST"
-echo "Installed mdview -> $MDVIEW (launches $APP_BIN)"
+echo "Installed mdview -> $MDVIEW (opens ${APP_BIN%/Contents/MacOS/*})"
 case ":${PATH}:" in
   *":${BINDIR}:"*) echo "Done. Try: mdview README.md" ;;
   *) echo "Done. Add ~/.local/bin to your shell PATH, then: mdview README.md" ;;
