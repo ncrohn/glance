@@ -62,7 +62,9 @@ if [ ! -x "$GLANCE_APP" ]; then
   echo "mdview: Glance not found at $GLANCE_APP. Reinstall Glance, then run its AI integration setup again." >&2
   exit 1
 fi
-# The app starts with / as its working directory: pass absolute paths.
+# The app starts with / as its working directory: pass absolute paths,
+# from the resolved cwd so `..` after a symlinked dir means what it does here.
+here=$(pwd -P)
 paths_only=
 for a in "$@"; do
   shift
@@ -70,8 +72,8 @@ for a in "$@"; do
     paths_only=1
   elif [ -n "$a" ] && [ "${a#/}" = "$a" ]; then
     case $a in
-      -*) if [ -n "$paths_only" ] || [ -f "$a" ]; then a="${PWD%/}/$a"; fi ;;
-      *) a="${PWD%/}/$a" ;;
+      -*) if [ -n "$paths_only" ] || [ -f "$a" ]; then a="${here%/}/$a"; fi ;;
+      *) a="${here%/}/$a" ;;
     esac
   fi
   set -- "$@" "$a"

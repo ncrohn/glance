@@ -77,7 +77,9 @@ fn mdview_script_with(app_bin: &str, opener: &str) -> String {
 /// (a test keeps the two the same).
 fn launch_tail(opener: &str) -> String {
     format!(
-        "# The app starts with / as its working directory: pass absolute paths.\n\
+        "# The app starts with / as its working directory: pass absolute paths,\n\
+         # from the resolved cwd so `..` after a symlinked dir means what it does here.\n\
+         here=$(pwd -P)\n\
          paths_only=\n\
          for a in \"$@\"; do\n\
          \x20 shift\n\
@@ -85,8 +87,8 @@ fn launch_tail(opener: &str) -> String {
          \x20   paths_only=1\n\
          \x20 elif [ -n \"$a\" ] && [ \"${{a#/}}\" = \"$a\" ]; then\n\
          \x20   case $a in\n\
-         \x20     -*) if [ -n \"$paths_only\" ] || [ -f \"$a\" ]; then a=\"${{PWD%/}}/$a\"; fi ;;\n\
-         \x20     *) a=\"${{PWD%/}}/$a\" ;;\n\
+         \x20     -*) if [ -n \"$paths_only\" ] || [ -f \"$a\" ]; then a=\"${{here%/}}/$a\"; fi ;;\n\
+         \x20     *) a=\"${{here%/}}/$a\" ;;\n\
          \x20   esac\n\
          \x20 fi\n\
          \x20 set -- \"$@\" \"$a\"\n\
@@ -211,17 +213,22 @@ mod tests {
         let opener = dir.join("open");
         std::fs::write(&opener, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", marker.display())).unwrap();
         std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let cwd = dir.join("cwd");
-        std::fs::create_dir_all(&cwd).unwrap();
-        std::fs::write(cwd.join("-dash.md"), "").unwrap();
+        // Run from a symlink to real/dir, with PWD spelled through the link as
+        // an interactive shell sets it. Paths start from the resolved dir, so
+        // `../up.md` means real/up.md, as it does to the shell.
+        let real = dir.join("real").join("dir");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("-dash.md"), "").unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
         let wrapper = dir.join("mdview");
         std::fs::write(&wrapper, mdview_script_with(&app.to_string_lossy(), &opener.to_string_lossy())).unwrap();
 
-        let args = ["a b.md", "/abs/x.md", "--flag", "-dash.md", "", "--", "-after.md", "--"];
-        // PWD as an interactive shell sets it: its spelling is kept, symlinks and all
-        let out = std::process::Command::new("sh").arg(&wrapper).args(args).current_dir(&cwd).env("PWD", &cwd).output().unwrap();
+        let args = ["a b.md", "/abs/x.md", "--flag", "-dash.md", "../up.md", "", "--", "-after.md", "--"];
+        let out = std::process::Command::new("sh").arg(&wrapper).args(args).current_dir(&link).env("PWD", &link).output().unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        let here = |p: &str| cwd.join(p).to_string_lossy().into_owned();
+        let resolved = std::fs::canonicalize(&real).unwrap();
+        let here = |p: &str| resolved.join(p).to_string_lossy().into_owned();
         let want = [
             "-n".to_string(),
             "-a".to_string(),
@@ -231,6 +238,7 @@ mod tests {
             "/abs/x.md".to_string(),
             "--flag".to_string(),
             here("-dash.md"),
+            here("../up.md"),
             String::new(),
             "--".to_string(),
             here("-after.md"),
