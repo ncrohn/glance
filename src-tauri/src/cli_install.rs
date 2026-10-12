@@ -42,23 +42,57 @@ pub(crate) fn check_install_location(exe: &Path, home: &Path) -> Result<(), Stri
 
 /// The `mdview` wrapper for the Glance binary at `app_bin`.
 ///
-/// It backgrounds the binary (`… "$@" & `) so the CLI returns immediately even
-/// on a cold start — without it, the first `mdview <file>` of a session would
-/// *become* the GUI process and block the calling terminal until Glance quit.
+/// It launches the app bundle through LaunchServices (`open -n … --args`)
+/// rather than running the binary. A binary run from a shell whose session
+/// macOS no longer ties to the login (a zellij or tmux server, ssh) aborts in
+/// `NSApplication` before it can register with the WindowServer; `open` starts
+/// it in the login session whatever the shell. `-n` makes every call a fresh
+/// launch, so a running Glance gets the files from the single-instance
+/// forward, as before. `open` returns once the app is launched and starts it
+/// with `/` as its working directory, so relative paths are made absolute here
+/// by the same rules as [`crate::cli::md_paths_from_argv`].
 /// A missing binary (Glance moved or deleted) is reported on stderr with a
-/// non-zero exit instead of failing silently in the background.
+/// non-zero exit.
 pub fn mdview_script(app_bin: &str) -> String {
+    mdview_script_with(app_bin, "/usr/bin/open")
+}
+
+fn mdview_script_with(app_bin: &str, opener: &str) -> String {
     format!(
         "#!/bin/sh\n\
-         # Glance CLI: launch/forward to Glance detached so the terminal returns\n\
-         # immediately even on a cold start (when this invocation becomes the app).\n\
+         # Glance CLI: open files in Glance through LaunchServices, so the app\n\
+         # starts in the login session even from a zellij, tmux or ssh shell.\n\
          GLANCE_APP={}\n\
          if [ ! -x \"$GLANCE_APP\" ]; then\n\
          \x20 echo \"mdview: Glance not found at $GLANCE_APP. Reinstall Glance, then run its AI integration setup again.\" >&2\n\
          \x20 exit 1\n\
          fi\n\
-         \"$GLANCE_APP\" \"$@\" >/dev/null 2>&1 &\n",
-        sh_quote(app_bin)
+         {}",
+        sh_quote(app_bin),
+        launch_tail(opener)
+    )
+}
+
+/// The wrapper after the `GLANCE_APP` check, shared with `scripts/install.sh`
+/// (a test keeps the two the same).
+fn launch_tail(opener: &str) -> String {
+    format!(
+        "# The app starts with / as its working directory: pass absolute paths.\n\
+         paths_only=\n\
+         for a in \"$@\"; do\n\
+         \x20 shift\n\
+         \x20 if [ -z \"$paths_only\" ] && [ \"$a\" = -- ]; then\n\
+         \x20   paths_only=1\n\
+         \x20 elif [ -n \"$a\" ] && [ \"${{a#/}}\" = \"$a\" ]; then\n\
+         \x20   case $a in\n\
+         \x20     -*) if [ -n \"$paths_only\" ] || [ -f \"$a\" ]; then a=\"${{PWD%/}}/$a\"; fi ;;\n\
+         \x20     *) a=\"${{PWD%/}}/$a\" ;;\n\
+         \x20   esac\n\
+         \x20 fi\n\
+         \x20 set -- \"$@\" \"$a\"\n\
+         done\n\
+         exec {} -n -a \"${{GLANCE_APP%/Contents/MacOS/*}}\" --args \"$@\" >/dev/null\n",
+        sh_quote(opener)
     )
 }
 
@@ -77,8 +111,8 @@ fn is_legacy_app_link(link: &Path) -> bool {
     })
 }
 
-/// Install `~/.local/bin/mdview`, a wrapper that launches the Glance binary at
-/// `app_bin` detached (see [`mdview_script`]). The caller has already checked
+/// Install `~/.local/bin/mdview`, a wrapper that opens files in the Glance app
+/// whose binary is `app_bin` (see [`mdview_script`]). The caller has already checked
 /// `app_bin` with [`check_install_location`].
 ///
 /// A wrapper from an earlier install is updated in place: through a symlink
@@ -165,31 +199,56 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_quotes_the_app_path_and_fails_loudly_when_missing() {
+    fn wrapper_opens_the_bundle_with_absolute_paths_and_fails_loudly_when_missing() {
         let dir = scratch("wrapper");
         let odd = dir.join("we ird $HOME `id` \"q\" it's");
-        std::fs::create_dir_all(&odd).unwrap();
-        let marker = dir.join("argv");
-        let app = odd.join("glance");
-        std::fs::write(&app, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", marker.display())).unwrap();
+        let bundle = odd.join("Glance.app");
+        let app = bundle.join("Contents").join("MacOS").join("glance");
+        std::fs::create_dir_all(app.parent().unwrap()).unwrap();
+        std::fs::write(&app, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let marker = dir.join("argv");
+        let opener = dir.join("open");
+        std::fs::write(&opener, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cwd = dir.join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("-dash.md"), "").unwrap();
         let wrapper = dir.join("mdview");
-        std::fs::write(&wrapper, mdview_script(&app.to_string_lossy())).unwrap();
-        let out = std::process::Command::new("sh").arg(&wrapper).arg("a b.md").output().unwrap();
-        assert!(out.status.success());
-        for _ in 0..40 {
-            if marker.exists() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "a b.md\n");
+        std::fs::write(&wrapper, mdview_script_with(&app.to_string_lossy(), &opener.to_string_lossy())).unwrap();
+
+        let args = ["a b.md", "/abs/x.md", "--flag", "-dash.md", "", "--", "-after.md", "--"];
+        // PWD as an interactive shell sets it: its spelling is kept, symlinks and all
+        let out = std::process::Command::new("sh").arg(&wrapper).args(args).current_dir(&cwd).env("PWD", &cwd).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let here = |p: &str| cwd.join(p).to_string_lossy().into_owned();
+        let want = [
+            "-n".to_string(),
+            "-a".to_string(),
+            bundle.to_string_lossy().into_owned(),
+            "--args".to_string(),
+            here("a b.md"),
+            "/abs/x.md".to_string(),
+            "--flag".to_string(),
+            here("-dash.md"),
+            String::new(),
+            "--".to_string(),
+            here("-after.md"),
+            here("--"),
+        ];
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), want.join("\n") + "\n");
 
         std::fs::write(&wrapper, mdview_script(&dir.join("gone").join("glance").to_string_lossy())).unwrap();
         let out = std::process::Command::new("sh").arg(&wrapper).arg("x.md").output().unwrap();
         assert_eq!(out.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&out.stderr).contains("Glance not found"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_script_writes_the_same_wrapper() {
+        let sh = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/install.sh")).unwrap();
+        assert!(sh.contains(&launch_tail("/usr/bin/open")));
     }
 
     #[test]

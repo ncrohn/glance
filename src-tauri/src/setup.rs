@@ -303,8 +303,15 @@ pub fn merge_mcp_config(existing: &str, name: &str, command: &str, file: &str) -
 /// Understands both Claude Code's `Write` (`tool_input.file_path`) and Codex's
 /// `apply_patch` (`*** Add File:` lines in `tool_input.command`), so one script
 /// serves every client. Python launches the app itself (detached, all fds on
-/// /dev/null) so filenames never pass through shell word-splitting.
+/// /dev/null) so filenames never pass through shell word-splitting. It goes
+/// through `open -n -a <bundle> --args`, like `mdview` (see
+/// [`crate::cli_install::mdview_script`]), so an agent in a zellij or tmux
+/// pane can't start Glance outside the login session.
 pub fn hook_script(app_bin: &str) -> String {
+    hook_script_with(app_bin, "/usr/bin/open")
+}
+
+fn hook_script_with(app_bin: &str, opener: &str) -> String {
     const TEMPLATE: &str = r#"#!/bin/sh
 # Glance auto-open hook (PostToolUse). Opens new project markdown in Glance.
 # Reads the tool event JSON (Claude Code or Codex) from stdin and opens every
@@ -316,7 +323,8 @@ pub fn hook_script(app_bin: &str) -> String {
 # would replace python3's stdin with the heredoc, losing the JSON. The app path
 # travels via the environment, so it is never quoted inside Python.
 GLANCE_APP=__APP_BIN__
-export GLANCE_APP
+GLANCE_OPEN=__OPEN__
+export GLANCE_APP GLANCE_OPEN
 # Until the Command Line Tools are installed, /usr/bin/python3 is a stub that
 # pops an "install developer tools" dialog each time it runs. Use it only when
 # a developer directory exists; any other python3 on PATH is used as is.
@@ -396,10 +404,14 @@ if targets:
     # Detached with every fd on /dev/null: the agent reads this hook's stdout
     # to EOF before continuing, so the GUI must not inherit it, and a new
     # session keeps the GUI off the caller's terminal. Passing argv directly
-    # also means any byte in a filename survives.
+    # also means any byte in a filename survives. `open` starts the bundle in
+    # the login session even when the agent runs in a zellij or tmux pane.
+    app = os.environ["GLANCE_APP"]
+    i = app.rfind("/Contents/MacOS/")
+    bundle = app[:i] if i > 0 else app
     try:
         subprocess.Popen(
-            [os.environ["GLANCE_APP"]] + targets,
+            [os.environ["GLANCE_OPEN"], "-n", "-a", bundle, "--args"] + targets,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -412,7 +424,7 @@ PY
 "$_GLANCE_PY_BIN" -c "$_GLANCE_PY" >/dev/null 2>&1 || true
 exit 0
 "#;
-    TEMPLATE.replace("__APP_BIN__", &sh_quote(app_bin))
+    TEMPLATE.replace("__APP_BIN__", &sh_quote(app_bin)).replace("__OPEN__", &sh_quote(opener))
 }
 
 /// The UserPromptSubmit hook script. Runs `glance-mcp --pending` with the hook
@@ -2047,11 +2059,25 @@ mod tests {
             .unwrap_or(false)
     }
 
+    // A stand-in for /usr/bin/open, next to `stub`: drops `-n -a <bundle>
+    // --args` and runs `stub` with the rest, as LaunchServices runs the app.
+    fn fake_open(stub: &Path) -> String {
+        let opener = stub.with_file_name("open");
+        let body = format!(
+            "#!/bin/sh\nwhile [ \"$#\" -gt 0 ] && [ \"$1\" != --args ]; do shift; done\nshift\nexec {} \"$@\"\n",
+            sh_quote(&stub.to_string_lossy())
+        );
+        std::fs::write(&opener, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
+        opener.to_string_lossy().into_owned()
+    }
+
     // Run the hook with the given stdin JSON; return true if the stub binary
     // fired (marker file created) within a short window.
     fn run_hook(dir: &Path, stub: &Path, marker: &Path, stdin_json: &str) -> bool {
         let script = dir.join("open-md-hook.sh");
-        std::fs::write(&script, hook_script(&stub.to_string_lossy())).unwrap();
+        std::fs::write(&script, hook_script_with(&stub.to_string_lossy(), &fake_open(stub))).unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2101,7 +2127,7 @@ mod tests {
         let stub = base.join("stub.sh");
         std::fs::write(&stub, "#!/bin/sh\nsleep 10\n").unwrap();
         let script = base.join("open-md-hook.sh");
-        std::fs::write(&script, hook_script(&stub.to_string_lossy())).unwrap();
+        std::fs::write(&script, hook_script_with(&stub.to_string_lossy(), &fake_open(&stub))).unwrap();
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2222,6 +2248,48 @@ mod tests {
         assert!(run_hook(&base, &stub, &marker, &json));
         let got = std::fs::read_to_string(&marker).unwrap();
         assert_eq!(got, format!("{odd}\n"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn hook_launches_the_app_bundle_through_open() {
+        if !python3_available() {
+            eprintln!("skipping hook_launches_the_app_bundle_through_open: python3 not available");
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("glance-hook-open-{}", std::process::id()));
+        let proj = base.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let marker = base.join("marker");
+        // the opener itself records its argv
+        let opener = base.join("open");
+        std::fs::write(&opener, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{}\"\n", marker.display())).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let script = base.join("open-md-hook.sh");
+        std::fs::write(&script, hook_script_with("/Apps/My Glance.app/Contents/MacOS/glance", &opener.to_string_lossy())).unwrap();
+        let cwd = proj.to_string_lossy().to_string();
+        let md = proj.join("notes.md").to_string_lossy().to_string();
+        let json = format!(r#"{{"tool_name":"Write","cwd":"{cwd}","tool_input":{{"file_path":"{md}"}}}}"#);
+        let mut child = std::process::Command::new("sh")
+            .arg(&script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(json.as_bytes()).unwrap();
+        let _ = child.wait();
+        let mut got = String::new();
+        for _ in 0..40 {
+            got = std::fs::read_to_string(&marker).unwrap_or_default();
+            if got.ends_with(".md\n") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(got, format!("-n\n-a\n/Apps/My Glance.app\n--args\n{md}\n"));
         let _ = std::fs::remove_dir_all(&base);
     }
 
