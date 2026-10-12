@@ -2,10 +2,9 @@
 
 ## 0.9.1
 
-Glance opens from any terminal.
+`mdview` now opens Glance through macOS's app launcher.
 
-- `mdview` and the auto-open hook now start Glance through macOS's app launcher. Before, running `mdview` in a zellij pane on macOS 27 could crash Glance as it started.
-- `mdview ../notes.md` from inside a symlinked folder opens the same file your shell sees.
+- `mdview` and the auto-open hook start Glance with `open` instead of running it directly. This should stop a crash at launch when `mdview` runs in a zellij pane on macOS 27.
 - Run **Glance ▸ Set up AI Integration…** once to pick up the new `mdview` and hook.
 
 ## 0.9.0
