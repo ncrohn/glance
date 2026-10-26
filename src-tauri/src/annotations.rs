@@ -1,4 +1,4 @@
-use crate::anchor::{resolve_anchor, Annotation, LineHint, Reply, Resolution};
+use crate::anchor::{resolve_all, Annotation, LineHint, Reply, Resolution};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -519,7 +519,7 @@ pub fn iso8601_from_epoch(secs: u64) -> String {
 
 #[tauri::command]
 pub fn resolve_anchors(text: String, annotations: Vec<Annotation>) -> Vec<Resolution> {
-    annotations.iter().map(|a| resolve_anchor(&text, a)).collect()
+    resolve_all(&text, &annotations)
 }
 
 /// Ensure the store file exists (so the OS file watcher can attach to it) and

@@ -58,8 +58,31 @@ pub struct Resolution {
     pub anchor: String,
 }
 
-fn offset_to_line(text: &str, byte_offset: usize) -> usize {
-    text[..byte_offset].bytes().filter(|&b| b == b'\n').count() + 1
+/// Byte offsets of every `\n` in a text, built once so each match's line
+/// number is a binary search rather than a rescan of the text before it.
+struct LineIndex(Vec<usize>);
+
+impl LineIndex {
+    fn new(text: &str) -> Self {
+        LineIndex(
+            text.bytes()
+                .enumerate()
+                .filter(|&(_, b)| b == b'\n')
+                .map(|(i, _)| i)
+                .collect(),
+        )
+    }
+
+    /// 1-based line of `byte_offset`: one more than the newlines before it.
+    fn line_of(&self, byte_offset: usize) -> usize {
+        self.0.partition_point(|&nl| nl < byte_offset) + 1
+    }
+
+    /// Lines as `line_of` numbers them: the empty line after a trailing
+    /// newline is a line too.
+    fn line_count(&self) -> usize {
+        self.0.len() + 1
+    }
 }
 
 /// Every byte offset where `needle` starts, overlapping matches included, so
@@ -78,8 +101,8 @@ fn find_all(text: &str, needle: &str) -> Vec<usize> {
     out
 }
 
-fn located(a: &Annotation, text: &str, quote_offset: usize, kind: &str) -> Resolution {
-    let start = offset_to_line(text, quote_offset);
+fn located(a: &Annotation, lines: &LineIndex, quote_offset: usize, kind: &str) -> Resolution {
+    let start = lines.line_of(quote_offset);
     // A trailing newline ends the quote's last line; it doesn't start another.
     let body = a.quote.strip_suffix('\n').unwrap_or(&a.quote);
     let newlines_in_quote = body.bytes().filter(|&b| b == b'\n').count();
@@ -103,6 +126,16 @@ fn orphan(a: &Annotation) -> Resolution {
 /// Resolve a stored annotation against the document's current text.
 /// Tries: exact (prefix+quote+suffix) → unique/nearest quote → line-hint drift → orphan.
 pub fn resolve_anchor(text: &str, a: &Annotation) -> Resolution {
+    resolve_with(text, &LineIndex::new(text), a)
+}
+
+/// `resolve_anchor` for many annotations on one text, indexing its lines once.
+pub fn resolve_all(text: &str, annotations: &[Annotation]) -> Vec<Resolution> {
+    let lines = LineIndex::new(text);
+    annotations.iter().map(|a| resolve_with(text, &lines, a)).collect()
+}
+
+fn resolve_with(text: &str, lines: &LineIndex, a: &Annotation) -> Resolution {
     if a.quote.is_empty() {
         return orphan(a);
     }
@@ -110,15 +143,13 @@ pub fn resolve_anchor(text: &str, a: &Annotation) -> Resolution {
     let full = format!("{}{}{}", a.prefix, a.quote, a.suffix);
     let full_occurrences = find_all(text, &full);
     if full_occurrences.len() == 1 {
-        return located(a, text, full_occurrences[0] + a.prefix.len(), "exact");
+        return located(a, lines, full_occurrences[0] + a.prefix.len(), "exact");
     }
 
     let occurrences = find_all(text, &a.quote);
     match occurrences.len() {
         0 => {
-            // Count lines the way offset_to_line numbers them: the empty line
-            // after a trailing newline is a line too.
-            let total_lines = text.bytes().filter(|&b| b == b'\n').count() + 1;
+            let total_lines = lines.line_count();
             let start = a.line_hint.start;
             if start >= 1 && start <= total_lines {
                 Resolution {
@@ -131,15 +162,15 @@ pub fn resolve_anchor(text: &str, a: &Annotation) -> Resolution {
                 orphan(a)
             }
         }
-        1 => located(a, text, occurrences[0], "quote-only"),
+        1 => located(a, lines, occurrences[0], "quote-only"),
         _ => {
             let hint = a.line_hint.start;
             let best = occurrences
                 .iter()
-                .min_by_key(|&&off| offset_to_line(text, off).abs_diff(hint))
+                .min_by_key(|&&off| lines.line_of(off).abs_diff(hint))
                 .copied()
                 .unwrap();
-            located(a, text, best, "quote-only")
+            located(a, lines, best, "quote-only")
         }
     }
 }
@@ -244,7 +275,7 @@ mod tests {
 
     #[test]
     fn hint_on_the_line_after_a_trailing_newline_is_in_range() {
-        // offset_to_line calls the spot after the last "\n" line 4, so a hint there drifts.
+        // line_of calls the spot after the last "\n" line 4, so a hint there drifts.
         let r = resolve_anchor("a\nb\nc\n", &ann("gone", "", "", 4));
         assert_eq!(r.anchor, "drifted");
         assert_eq!(resolve_anchor("a\nb\nc\n", &ann("gone", "", "", 5)).anchor, "orphaned");
@@ -268,6 +299,39 @@ mod tests {
         assert_eq!(r.start_line, Some(3)); // nearest to the (huge) hint
         let a = ann("dup", "", "", (i64::MAX as usize) + 1);
         assert_eq!(resolve_anchor("dup\nx\ndup\n", &a).start_line, Some(3));
+    }
+
+    #[test]
+    fn line_index_matches_a_prefix_newline_count() {
+        let text = "\nab\n\ncé\nd";
+        let lines = LineIndex::new(text);
+        for off in 0..=text.len() {
+            let want = text.as_bytes()[..off].iter().filter(|&&b| b == b'\n').count() + 1;
+            assert_eq!(lines.line_of(off), want, "offset {off}");
+        }
+        assert_eq!(lines.line_count(), 5);
+    }
+
+    #[test]
+    fn large_doc_with_many_occurrences_resolves_to_the_hinted_copy() {
+        // ~1 MB of one-word repeats: a context-edited "the" picks the copy
+        // nearest its hint from tens of thousands of candidates.
+        let text: String = (1..=40_000).map(|i| format!("the line {i} of the doc\n")).collect();
+        assert!(text.len() > 900_000);
+        let r = resolve_anchor(&text, &ann("the", "EDITED ", " EDITED", 31_337));
+        assert_eq!(r.anchor, "quote-only");
+        assert_eq!((r.start_line, r.end_line), (Some(31_337), Some(31_337)));
+
+        let batch = vec![
+            ann("the", "EDITED ", " EDITED", 7),
+            ann("line 39999 of", "the ", " the", 1),
+            ann("gone", "", "", 40_001),
+        ];
+        let rs = resolve_all(&text, &batch);
+        assert_eq!(rs, batch.iter().map(|a| resolve_anchor(&text, a)).collect::<Vec<_>>());
+        assert_eq!((rs[0].start_line, rs[0].anchor.as_str()), (Some(7), "quote-only"));
+        assert_eq!((rs[1].start_line, rs[1].anchor.as_str()), (Some(39_999), "exact"));
+        assert_eq!((rs[2].start_line, rs[2].anchor.as_str()), (Some(40_001), "drifted"));
     }
 
     #[test]
