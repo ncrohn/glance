@@ -90,6 +90,8 @@ export function showCommentComposer(opts: {
 
   const close = () => {
     document.removeEventListener("mousedown", onDocDown, true);
+    // Removing a focused textarea leaves macOS's autocorrect bubble on screen.
+    ta.blur();
     card.remove();
   };
   const flash = () => {
