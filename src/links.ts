@@ -84,9 +84,9 @@ export function headingSlugs(text: string, checked?: boolean): string[] {
   const slugs = [slugify(text)];
   if (checked !== undefined) {
     const box = `[${checked ? "x" : " "}] ${text}`;
-    // `## - [x] Ship it` keeps its bullet in the source slug; `*` and `+` slug
-    // away, leaving the same slug as no bullet.
-    slugs.push(slugify(box), slugify(`- ${box}`));
+    // A bulleted heading (`## - [x] Ship it`) has its own source slug: `-`
+    // stays as a hyphen, while `*` and `+` drop out and leave one.
+    slugs.push(slugify(box), slugify(`- ${box}`), slugify(`* ${box}`));
   }
   return slugs;
 }
