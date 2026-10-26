@@ -125,6 +125,13 @@ describe("renderMarkdown", () => {
     expect(html.match(/class="task-list-item"/g)).toHaveLength(1);
   });
 
+  it("renders a checkbox in a heading that opens with a task box", () => {
+    const html = renderMarkdown("## [x] Ship it\n\n### [ ]\n\n## Not [ ] at start");
+    expect(html).toMatch(/<h2[^>]*><input class="task-list-item-checkbox" type="checkbox" disabled checked>Ship it<\/h2>/);
+    expect(html.match(/type="checkbox"/g)).toHaveLength(2);
+    expect(html).toContain("Not [ ] at start");
+  });
+
   it("leaves brackets that aren't a task box alone", () => {
     expect(renderMarkdown("- [y] no\n- [ ]x no")).not.toContain("checkbox");
   });

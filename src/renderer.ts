@@ -34,14 +34,17 @@ const md = new MarkdownIt({
 // GFM task lists: a list item whose paragraph opens with `[ ]`, `[x]` or `[X]`
 // gets a read-only checkbox. An empty `- [ ]` counts, since editors strip the
 // trailing space markdown-it-task-lists required, and so does a tab after it.
+// A heading that opens with a box (`## [ ] Ship it`) gets one too.
 const TASK_BOX = /^\[([ xX])\](?=\s|$)/;
 md.core.ruler.after("inline", "task_lists", (state) => {
   const tokens = state.tokens;
-  for (let i = 2; i < tokens.length; i++) {
+  for (let i = 1; i < tokens.length; i++) {
     const inline = tokens[i];
+    if (inline.type !== "inline") continue;
+    const heading = tokens[i - 1].type === "heading_open";
     if (
-      inline.type !== "inline" || tokens[i - 1].type !== "paragraph_open"
-      || tokens[i - 2].type !== "list_item_open"
+      !heading
+      && (tokens[i - 1].type !== "paragraph_open" || tokens[i - 2]?.type !== "list_item_open")
     ) continue;
     const m = TASK_BOX.exec(inline.content);
     const first = inline.children?.[0];
@@ -50,6 +53,7 @@ md.core.ruler.after("inline", "task_lists", (state) => {
     const box = new state.Token("html_inline", "", 0);
     box.content = `<input class="task-list-item-checkbox" type="checkbox" disabled${m[1] === " " ? "" : " checked"}>`;
     inline.children!.unshift(box);
+    if (heading) continue;
     const item = tokens[i - 2];
     item.attrJoin("class", "task-list-item");
     for (let j = i - 3; j >= 0; j--) {

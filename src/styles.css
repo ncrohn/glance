@@ -581,12 +581,21 @@ body {
 .rendered .task-list-item-checkbox {
   -webkit-appearance: none; appearance: none;
   box-sizing: border-box;
-  width: 1em; height: 1em;
-  margin: 0 0.4em 0 -1.4em;
-  vertical-align: -0.13em;
+  font-size: inherit; /* form controls default to 13px, which em sizes follow */
+  width: 0.9em; height: 0.9em;
+  margin: 0 0.5em 0 -1.4em;
+  vertical-align: -0.1em;
   border: 1.5px solid var(--faint);
-  border-radius: 0.28em;
+  border-radius: 0.25em;
   background: var(--surface) center / 78% no-repeat;
+}
+/* In a heading the box sits inline before the text, scaled to the cap height. */
+.rendered :is(h1, h2, h3, h4, h5, h6) > .task-list-item-checkbox {
+  width: max(0.7em, 11px); height: max(0.7em, 11px);
+  margin: 0 0.3em 0 0;
+  vertical-align: 0;
+  border-width: max(1.5px, 0.07em);
+  border-radius: 0.18em;
 }
 .rendered .task-list-item-checkbox:checked {
   border-color: var(--accent);
