@@ -177,13 +177,42 @@ function persistComments(absPath: string, before: Annotation[], write: Promise<u
   );
 }
 
-async function refreshResolutions(absPath: string): Promise<void> {
+// absPath → the newest resolve started for it, so a slower resolve for older
+// text or comments (or for a tab closed since) can't overwrite a newer one. The
+// counter is global so a reopened tab never matches a resolve from before.
+let resolveCounter = 0;
+const latestResolve = new Map<string, number>();
+// absPath → the text the doc's current resolutions were computed against.
+const resolvedText = new Map<string, string>();
+
+// Resolves true when this call's result was stored.
+async function refreshResolutions(absPath: string): Promise<boolean> {
   const doc = state.docs.find((d) => d.absPath === absPath);
-  if (!doc) return;
-  const resList = await resolveAnchors(doc.editorContent, doc.annotations);
+  if (!doc) return false;
+  const seq = ++resolveCounter;
+  latestResolve.set(absPath, seq);
+  const text = doc.editorContent;
+  const resList = await resolveAnchors(text, doc.annotations);
+  if (latestResolve.get(absPath) !== seq) return false;
   const map: Record<string, import("./annotations").Resolution> = {};
   for (const r of resList) map[r.id] = r;
   state = setDocResolutions(state, absPath, map);
+  resolvedText.set(absPath, text);
+  return true;
+}
+
+// Comment positions are resolved against the doc's text, so they go stale when
+// the text changes outside a store reload (a disk change, typing in Edit).
+// Resolves true when it stored fresh resolutions.
+async function catchUpResolutions(absPath: string): Promise<boolean> {
+  const doc = state.docs.find((d) => d.absPath === absPath);
+  if (!doc || resolvedText.get(absPath) === doc.editorContent) return false;
+  try {
+    return await refreshResolutions(absPath);
+  } catch (err) {
+    console.warn("resolveAnchors failed for", absPath, err);
+    return false;
+  }
 }
 
 function startComment(absPath: string): void {
@@ -625,13 +654,28 @@ function renderContent(): void {
     const mermaidDone = renderMermaidBlocks(view, currentThemeId(), currentAppearance());
     mountBlockExpanders(view); // code/tables + any synchronously-cached diagrams
     void mermaidDone.then(() => mountBlockExpanders(view)); // first-render diagrams
-    const markers = assignMarkers(doc.annotations, doc.resolutions);
-    applyHighlights(view, doc.annotations, doc.resolutions, markers, (id) => {
-      const rail = document.getElementById("rail");
-      if (rail) focusRailCard(rail, id);
-    });
+    highlightComments(view, doc);
     toolbar = mountSelectionToolbar(view, () => startComment(doc.absPath));
   }
+}
+
+function highlightComments(view: HTMLElement, doc: Doc): void {
+  const markers = assignMarkers(doc.annotations, doc.resolutions);
+  applyHighlights(view, doc.annotations, doc.resolutions, markers, (id) => {
+    const rail = document.getElementById("rail");
+    if (rail) focusRailCard(rail, id);
+  });
+}
+
+// Bring the active doc's highlights and rail up to date in place. A full
+// render() would rebuild #content and undo a scroll restore still pending from
+// the render just before it.
+function redrawComments(id: string): void {
+  const doc = getActive(state);
+  const view = document.querySelector<HTMLElement>("#content .rendered");
+  if (!doc || doc.id !== id || doc.viewMode !== "rendered" || !view) return;
+  highlightComments(view, doc);
+  renderRailFor();
 }
 
 // What we last told the native menu. `null` until the first render: the item is
@@ -752,6 +796,8 @@ async function closeTab(id: string): Promise<void> {
     const storePath = annotationStorePaths.get(doc.absPath);
     if (storePath) { void unwatchFile(storePath); annotationStorePaths.delete(doc.absPath); }
     annotationsLoaded.delete(doc.absPath);
+    latestResolve.delete(doc.absPath);
+    resolvedText.delete(doc.absPath);
   }
   state = closeDoc(state, id);
   render();
@@ -797,6 +843,7 @@ async function saveDoc(id: string): Promise<boolean> {
   const saved = state.docs.find((d) => d.id === id);
   if (saved) void writeReviewed(saved.absPath, saved.reviewedContent);
   render();
+  if (saved) void catchUpResolutions(saved.absPath).then((fresh) => { if (fresh) redrawComments(id); });
   return true;
 }
 
@@ -842,6 +889,7 @@ async function handleDiskChange(path: string, contents: string): Promise<void> {
   if (isKnownContent(doc, contents)) return;
   if (decideReload(doc) === "auto-reload") {
     state = applyDiskChange(state, doc.id, contents);
+    await catchUpResolutions(doc.absPath);
     render();
     return;
   }
@@ -856,6 +904,7 @@ async function handleDiskChange(path: string, contents: string): Promise<void> {
   const latest = pending.latest;
   if (choice === "disk") {
     state = applyDiskChange(state, doc.id, latest);
+    await catchUpResolutions(doc.absPath);
     render();
   } else {
     // "mine": keep the editor text (still dirty) but record what disk holds now.
@@ -1016,6 +1065,12 @@ function switchViewMode(id: string): void {
     : content ? lineAtOffset(renderedBlocks(content), content.scrollTop) : null;
   state = toggleViewMode(state, id);
   render();
+  // Typing doesn't re-resolve (an IPC per keystroke, for a view that isn't
+  // showing), so comment positions catch up on the way back to Read.
+  const doc = state.docs.find((d) => d.id === id);
+  if (doc?.viewMode === "rendered") {
+    void catchUpResolutions(doc.absPath).then((fresh) => { if (fresh) redrawComments(id); });
+  }
 }
 
 function scrollToSourceLine(content: HTMLElement, line: number): void {
