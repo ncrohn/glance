@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.1
+
+Two display fixes.
+
+- A heading written like a list item, such as `## - [x] Ship it`, shows a checkbox instead of the bullet and brackets. Links to it still work.
+- Comment markers on a crowded line no longer cover the start of the text.
+
 ## 0.10.0
 
 Comments keep up with agent edits, checkboxes render everywhere, and Glance is locked down further.
