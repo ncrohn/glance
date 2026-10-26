@@ -496,15 +496,58 @@ export function showWhatsNew(version: string, html: string, onClose: () => void)
 /** A newer release is on GitHub. Download opens the release page; Homebrew
  *  installs get the upgrade command instead. */
 export function showUpdateAvailable(current: string, latest: string, url: string): void {
-  const m = openModal({ title: "Update available", onEscape: () => m.close() });
-  const msg = document.createElement("p");
-  msg.textContent = `Glance ${latest} is available. You have ${current}.`;
-  const brew = document.createElement("p");
-  brew.append("Installed with Homebrew? Run ");
+  const m = openModal({ title: "", onEscape: () => m.close() });
+  m.card.classList.add("update");
+  m.card.querySelector(".modal-title")?.remove();
+
+  const head = document.createElement("div");
+  head.className = "whats-new-head update-head";
+  const icon = document.createElement("img");
+  icon.className = "whats-new-icon";
+  icon.src = appIcon;
+  icon.alt = "";
+  const titles = document.createElement("div");
+  const name = document.createElement("div");
+  name.className = "whats-new-name";
+  name.textContent = "A new Glance is out";
+  const versions = document.createElement("div");
+  versions.className = "update-versions";
+  const from = document.createElement("span");
+  from.className = "update-version";
+  from.textContent = current;
+  const arrow = document.createElement("span");
+  arrow.className = "update-arrow";
+  arrow.textContent = "→";
+  const to = document.createElement("span");
+  to.className = "update-version new";
+  to.textContent = latest;
+  versions.append(from, arrow, to);
+  titles.append(name, versions);
+  head.append(icon, titles);
+  m.card.insertBefore(head, m.body);
+
+  const label = document.createElement("p");
+  label.className = "update-label";
+  label.textContent = "Installed with Homebrew? Upgrade from the terminal:";
+  const cmd = document.createElement("div");
+  cmd.className = "update-cmd";
   const code = document.createElement("code");
   code.textContent = "brew upgrade --cask glance";
-  brew.append(code, ".");
-  m.body.append(msg, brew);
+  const copy = document.createElement("button");
+  copy.className = "update-copy";
+  copy.textContent = "Copy";
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(code.textContent!);
+      copy.textContent = "Copied";
+    } catch {
+      // No clipboard access: select the command so ⌘C takes it.
+      getSelection()?.selectAllChildren(code);
+      copy.textContent = "Press ⌘C";
+    }
+  };
+  cmd.append(code, copy);
+  m.body.append(label, cmd);
 
   const later = button("Later");
   later.onclick = m.close;

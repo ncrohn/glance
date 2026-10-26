@@ -572,19 +572,35 @@ body {
 .rendered ul, .rendered ol { margin: 0 0 1.05em; padding-left: 1.4em; }
 .rendered li { margin: 0.3em 0; }
 .rendered li::marker { color: var(--accent); }
-.rendered ul.contains-task-list { list-style: none; padding-left: 0.2em; }
-/* Hanging indent, NOT flex: flex would promote every inline child (each
-   <strong>/<code>/text run) to its own flex item and crush them into columns.
-   Normal inline flow keeps the item on one wrapping line; the negative
-   text-indent lets the checkbox sit in the outdent and wrapped lines align
-   under the text. */
-.rendered .task-list-item { list-style: none; padding-left: 1.55em; text-indent: -1.55em; }
-.rendered .task-list-item .task-list-item-checkbox {
-  accent-color: var(--accent);
-  width: 1em; height: 1em;
-  margin-right: 0.5em;
+/* The checkbox takes the bullet's place in the list's marker gutter: its
+   negative left margin cancels its width plus gap, so the text starts where a
+   plain sibling item's does and wrapped lines align under it. No hanging
+   text-indent, which nested lists, paragraphs and code blocks would inherit.
+   Drawn by hand because a disabled native checkbox renders greyed out. */
+.rendered .task-list-item { list-style-type: none; }
+.rendered .task-list-item-checkbox {
+  -webkit-appearance: none; appearance: none;
+  box-sizing: border-box;
+  font-size: inherit; /* form controls default to 13px, which em sizes follow */
+  width: 0.9em; height: 0.9em;
+  margin: 0 0.5em 0 -1.4em;
   vertical-align: -0.1em;
-  text-indent: 0;
+  border: 1.5px solid var(--faint);
+  border-radius: 0.25em;
+  background: var(--surface) center / 78% no-repeat;
+}
+/* In a heading the box sits inline before the text, scaled to the cap height. */
+.rendered :is(h1, h2, h3, h4, h5, h6) > .task-list-item-checkbox {
+  width: max(0.7em, 11px); height: max(0.7em, 11px);
+  margin: 0 0.3em 0 0;
+  vertical-align: 0;
+  border-width: max(1.5px, 0.07em);
+  border-radius: 0.18em;
+}
+.rendered .task-list-item-checkbox:checked {
+  border-color: var(--accent);
+  background-color: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.3 5 8.7l4.6-5.2' fill='none' stroke='%23fff' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 
 /* YAML frontmatter, rendered as a compact metadata card instead of leaking
@@ -1033,6 +1049,7 @@ body {
 .modal-btn:hover { border-color: var(--accent); color: var(--accent); }
 .modal-btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 .modal-btn.primary:hover { background: var(--accent-bright); border-color: var(--accent-bright); color: #fff; }
+.modal-btn:focus-visible, .update-copy:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 2px; }
 /* What's New: the About dialog's header language (icon, wordmark, accent dot)
    over the document's editorial typography, sized to the notes. */
 .modal .box.whats-new { max-width: 560px; padding: 22px 26px 18px; }
@@ -1135,6 +1152,40 @@ body {
   margin-top: 1px; font-family: var(--font-ui);
   font-size: 11.5px; font-style: italic; color: var(--muted); opacity: 0.8;
 }
+
+/* Update available: What's New header with a from → to version row, then the
+   Homebrew command in a copyable well. */
+.modal .box.update { max-width: 440px; padding: 22px 24px 18px; }
+.update-head { margin-bottom: 16px; padding-bottom: 16px; }
+.update-head .whats-new-name { font-size: 21px; }
+.update-versions {
+  display: flex; align-items: center; gap: 7px; margin-top: 8px;
+  font: 600 12px/1 var(--font-mono); font-variant-numeric: tabular-nums;
+}
+.update-version {
+  padding: 3px 7px; border-radius: 6px;
+  background: var(--raised); color: var(--muted);
+}
+.update-version.new { background: var(--accent-tint); color: var(--accent); }
+.update-arrow { color: var(--faint); }
+.modal-body p.update-label { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+.update-cmd {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 6px 6px 12px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--bg);
+}
+.update-cmd code {
+  flex: 1; min-width: 0; white-space: nowrap; overflow-x: auto;
+  font: 13px/1.4 var(--font-mono); color: var(--ink);
+  user-select: all; -webkit-user-select: all;
+}
+.update-copy {
+  flex: 0 0 auto; font: 600 12px/1 var(--font-ui);
+  padding: 6px 10px; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink-soft);
+  cursor: default; transition: border-color 0.13s ease, color 0.13s ease;
+}
+.update-copy:hover { border-color: var(--accent); color: var(--accent); }
 
 /* About box — centered icon + wordmark + attribution */
 .modal .box.about { max-width: 360px; text-align: center; align-items: center; padding-top: 30px; }
@@ -1484,6 +1535,8 @@ body.rail-resizing #rail { transition: none; }
   padding-left: 0;
 }
 .rendered li[data-changed]::before { left: -1.4em; }
+/* A task item's checkbox fills that gutter, so its bar sits just outside it. */
+.rendered li.task-list-item[data-changed]::before { left: calc(-1.4em - 9px); }
 
 .rendered tr[data-changed] > th,
 .rendered tr[data-changed] > td {
@@ -1521,9 +1574,6 @@ body.rail-resizing #rail { transition: none; }
    top-level blocks so they ride inside the one outer highlight. */
 .rendered ul[data-changed], .rendered ol[data-changed] {
   padding-left: 2.5em; /* 1.4em list marker indent + 1.1em gutter */
-}
-.rendered ul.contains-task-list[data-changed] {
-  padding-left: 1.3em; /* 0.2em task-list indent + 1.1em gutter */
 }
 
 /* Tab badge: a doc changed on disk since it was last reviewed. */
