@@ -41,10 +41,14 @@ export function captureSelection(sourceText: string): CapturedSelection | null {
     blockSpan = { start: lineStart(Math.min(l0, l1)), end: lineEnd(Math.max(l0, l1)) };
   }
 
-  // Locate the selection in the source, preferring an occurrence inside the
-  // selected block(s), then at/after the block's line, so duplicate text
-  // resolves to the selected instance.
-  let span = locateInSource(sourceText, quote, lineStart(blockLine), blockSpan?.end);
+  // When the block repeats the selected text, take the copy the user selected.
+  let span = startBlock && blockSpan
+    ? locateSelectedCopy(sourceText, quote, startBlock, range, blockSpan)
+    : null;
+  // Otherwise locate the selection in the source, preferring an occurrence
+  // inside the selected block(s), then at/after the block's line, so duplicate
+  // text elsewhere resolves to the selected instance.
+  span ??= locateInSource(sourceText, quote, lineStart(blockLine), blockSpan?.end);
   // A match that starts outside the selected block(s) is a copy of the text
   // somewhere else; the block itself is the better anchor.
   if (span && blockSpan && (span.start < blockSpan.start || span.start > blockSpan.end)) {
@@ -78,6 +82,60 @@ export function captureSelection(sourceText: string): CapturedSelection | null {
 }
 
 interface Span { start: number; end: number }
+
+const collapseWs = (s: string) => s.replace(/\s+/g, " ");
+
+function occurrences(text: string, needle: string): number[] {
+  const out: number[] = [];
+  for (let i = text.indexOf(needle); i !== -1; i = text.indexOf(needle, i + 1)) out.push(i);
+  return out;
+}
+
+/**
+ * Source span of the copy of `quote` the user selected, when the block holds
+ * more than one copy. Counts which copy the selection starts on in the block's
+ * rendered text, then takes the same-numbered copy in the markup-stripped view
+ * of the block's source (the view the rendered text corresponds to, so
+ * `**bold**`, `code` and links between copies don't skew the count). Null when
+ * there is one copy or fewer, or the two views disagree on how many there are.
+ */
+function locateSelectedCopy(
+  sourceText: string,
+  quote: string,
+  block: HTMLElement,
+  range: Range,
+  blockSpan: Span,
+): Span | null {
+  const q = collapseWs(quote).trim();
+  if (!q || !block.contains(range.startContainer)) return null;
+
+  const whole = document.createRange();
+  whole.selectNodeContents(block);
+  const rendered = occurrences(collapseWs(whole.toString()), q);
+  if (rendered.length < 2) return null;
+  const before = document.createRange();
+  before.setStart(block, 0);
+  before.setEnd(range.startContainer, range.startOffset);
+  const lead = quote.length - quote.trimStart().length;
+  const at = collapseWs(before.toString() + quote.slice(0, lead)).length;
+  const nth = Math.min(rendered.filter((p) => p < at).length, rendered.length - 1);
+
+  const { visible, map } = buildVisible(sourceText);
+  let from = 0;
+  while (from < map.length && map[from] < blockSpan.start) from++;
+  const inBlock = occurrences(visible.slice(from), q)
+    .map((i) => i + from)
+    .filter((i) => map[i + q.length] <= blockSpan.end);
+  if (inBlock.length !== rendered.length) return null;
+
+  const vi = inBlock[nth];
+  const start = map[vi];
+  // A copy without markup inside it is stored verbatim, as the plain path would.
+  if (start >= lead && sourceText.startsWith(quote, start - lead)) {
+    return { start: start - lead, end: start - lead + quote.length };
+  }
+  return { start, end: map[vi + q.length] };
+}
 
 /**
  * Locate a rendered selection `quote` within the markdown `sourceText`, returning
