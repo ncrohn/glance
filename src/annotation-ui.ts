@@ -365,7 +365,7 @@ export function applyHighlights(
   const ordered = [...markers.keys()].sort(
     (a, b) => markers.get(a)!.number - markers.get(b)!.number,
   );
-  const placed: { top: number; lane: number }[] = [];
+  const placed: PlacedMarker[] = [];
 
   for (const id of ordered) {
     const a = annotations.find((x) => x.id === id);
@@ -388,6 +388,7 @@ export function applyHighlights(
     }
     placeGutterMarker(renderedEl, marks[0] ?? block, marker, id, r.anchor, a.author, placed, onActivate);
   }
+  layoutGutterLanes(renderedEl, placed);
 }
 
 // Undo a previous pass (defensive — the view is normally re-rendered fresh).
@@ -477,10 +478,17 @@ function wrapTextRange(
 
 const GUTTER_LANE_X = 14; // px from the rendered view's left edge (inside padding)
 const GUTTER_LANE_STEP = 20;
+const GUTTER_EDGE_X = 2; // a crowded row may start this close to the edge
+const GUTTER_MARKER_SIZE = 18;
+const GUTTER_TEXT_GAP = 4; // keep clear of the text column
+const SAME_ROW_PX = 16;
+
+interface PlacedMarker { top: number; lane: number; chip: HTMLElement }
 
 // Place a numbered marker in the left gutter, vertically aligned to `anchorEl`.
 // Markers landing on the same row fan out into adjacent lanes so they don't
 // overlap — the key to tracking multiple annotations near each other.
+// `layoutGutterLanes` sets the horizontal position once every marker is placed.
 function placeGutterMarker(
   renderedEl: HTMLElement,
   anchorEl: HTMLElement,
@@ -488,15 +496,14 @@ function placeGutterMarker(
   id: string,
   anchor: AnchorKind,
   author: Annotation["author"],
-  placed: { top: number; lane: number }[],
+  placed: PlacedMarker[],
   onActivate?: (id: string) => void,
 ): void {
   const top = anchorEl.getBoundingClientRect().top - renderedEl.getBoundingClientRect().top;
   let lane = 0;
   for (const p of placed) {
-    if (Math.abs(p.top - top) < 16) lane = Math.max(lane, p.lane + 1);
+    if (Math.abs(p.top - top) < SAME_ROW_PX) lane = Math.max(lane, p.lane + 1);
   }
-  placed.push({ top, lane });
 
   const chip = el("span", "anno-gutter-marker", markerLabel(marker.number));
   if (anchor === "drifted") chip.classList.add("drifted");
@@ -504,9 +511,34 @@ function placeGutterMarker(
   chip.dataset.annotationId = id;
   chip.style.setProperty("--anno-color", marker.color);
   chip.style.top = `${top}px`;
-  chip.style.left = `${GUTTER_LANE_X + lane * GUTTER_LANE_STEP}px`;
   chip.onclick = (e) => { e.stopPropagation(); onActivate?.(id); };
   renderedEl.appendChild(chip);
+  placed.push({ top, lane, chip });
+}
+
+/** Left offset of each lane on a row of `count` markers. Lanes start 14px in
+ *  and sit 20px apart while they fit in the gutter. A crowded row starts
+ *  further left, down to 2px, and then narrows the step so the last marker
+ *  still ends `GUTTER_TEXT_GAP` short of the text, overlapping like stacked
+ *  chips. */
+export function gutterLaneLefts(count: number, gutterWidth: number): number[] {
+  const lastLeft = Math.max(GUTTER_LANE_X, gutterWidth - GUTTER_TEXT_GAP - GUTTER_MARKER_SIZE);
+  const span = (count - 1) * GUTTER_LANE_STEP;
+  const first = GUTTER_LANE_X + span <= lastLeft
+    ? GUTTER_LANE_X
+    : Math.max(GUTTER_EDGE_X, Math.min(GUTTER_LANE_X, lastLeft - span));
+  const step = count > 1 ? Math.min(GUTTER_LANE_STEP, (lastLeft - first) / (count - 1)) : 0;
+  return Array.from({ length: count }, (_, lane) => first + lane * step);
+}
+
+function layoutGutterLanes(renderedEl: HTMLElement, placed: PlacedMarker[]): void {
+  const gutterWidth = parseFloat(getComputedStyle(renderedEl).paddingLeft) || 0;
+  for (const p of placed) {
+    const lanes = 1 + Math.max(
+      ...placed.filter((q) => Math.abs(q.top - p.top) < SAME_ROW_PX).map((q) => q.lane),
+    );
+    p.chip.style.left = `${gutterLaneLefts(lanes, gutterWidth)[p.lane]}px`;
+  }
 }
 
 export interface Box { top: number; bottom: number; left: number; right: number }

@@ -1307,7 +1307,8 @@ body {
   z-index: 3;
   transition: transform 0.12s ease;
 }
-.anno-gutter-marker.anno-emphasis { transform: scale(1.18); }
+/* Crowded rows overlap their markers; the one in focus comes to the front. */
+.anno-gutter-marker.anno-emphasis { transform: scale(1.18); z-index: 4; }
 /* Drifted: the quote is gone but the line hint still lands. Hollow, dashed. */
 .anno-gutter-marker.drifted {
   box-sizing: border-box;
