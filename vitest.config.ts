@@ -5,7 +5,8 @@ export default defineConfig({
     environment: "node",
     include: ["src/**/*.test.ts"],
     // Node 25+ defines its own localStorage global, a stub without
-    // --localstorage-file, which hides jsdom's in the DOM tests.
-    execArgv: ["--no-webstorage"],
+    // --localstorage-file, which hides jsdom's in the DOM tests. Older Node
+    // has no such global and rejects the flag.
+    execArgv: Number(process.versions.node.split(".")[0]) >= 25 ? ["--no-webstorage"] : [],
   },
 });
