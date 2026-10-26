@@ -28,6 +28,9 @@ const env = {
   open: new Set<string>(),
   stores: new Set<string>(),
   watched: [] as string[],
+  unwatched: [] as string[],
+  live: new Set<string>(),
+  gates: new Map<string, Promise<void>>(),
   writes: [] as Array<[string, string]>,
   violations: [] as Violation[],
   quit: 0,
@@ -49,24 +52,28 @@ function normalize(p: string): string {
   return "/" + out.join("/");
 }
 
-function followDirs(p: string): string {
-  for (let i = 0; i < 10; i++) {
-    const hit = [...env.dirLinks.keys()]
-      .filter((d) => p === d || p.startsWith(d + "/"))
-      .sort((a, b) => b.length - a.length)[0];
-    if (!hit) return p;
-    p = env.dirLinks.get(hit)! + p.slice(hit.length);
+// fs::canonicalize's walk: one component at a time, following a symlinked
+// directory as soon as it is reached, so a `..` after it climbs out of the
+// link's target, not out of the folder holding the link.
+function followDirs(p: string, depth = 0): string {
+  let cur: string[] = [];
+  for (const part of p.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") { cur.pop(); continue; }
+    cur.push(part);
+    const target = env.dirLinks.get("/" + cur.join("/"));
+    if (target !== undefined && depth < 10) cur = followDirs(target, depth + 1).split("/").filter(Boolean);
   }
-  return p;
+  return "/" + cur.join("/");
 }
 
 // Where a path really points (fs::canonicalize, when it succeeds).
 function resolve(p: string): string {
-  let cur = followDirs(normalize(p));
-  for (let i = 0; i < 10 && env.fileLinks.has(cur); i++) cur = followDirs(normalize(env.fileLinks.get(cur)!));
+  let cur = followDirs(p);
+  for (let i = 0; i < 10 && env.fileLinks.has(cur); i++) cur = followDirs(env.fileLinks.get(cur)!);
   return cur;
 }
-const isLink = (p: string) => env.fileLinks.has(followDirs(normalize(p)));
+const isLink = (p: string) => env.fileLinks.has(followDirs(p));
 const exists = (p: string) => env.files.has(resolve(p));
 
 // annotations.rs doc_key: canonical when the file exists, otherwise lexical
@@ -117,17 +124,21 @@ vi.mock("./ipc", () => ({
     env.writes.push([p, c]);
   },
   watchFile: async (p: string) => {
+    await env.gates.get("watch_file");
     ensureText("watch_file", p);
     ensureOpen("watch_file", p);
     env.watched.push(p);
+    env.live.add(p);
   },
-  unwatchFile: async () => {},
-  ensureAnnotationStore: async (p: string) => { const s = storeOf(p); env.stores.add(s); return s; },
+  unwatchFile: async (p: string) => { env.unwatched.push(p); env.live.delete(p); },
+  ensureAnnotationStore: async (p: string) => { await env.gates.get("ensure_annotation_store"); const s = storeOf(p); env.stores.add(s); return s; },
   watchAnnotations: async (s: string, d: string) => {
+    await env.gates.get("watch_annotations");
     ensureText("watch_annotations", d);
     ensureOpen("watch_annotations", d);
     if (s !== storeOf(d)) refuse("watch_annotations", [s, d], "not the store ensure_annotation_store returns for the doc");
     env.watched.push(s);
+    env.live.add(s);
   },
   readAnnotations: async (p: string) => ({ docPath: p, annotations: [] }),
   addStoredAnnotation: async () => {}, removeStoredAnnotation: async () => null,
@@ -235,6 +246,9 @@ beforeEach(() => {
   env.open = new Set();
   env.stores = new Set();
   env.watched = [];
+  env.unwatched = [];
+  env.live = new Set();
+  env.gates = new Map();
   env.writes = [];
   env.violations = [];
   env.quit = 0;
@@ -270,6 +284,19 @@ describe("the strict fake backend", () => {
       "write_file", "watch_file", "read_file", "read_file", "watch_annotations",
     ]);
     env.violations = [];
+  });
+
+  it("follows a symlinked folder before a `..` after it, as fs::canonicalize does", async () => {
+    const ipc = await import("./ipc");
+    env.dirLinks.set("/w/docs", "/r/docs");
+    env.files.set("/r/x.md", "real\n");
+    env.files.set("/w/x.md", "lexical\n");
+    expect(await ipc.canonicalizePath("/w/docs/../x.md")).toBe("/r/x.md");
+    expect(await ipc.readFile("/w/docs/../x.md")).toBe("real\n");
+    expect(await ipc.ensureAnnotationStore("/w/docs/../x.md")).toBe(await ipc.ensureAnnotationStore("/r/x.md"));
+    // cli::canonical falls back to a lexical cleanup when the file is missing.
+    expect(await ipc.canonicalizePath("/w/docs/../gone.md")).toBe("/w/gone.md");
+    expect(env.violations).toEqual([]);
   });
 });
 
@@ -409,15 +436,30 @@ describe("every open/save/watch/reload flow stays inside the backend's rules", (
     expect(lastWrite()).toEqual(["/docs/a.md", "again a\n"]);
   });
 
-  it("closing a tab while it is still opening, then opening it again", async () => {
-    env.files.set("/docs/a.md", "a\n");
-    await boot();
-    void env.handlers.get("open-file")!("/docs/a.md");
-    void env.handlers.get("close-active-tab")!(undefined);
-    await flush();
-    await emit("open-file", "/docs/a.md");
-    expectFullyOpen("/docs/a.md");
-  });
+  for (const step of ["watch_file", "ensure_annotation_store", "watch_annotations"]) {
+    it(`closing a tab while it is still opening (held at ${step}), then opening it again`, async () => {
+      env.files.set("/docs/a.md", "a\n");
+      let release!: () => void;
+      env.gates.set(step, new Promise<void>((r) => { release = r; }));
+      await boot();
+      await emit("open-file", "/docs/a.md");
+      expect(env.open.has("/docs/a.md")).toBe(true); // read_file done, so the tab exists
+      await emit("close-active-tab");
+      expect(env.unwatched).toContain("/docs/a.md"); // closeTab ran on it
+      expect(tabs()).toEqual([]);
+      release();
+      await flush();
+      expect(tabs()).toEqual([]);
+      // Every watch the aborted open made has been released, after it was made.
+      expect([...env.live]).toEqual([]);
+      env.gates = new Map();
+      env.watched = [];
+      env.unwatched = [];
+      await emit("open-file", "/docs/a.md");
+      expect(tabs()).toEqual(["/docs/a.md"]);
+      expectFullyOpen("/docs/a.md");
+    });
+  }
 
   it("Cmd+S after edits", async () => {
     env.files.set("/docs/a.md", "a\n");
