@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { groupAnnotations, assignMarkers, annotationsForBlock, cardModel, parseRailPref, MARKER_PALETTE, fabPosition, markerColor, markerLabel } from "./annotation-ui";
+import { gutterLaneLefts, gutterRowLaneCounts } from "./annotation-ui";
 import type { Annotation, Resolution } from "./annotations";
 
 function ann(id: string, status: Annotation["status"] = "open"): Annotation {
@@ -228,5 +229,47 @@ describe("fabPosition", () => {
   it("clamps left at the left edge", () => {
     const pos = fabPosition({ top: 300, bottom: 320, left: 150, right: 260 }, clip, size);
     expect(pos?.left).toBe(200 + 4);
+  });
+});
+
+describe("gutterLaneLefts", () => {
+  it("keeps 20px lanes while they fit in the gutter", () => {
+    expect(gutterLaneLefts(1, 56)).toEqual([14]);
+    expect(gutterLaneLefts(2, 56)).toEqual([14, 34]);
+  });
+
+  it("squeezes a crowded row so the last marker clears the text", () => {
+    // Starts nearer the edge first, so three markers barely overlap.
+    const lefts = gutterLaneLefts(3, 56);
+    expect(lefts).toEqual([2, 18, 34]);
+    expect(lefts[2] + 18).toBeLessThanOrEqual(56 - 4);
+    const many = gutterLaneLefts(6, 56);
+    expect(many[5] + 18).toBeLessThanOrEqual(52);
+    expect(many[1]).toBeGreaterThan(many[0]);
+  });
+
+  it("stays inside the gutter when it is narrow", () => {
+    const lefts = gutterLaneLefts(3, 40);
+    expect(lefts[0]).toBeGreaterThanOrEqual(2);
+    expect(lefts[2] + 18).toBeLessThanOrEqual(40 - 4);
+  });
+
+  it("stacks markers in place when the gutter has no room to spread", () => {
+    expect(gutterLaneLefts(3, 0)).toEqual([2, 8, 14]);
+  });
+});
+
+describe("gutterRowLaneCounts", () => {
+  it("spaces a chained row with one lane count", () => {
+    // Each top is within 16px of the next, but the ends are 20px apart.
+    expect(gutterRowLaneCounts([
+      { top: 0, lane: 0 }, { top: 10, lane: 1 }, { top: 20, lane: 2 },
+    ])).toEqual([3, 3, 3]);
+  });
+
+  it("keeps separate rows apart", () => {
+    expect(gutterRowLaneCounts([
+      { top: 0, lane: 0 }, { top: 4, lane: 1 }, { top: 40, lane: 0 },
+    ])).toEqual([2, 2, 1]);
   });
 });
