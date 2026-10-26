@@ -77,6 +77,15 @@ export function slugify(text: string): string {
     .replace(/\s/g, "-");
 }
 
+/** Slugs a heading answers to. One drawn with a task checkbox (`checked` set)
+ *  also answers to the slug of its source text, `[x] Ship it`, as GitHub and
+ *  TOC generators build it. */
+export function headingSlugs(text: string, checked?: boolean): string[] {
+  const slugs = [slugify(text)];
+  if (checked !== undefined) slugs.push(slugify(`[${checked ? "x" : " "}] ${text}`));
+  return slugs;
+}
+
 export interface Wikilink {
   raw: string;
   note: string;

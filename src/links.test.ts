@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyLink, dirname, parseWikilink, resolveLocalPath, slugify } from "./links";
+import { classifyLink, dirname, headingSlugs, parseWikilink, resolveLocalPath, slugify } from "./links";
 import { renderMarkdown } from "./renderer";
 
 const base = "/Users/nick/notes";
@@ -51,6 +51,17 @@ describe("classifyLink", () => {
 describe("slugify", () => {
   it("matches GitHub heading anchors", () => {
     expect(slugify("Step 2: Ship it!")).toBe("step-2-ship-it");
+  });
+});
+
+describe("headingSlugs", () => {
+  it("adds the GitHub slug of a checkbox heading's source text", () => {
+    expect(headingSlugs("Ship it", true)).toEqual(["ship-it", "x-ship-it"]);
+    expect(headingSlugs("Ship it", false)).toEqual(["ship-it", "--ship-it"]);
+  });
+
+  it("returns only the text slug for a plain heading", () => {
+    expect(headingSlugs("Ship it")).toEqual(["ship-it"]);
   });
 });
 

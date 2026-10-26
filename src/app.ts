@@ -20,7 +20,7 @@ import {
   readReviewed, writeReviewed, openExternal, openFileExternal, localFileUrl, resolveWikilink,
   canonicalizePath, onFileError,
 } from "./ipc";
-import { classifyLink, dirname, parseWikilink, resolveLocalPath, slugify } from "./links";
+import { classifyLink, dirname, headingSlugs, parseWikilink, resolveLocalPath, slugify } from "./links";
 import {
   addAnnotation, removeAnnotation, patchAnnotation, appendReply, genId, type Annotation, type AnnotationPatch,
 } from "./annotations";
@@ -970,7 +970,10 @@ function scrollToHeading(id: string): void {
   const byId = view?.querySelector(`[id="${CSS.escape(id)}"]`);
   const slug = slugify(id);
   const heading = byId ?? Array.from(view?.querySelectorAll("h1, h2, h3, h4, h5, h6") ?? [])
-    .find((h) => slugify(h.textContent ?? "") === slug);
+    .find((h) => {
+      const box = h.querySelector<HTMLInputElement>(":scope > .task-list-item-checkbox");
+      return headingSlugs(h.textContent ?? "", box ? box.checked : undefined).includes(slug);
+    });
   heading?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
