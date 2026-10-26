@@ -124,7 +124,8 @@ fn orphan(a: &Annotation) -> Resolution {
 }
 
 /// Resolve a stored annotation against the document's current text.
-/// Tries: exact (prefix+quote+suffix) → unique/nearest quote → line-hint drift → orphan.
+/// Tries: exact (prefix+quote+suffix) → nearest full-context copy →
+/// unique/nearest quote → line-hint drift → orphan.
 pub fn resolve_anchor(text: &str, a: &Annotation) -> Resolution {
     resolve_with(text, &LineIndex::new(text), a)
 }
@@ -140,10 +141,27 @@ fn resolve_with(text: &str, lines: &LineIndex, a: &Annotation) -> Resolution {
         return orphan(a);
     }
 
+    let nearest_hint = |offsets: &[usize]| {
+        let hint = a.line_hint.start;
+        offsets
+            .iter()
+            .min_by_key(|&&off| lines.line_of(off).abs_diff(hint))
+            .copied()
+            .unwrap()
+    };
+
     let full = format!("{}{}{}", a.prefix, a.quote, a.suffix);
     let full_occurrences = find_all(text, &full);
-    if full_occurrences.len() == 1 {
-        return located(a, lines, full_occurrences[0] + a.prefix.len(), "exact");
+    match full_occurrences.len() {
+        0 => {}
+        1 => return located(a, lines, full_occurrences[0] + a.prefix.len(), "exact"),
+        // Several copies keep their context: the hint picks one, so it isn't
+        // the unambiguous find "exact" promises, but a bare copy whose
+        // surroundings differ must not win over them.
+        _ => {
+            let starts: Vec<usize> = full_occurrences.iter().map(|&o| o + a.prefix.len()).collect();
+            return located(a, lines, nearest_hint(&starts), "quote-only");
+        }
     }
 
     let occurrences = find_all(text, &a.quote);
@@ -163,15 +181,7 @@ fn resolve_with(text: &str, lines: &LineIndex, a: &Annotation) -> Resolution {
             }
         }
         1 => located(a, lines, occurrences[0], "quote-only"),
-        _ => {
-            let hint = a.line_hint.start;
-            let best = occurrences
-                .iter()
-                .min_by_key(|&&off| lines.line_of(off).abs_diff(hint))
-                .copied()
-                .unwrap();
-            located(a, lines, best, "quote-only")
-        }
+        _ => located(a, lines, nearest_hint(&occurrences), "quote-only"),
     }
 }
 
@@ -224,6 +234,20 @@ mod tests {
         let r = resolve_anchor(text, &a);
         assert_eq!(r.anchor, "quote-only");
         assert_eq!(r.start_line, Some(3)); // nearest to hint 3
+    }
+
+    #[test]
+    fn repeated_full_context_match_beats_a_nearer_bare_copy() {
+        // Line 3 is nearest the hint but its context differs; lines 2 and 4
+        // match it, tie on distance, and the earlier one wins as for bare quotes.
+        let text = "new\nA dup B\nC dup D\nA dup B\n";
+        let r = resolve_anchor(text, &ann("dup", "A ", " B", 3));
+        assert_eq!(r.anchor, "quote-only");
+        assert_eq!((r.start_line, r.end_line), (Some(2), Some(2)));
+        assert_eq!(resolve_anchor(text, &ann("dup", "A ", " B", 4)).start_line, Some(4));
+        // Line 3 is also the nearest bare copy for a hint past the end.
+        let text = "A dup B\nx\nx\nx\nA dup B\nC dup D\n";
+        assert_eq!(resolve_anchor(text, &ann("dup", "A ", " B", 9)).start_line, Some(5));
     }
 
     #[test]
