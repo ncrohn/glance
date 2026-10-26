@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.10.0
+
+Comments keep up with agent edits, checkboxes render everywhere, and Glance is locked down further.
+
+### Comments
+
+- When an agent edits an open document, or you edit it yourself, comment highlights and line numbers move with the text.
+- Selecting the second copy of a repeated phrase attaches the comment to that copy, not the first.
+- A comment stays on its own passage when the text around it changes, even when the same lines appear elsewhere in the document.
+- Comments on a single common word no longer slow down very large documents.
+- Closing the comment box no longer leaves the autocorrect suggestion on screen.
+
+### Checkboxes
+
+- `- [ ]` with nothing after it, and a tab after the box, now render as checkboxes.
+- Ticked boxes use the theme's accent color instead of looking greyed out.
+- Bullets in mixed and nested lists, code blocks, and second paragraphs inside a task line up correctly.
+- Headings that start with a box, like `## [ ] Ship it`, show a checkbox. Links to them work with or without the box in the anchor.
+
+### Updates
+
+- The update dialog shows your version and the new one side by side, and the Homebrew command has a Copy button.
+
+### Security
+
+- The Glance window can only call the commands Glance grants it, and can only save or watch documents it has opened.
+- The Glance MCP server only works on documents inside your project, or ones that already have Glance comments.
+- markdown-it, mermaid and DOMPurify are updated to versions with security fixes.
+
 ## 0.9.1
 
 `mdview` now opens Glance through macOS's app launcher.
