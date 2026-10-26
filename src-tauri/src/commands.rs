@@ -74,6 +74,23 @@ pub fn ensure_watchable(docs: &OpenDocs, path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Annotation watches share the `Watchers` map with document watches, so a
+/// store path must be the store of an open document and nothing else. Store
+/// paths end in `.json`, which no document can, so the two never share a key.
+pub fn ensure_store_watchable(
+    docs: &OpenDocs,
+    dir: Option<&Path>,
+    store_path: &str,
+    doc_path: &str,
+) -> Result<(), String> {
+    ensure_watchable(docs, doc_path)?;
+    let dir = dir.ok_or_else(|| "Could not determine $HOME".to_string())?;
+    if !crate::annotations::is_store_of(dir, store_path, doc_path) {
+        return Err(format!("Not the annotation store for {doc_path}: {store_path}"));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn read_file(path: String, docs: tauri::State<OpenDocs>) -> Result<String, String> {
     read_document(&docs, &path)
@@ -421,6 +438,37 @@ mod tests {
             ensure_watchable(&docs, s(&other)).unwrap_err(),
             format!("Glance can only watch documents it has open: {}", s(&other))
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_the_store_of_an_open_doc_can_be_watched() {
+        let dir = scratch("store-watch");
+        let stores = dir.join("annotations");
+        let doc = dir.join("doc.md");
+        let other = dir.join("other.md");
+        let closed = dir.join("closed.md");
+        let key = dir.join("id_ed25519");
+        for f in [&doc, &other, &closed, &key] {
+            fs::write(f, "x").unwrap();
+        }
+        let docs = opened(&doc);
+        read_document(&docs, s(&other)).unwrap();
+        let store_of = |p: &Path| {
+            let key = crate::annotations::doc_key(s(p));
+            s(&stores.join(format!("{}.json", crate::annotations::sha1_hex(&key)))).to_string()
+        };
+        let check = |store: &str, doc: &Path| ensure_store_watchable(&docs, Some(&stores), store, s(doc));
+
+        check(&store_of(&doc), &doc).unwrap();
+        assert_eq!(
+            check(s(&key), &doc).unwrap_err(),
+            format!("Not the annotation store for {}: {}", s(&doc), s(&key))
+        );
+        assert!(check(s(&doc), &doc).is_err());
+        assert!(check(&store_of(&other), &doc).is_err());
+        assert!(check(&store_of(&closed), &closed).is_err());
+        assert!(ensure_store_watchable(&docs, None, &store_of(&doc), s(&doc)).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 

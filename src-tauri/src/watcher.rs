@@ -146,7 +146,10 @@ pub fn watch_annotations(
     doc_path: String,
     app: AppHandle,
     watchers: State<Watchers>,
+    docs: State<crate::commands::OpenDocs>,
 ) -> Result<(), String> {
+    let dir = crate::annotations::store_dir();
+    crate::commands::ensure_store_watchable(&docs, dir.as_deref(), &store_path, &doc_path)?;
     let mut map = watchers.0.lock().map_err(|e| e.to_string())?;
     if map.contains_key(&store_path) {
         return Ok(());

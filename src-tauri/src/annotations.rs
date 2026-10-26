@@ -82,6 +82,12 @@ fn store_file(dir: &Path, key: &str) -> PathBuf {
     dir.join(format!("{}.json", sha1_hex(key)))
 }
 
+/// Whether `store_path` is exactly the spelling `ensure_annotation_store`
+/// returns for `doc_path` with `dir` as the store dir.
+pub(crate) fn is_store_of(dir: &Path, store_path: &str, doc_path: &str) -> bool {
+    store_file(dir, &doc_key(doc_path)).to_string_lossy() == store_path
+}
+
 pub fn store_path_for(doc_path: &str) -> Option<PathBuf> {
     store_dir().map(|d| store_file(&d, &doc_key(doc_path)))
 }
