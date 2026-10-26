@@ -25,7 +25,7 @@ Comments keep up with agent edits, checkboxes render everywhere, and Glance is l
 
 ### Security
 
-- The Glance window can only call Glance's own commands, and can only save or watch documents it has opened.
+- The Glance window can only call the commands Glance grants it, and can only save or watch documents it has opened.
 - The Glance MCP server only works on documents inside your project, or ones that already have Glance comments.
 - markdown-it, mermaid and DOMPurify are updated to versions with security fixes.
 
