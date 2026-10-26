@@ -11,7 +11,17 @@ const env = {
   handlers: new Map<string, Handler>(),
   launch: [] as string[],
   store: new Map<string, { next: number; list: Annotation[] }>(),
+  // While set, resolveAnchors waits until released, so a test can make one
+  // resolve finish after a later one.
+  holdResolves: false,
+  held: [] as (() => void)[],
 };
+
+// Like the Rust resolver for an exact match: the 1-based line the quote starts on.
+function lineOf(text: string, quote: string): number | null {
+  const at = text.indexOf(quote);
+  return at === -1 ? null : text.slice(0, at).split("\n").length;
+}
 
 function storeFor(p: string) {
   if (!env.store.has(p)) env.store.set(p, { next: 1, list: [] });
@@ -48,8 +58,13 @@ vi.mock("./ipc", () => ({
     return hit && clone(hit);
   },
   updateStoredAnnotation: async () => {}, addStoredReply: async () => {},
-  resolveAnchors: async (_text: string, list: Annotation[]) =>
-    list.map((a) => ({ id: a.id, startLine: 1, endLine: 1, anchor: "exact" })),
+  resolveAnchors: async (text: string, list: Annotation[]) => {
+    if (env.holdResolves) await new Promise<void>((r) => env.held.push(r));
+    return list.map((a) => {
+      const line = lineOf(text, a.quote);
+      return { id: a.id, startLine: line, endLine: line, anchor: line == null ? "orphaned" : "exact" };
+    });
+  },
   ensureAnnotationStore: async (p: string) => "/store" + p,
   watchAnnotations: async () => {}, onAnnotationsChanged: on("annotations-changed"),
   onShowIntegrationPicker: on("x1"), listIntegrationTargets: async () => [], runIntegration: async () => [],
@@ -80,6 +95,8 @@ beforeEach(() => {
   env.handlers = new Map();
   env.launch = [];
   env.store = new Map();
+  env.holdResolves = false;
+  env.held = [];
   localStorage.clear();
   localStorage.setItem("glance.seenVersion", "0.0.0-test");
   localStorage.setItem("glance.commentHintSeen", "1");
@@ -163,5 +180,87 @@ describe("annotation ids in selectors", () => {
     await openWith(annotation(id));
     await clickAction(id, "Edit");
     expect(document.querySelector(".comment-composer")).not.toBeNull();
+  });
+});
+
+describe("comment positions follow the document text", () => {
+  const lineLabel = (id: string) => cardFor(id).querySelector(".note-line")?.textContent;
+  const highlightLine = () =>
+    document.querySelector("#content mark.anno-highlight")?.closest("[data-sourceline]")?.getAttribute("data-sourceline");
+  const emit = async (name: string, payload: unknown) => { void env.handlers.get(name)!(payload); await flush(); };
+  const diskChange = (contents: string) => emit("file-changed", { path: "/a.md", contents });
+  const toggleMode = async () => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "e", metaKey: true }));
+    await flush();
+  };
+  async function typeAtStart(text: string) {
+    const { EditorView } = await import("@codemirror/view");
+    if (!document.querySelector(".cm-editor")) await toggleMode();
+    const v = EditorView.findFromDOM(document.querySelector(".cm-editor") as HTMLElement)!;
+    v.dispatch({ changes: { from: 0, insert: text } });
+  }
+
+  it("moves the rail line and highlight when an outside edit adds lines above the quote", async () => {
+    await openWith(annotation("x"));
+    expect(lineLabel("x")).toBe("L1");
+    expect(highlightLine()).toBe("1");
+    await diskChange("one\n\ntwo\n\nhello world\n");
+    expect(lineLabel("x")).toBe("L5");
+    expect(highlightLine()).toBe("5");
+  });
+
+  it("keeps the newer position when a resolve for the old text finishes last", async () => {
+    await openWith(annotation("x"));
+    // A store write lands first and its resolve runs against the old text.
+    env.holdResolves = true;
+    await emit("annotations-changed", "/a.md");
+    env.holdResolves = false;
+    await diskChange("one\n\ntwo\n\nhello world\n");
+    expect(lineLabel("x")).toBe("L5");
+    for (const release of env.held.splice(0)) release();
+    await flush();
+    expect(lineLabel("x")).toBe("L5");
+    expect(highlightLine()).toBe("5");
+  });
+
+  it("re-resolves text typed in Edit on the way back to Read", async () => {
+    await openWith(annotation("x"));
+    await typeAtStart("new\n\nlines\n\n");
+    await toggleMode();
+    expect(document.querySelector(".cm-editor")).toBeNull();
+    expect(lineLabel("x")).toBe("L5");
+    expect(highlightLine()).toBe("5");
+  });
+
+  it("re-resolves after Load disk replaces unsaved edits", async () => {
+    await openWith(annotation("x"));
+    await typeAtStart("draft\n\n");
+    await toggleMode();
+    expect(lineLabel("x")).toBe("L3");
+    await diskChange("one\n\ntwo\n\nthree\n\nhello world\n");
+    const load = Array.from(document.querySelectorAll<HTMLButtonElement>("#modal-root button"))
+      .find((b) => b.textContent === "Load disk")!;
+    load.click();
+    await flush();
+    expect(lineLabel("x")).toBe("L7");
+    expect(highlightLine()).toBe("7");
+  });
+
+  it("a keystroke while positions catch up doesn't undo an outside edit", async () => {
+    const { EditorView } = await import("@codemirror/view");
+    await openWith(annotation("x"));
+    await toggleMode();
+    env.holdResolves = true;
+    const agent = "AGENT REWRITE\n\nhello world\n";
+    env.fs.set("/a.md", agent);
+    await diskChange(agent);
+    const v = EditorView.findFromDOM(document.querySelector(".cm-editor") as HTMLElement)!;
+    expect(v.state.doc.toString()).toBe(agent);
+    v.dispatch({ changes: { from: v.state.doc.length, insert: "k" } });
+    env.holdResolves = false;
+    for (const release of env.held.splice(0)) release();
+    await flush();
+    await emit("menu-save", undefined);
+    expect(env.fs.get("/a.md")).toBe(agent + "k");
   });
 });
