@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 
 const TEXT_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd", "mkdn", "mdx", "txt"];
 
@@ -28,16 +30,79 @@ fn ensure_text_document(path: &str) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-pub fn read_file(path: String) -> Result<String, String> {
-    ensure_text_document(&path)?;
-    fs::read_to_string(&path).map_err(|e| e.to_string())
+/// Documents the page has opened this session, keyed like the annotation store
+/// (`doc_key`), so a symlink or other spelling of an open file matches it. A
+/// path enters when `read_file` succeeds on it, and only those can be saved or
+/// watched: script injected into the page can't create a new file or watch one
+/// it never opened. It can still overwrite an existing document by reading it
+/// first.
+#[derive(Default)]
+pub struct OpenDocs(Mutex<HashSet<String>>);
+
+impl OpenDocs {
+    fn add(&self, path: &str) {
+        let key = crate::annotations::doc_key(path);
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).insert(key);
+    }
+
+    fn contains(&self, path: &str) -> bool {
+        let key = crate::annotations::doc_key(path);
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).contains(&key)
+    }
+}
+
+fn read_document(docs: &OpenDocs, path: &str) -> Result<String, String> {
+    ensure_text_document(path)?;
+    let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
+    docs.add(path);
+    Ok(text)
+}
+
+fn write_document(docs: &OpenDocs, path: &str, contents: &str) -> Result<(), String> {
+    ensure_text_document(path)?;
+    if !docs.contains(path) {
+        return Err(format!("Glance can only save documents it has open: {path}"));
+    }
+    write_atomic(Path::new(path), contents.as_bytes()).map_err(|e| e.to_string())
+}
+
+pub fn ensure_watchable(docs: &OpenDocs, path: &str) -> Result<(), String> {
+    ensure_text_document(path)?;
+    if !docs.contains(path) {
+        return Err(format!("Glance can only watch documents it has open: {path}"));
+    }
+    Ok(())
+}
+
+/// Annotation watches share the `Watchers` map with document watches, so a
+/// store path must be the store of an open document and nothing else. Store
+/// paths end in `.json`, which no document can, so the two never share a key.
+pub fn ensure_store_watchable(
+    docs: &OpenDocs,
+    dir: Option<&Path>,
+    store_path: &str,
+    doc_path: &str,
+) -> Result<(), String> {
+    ensure_watchable(docs, doc_path)?;
+    let dir = dir.ok_or_else(|| "Could not determine $HOME".to_string())?;
+    if !crate::annotations::is_store_of(dir, store_path, doc_path) {
+        return Err(format!("Not the annotation store for {doc_path}: {store_path}"));
+    }
+    Ok(())
 }
 
 #[tauri::command]
-pub fn write_file(path: String, contents: String) -> Result<(), String> {
-    ensure_text_document(&path)?;
-    write_atomic(Path::new(&path), contents.as_bytes()).map_err(|e| e.to_string())
+pub fn read_file(path: String, docs: tauri::State<OpenDocs>) -> Result<String, String> {
+    read_document(&docs, &path)
+}
+
+#[tauri::command]
+pub fn write_file(
+    path: String,
+    contents: String,
+    docs: tauri::State<OpenDocs>,
+) -> Result<(), String> {
+    write_document(&docs, &path, &contents)
 }
 
 /// The path the frontend keys tabs on: see `cli::canonical`.
@@ -176,6 +241,17 @@ mod tests {
         dir
     }
 
+    fn s(p: &Path) -> &str {
+        p.to_str().unwrap()
+    }
+
+    /// The set after the page has read `path`, as opening a tab does.
+    fn opened(path: &Path) -> OpenDocs {
+        let docs = OpenDocs::default();
+        read_document(&docs, s(path)).unwrap();
+        docs
+    }
+
     #[test]
     fn allows_text_documents_in_any_case() {
         assert!(ensure_text_document("/nonexistent/a.md").is_ok());
@@ -197,7 +273,10 @@ mod tests {
         let link = dir.join("notes.md");
         fs::write(&target, "x").unwrap();
         symlink(&target, &link).unwrap();
-        assert!(write_file(link.to_string_lossy().into(), "pwned".into()).is_err());
+        // Refused even when its spelling is in the open set.
+        let docs = OpenDocs::default();
+        docs.add(s(&link));
+        assert!(write_document(&docs, s(&link), "pwned").is_err());
         assert_eq!(fs::read_to_string(&target).unwrap(), "x");
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -208,7 +287,9 @@ mod tests {
         let target = dir.join("profile");
         let link = dir.join("notes.md");
         symlink(&target, &link).unwrap();
-        assert!(write_file(link.to_string_lossy().into(), "pwned".into()).is_err());
+        let docs = OpenDocs::default();
+        docs.add(s(&link));
+        assert!(write_document(&docs, s(&link), "pwned").is_err());
         assert!(!target.exists());
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -220,14 +301,11 @@ mod tests {
         let doc = dir.join("doc.md");
         fs::write(&doc, "old").unwrap();
         fs::set_permissions(&doc, fs::Permissions::from_mode(0o640)).unwrap();
-        write_file(doc.to_string_lossy().into(), "new text".into()).unwrap();
+        write_document(&opened(&doc), s(&doc), "new text").unwrap();
         assert_eq!(fs::read_to_string(&doc).unwrap(), "new text");
         assert_eq!(fs::metadata(&doc).unwrap().permissions().mode() & 0o777, 0o640);
         // No temp file is left behind.
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
-        // A new file can still be created.
-        write_file(dir.join("new.md").to_string_lossy().into(), "x".into()).unwrap();
-        assert_eq!(fs::read_to_string(dir.join("new.md")).unwrap(), "x");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -238,7 +316,7 @@ mod tests {
         let link = dir.join("link.md");
         fs::write(&target, "old").unwrap();
         symlink(&target, &link).unwrap();
-        write_file(link.to_string_lossy().into(), "new".into()).unwrap();
+        write_document(&opened(&link), s(&link), "new").unwrap();
         assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert_eq!(fs::read_to_string(&target).unwrap(), "new");
         fs::remove_dir_all(&dir).unwrap();
@@ -251,7 +329,7 @@ mod tests {
         let doc = dir.join("doc.md");
         fs::write(&doc, "old").unwrap();
         fs::set_permissions(&doc, fs::Permissions::from_mode(0o444)).unwrap();
-        assert!(write_file(doc.to_string_lossy().into(), "new".into()).is_err());
+        assert!(write_document(&opened(&doc), s(&doc), "new").is_err());
         assert_eq!(fs::read_to_string(&doc).unwrap(), "old");
         fs::set_permissions(&doc, fs::Permissions::from_mode(0o644)).unwrap();
         fs::remove_dir_all(&dir).unwrap();
@@ -263,9 +341,10 @@ mod tests {
         let dir = scratch("atomic-rodir");
         let doc = dir.join("doc.md");
         fs::write(&doc, "old").unwrap();
+        let docs = opened(&doc);
         // The folder refuses the temp file; the file itself is writable.
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
-        let res = write_file(doc.to_string_lossy().into(), "new".into());
+        let res = write_document(&docs, s(&doc), "new");
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         res.unwrap();
         assert_eq!(fs::read_to_string(&doc).unwrap(), "new");
@@ -284,7 +363,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(set.success());
-        write_file(doc.to_string_lossy().into(), "new".into()).unwrap();
+        write_document(&opened(&doc), s(&doc), "new").unwrap();
         let out = std::process::Command::new("xattr")
             .args(["-p", "com.glance.test"])
             .arg(&doc)
@@ -292,6 +371,104 @@ mod tests {
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "tagged");
         assert_eq!(fs::read_to_string(&doc).unwrap(), "new");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_save_needs_the_doc_to_have_been_read() {
+        let dir = scratch("open-set");
+        let doc = dir.join("doc.md");
+        let new = dir.join("SKILL.md");
+        fs::write(&doc, "old").unwrap();
+        let docs = OpenDocs::default();
+
+        let err = write_document(&docs, s(&doc), "pwned").unwrap_err();
+        assert_eq!(err, format!("Glance can only save documents it has open: {}", s(&doc)));
+        assert_eq!(fs::read_to_string(&doc).unwrap(), "old");
+        assert!(write_document(&docs, s(&new), "pwned").is_err());
+        assert!(!new.exists());
+        // A failed read doesn't open it either.
+        assert!(read_document(&docs, s(&new)).is_err());
+        assert!(write_document(&docs, s(&new), "pwned").is_err());
+        assert!(!new.exists());
+
+        assert_eq!(read_document(&docs, s(&doc)).unwrap(), "old");
+        write_document(&docs, s(&doc), "new").unwrap();
+        assert_eq!(fs::read_to_string(&doc).unwrap(), "new");
+        // Deleted while open, a save puts it back.
+        fs::remove_file(&doc).unwrap();
+        write_document(&docs, s(&doc), "again").unwrap();
+        assert_eq!(fs::read_to_string(&doc).unwrap(), "again");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn any_spelling_of_an_open_doc_can_be_saved() {
+        let dir = scratch("open-spelling");
+        let real = dir.join("real.md");
+        let link = dir.join("link.md");
+        fs::write(&real, "old").unwrap();
+        symlink(&real, &link).unwrap();
+        let docs = opened(&real);
+        write_document(&docs, s(&link), "via link").unwrap();
+        assert_eq!(fs::read_to_string(&real).unwrap(), "via link");
+        let dotted = dir.join(".").join("real.md");
+        write_document(&docs, s(&dotted), "dotted").unwrap();
+        assert_eq!(fs::read_to_string(&real).unwrap(), "dotted");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_open_text_documents_can_be_watched() {
+        let dir = scratch("watchable");
+        let doc = dir.join("doc.md");
+        let other = dir.join("other.md");
+        let key = dir.join("id_ed25519");
+        fs::write(&doc, "x").unwrap();
+        fs::write(&other, "x").unwrap();
+        fs::write(&key, "secret").unwrap();
+        let docs = opened(&doc);
+        // In the set but not a document, as if it had got there some other way.
+        docs.add(s(&key));
+
+        ensure_watchable(&docs, s(&doc)).unwrap();
+        assert!(ensure_watchable(&docs, s(&key)).is_err());
+        assert!(ensure_watchable(&docs, "/etc/hosts").is_err());
+        assert_eq!(
+            ensure_watchable(&docs, s(&other)).unwrap_err(),
+            format!("Glance can only watch documents it has open: {}", s(&other))
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_the_store_of_an_open_doc_can_be_watched() {
+        let dir = scratch("store-watch");
+        let stores = dir.join("annotations");
+        let doc = dir.join("doc.md");
+        let other = dir.join("other.md");
+        let closed = dir.join("closed.md");
+        let key = dir.join("id_ed25519");
+        for f in [&doc, &other, &closed, &key] {
+            fs::write(f, "x").unwrap();
+        }
+        let docs = opened(&doc);
+        read_document(&docs, s(&other)).unwrap();
+        let store_of = |p: &Path| {
+            let key = crate::annotations::doc_key(s(p));
+            s(&stores.join(format!("{}.json", crate::annotations::sha1_hex(&key)))).to_string()
+        };
+        let check = |store: &str, doc: &Path| ensure_store_watchable(&docs, Some(&stores), store, s(doc));
+
+        check(&store_of(&doc), &doc).unwrap();
+        assert_eq!(
+            check(s(&key), &doc).unwrap_err(),
+            format!("Not the annotation store for {}: {}", s(&doc), s(&key))
+        );
+        assert!(check(s(&doc), &doc).is_err());
+        assert!(check(&store_of(&other), &doc).is_err());
+        assert!(check(&store_of(&closed), &closed).is_err());
+        assert!(ensure_store_watchable(&docs, None, &store_of(&doc), s(&doc)).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
 

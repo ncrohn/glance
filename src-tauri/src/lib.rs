@@ -239,6 +239,7 @@ pub fn run() {
         .plugin(navigation_guard())
         .plugin(tauri_plugin_dialog::init())
         .manage(watcher::Watchers::default())
+        .manage(commands::OpenDocs::default())
         .manage(LaunchArgs::default())
         .manage(FrontendReady::default())
         .manage(QuitApproved::default())
@@ -557,5 +558,63 @@ mod tests {
         assert!(ready.0.load(Ordering::SeqCst));
         reset_on_page_load(&ready, PageLoadEvent::Started);
         assert!(!ready.0.load(Ordering::SeqCst));
+    }
+
+    #[tauri::command]
+    fn not_in_any_capability() {}
+
+    fn invoke(
+        webview: &tauri::WebviewWindow<tauri::test::MockRuntime>,
+        cmd: &str,
+    ) -> Result<(), String> {
+        tauri::test::get_ipc_response(
+            webview,
+            tauri::webview::InvokeRequest {
+                cmd: cmd.into(),
+                callback: tauri::ipc::CallbackFn(0),
+                error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(),
+                body: tauri::ipc::InvokeBody::default(),
+                headers: Default::default(),
+                invoke_key: tauri::test::INVOKE_KEY.to_string(),
+            },
+        )
+        .map(|_| ())
+        .map_err(|e| e.as_str().map(str::to_owned).unwrap_or_else(|| e.to_string()))
+    }
+
+    /// The command names in `run`'s `generate_handler!`.
+    fn registered_commands() -> Vec<&'static str> {
+        let src = include_str!("lib.rs");
+        let start = src.find("generate_handler![").unwrap() + "generate_handler![".len();
+        let end = start + src[start..].find(']').unwrap();
+        src[start..end]
+            .split(',')
+            .map(|c| c.trim().rsplit("::").next().unwrap())
+            .filter(|c| !c.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn the_page_can_call_only_the_commands_its_capability_grants() {
+        let app = tauri::test::mock_builder()
+            .invoke_handler(tauri::generate_handler![not_in_any_capability])
+            // `test = true` skips the Info.plist embed, which `run`'s context already defines.
+            .build(tauri::generate_context!(test = true))
+            .unwrap();
+        let webview = app.get_webview_window("main").unwrap_or_else(|| {
+            tauri::WebviewWindowBuilder::new(&app, "main", Default::default()).build().unwrap()
+        });
+
+        let refused = invoke(&webview, "not_in_any_capability").unwrap_err();
+        assert!(refused.contains("not allowed"), "{refused}");
+
+        // Every command the app registers gets past the ACL; none is
+        // registered in this mock app, so each then fails only as unknown.
+        let commands = registered_commands();
+        assert_eq!(commands.len(), 23);
+        for cmd in commands {
+            assert_eq!(invoke(&webview, cmd), Err(format!("Command {cmd} not found")));
+        }
     }
 }
