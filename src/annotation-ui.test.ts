@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { groupAnnotations, assignMarkers, annotationsForBlock, cardModel, parseRailPref, MARKER_PALETTE, fabPosition, markerColor, markerLabel } from "./annotation-ui";
-import { gutterLaneLefts } from "./annotation-ui";
+import { gutterLaneLefts, gutterRowLaneCounts } from "./annotation-ui";
 import type { Annotation, Resolution } from "./annotations";
 
 function ann(id: string, status: Annotation["status"] = "open"): Annotation {
@@ -256,5 +256,20 @@ describe("gutterLaneLefts", () => {
 
   it("stacks markers in place when the gutter has no room to spread", () => {
     expect(gutterLaneLefts(3, 0)).toEqual([2, 8, 14]);
+  });
+});
+
+describe("gutterRowLaneCounts", () => {
+  it("spaces a chained row with one lane count", () => {
+    // Each top is within 16px of the next, but the ends are 20px apart.
+    expect(gutterRowLaneCounts([
+      { top: 0, lane: 0 }, { top: 10, lane: 1 }, { top: 20, lane: 2 },
+    ])).toEqual([3, 3, 3]);
+  });
+
+  it("keeps separate rows apart", () => {
+    expect(gutterRowLaneCounts([
+      { top: 0, lane: 0 }, { top: 4, lane: 1 }, { top: 40, lane: 0 },
+    ])).toEqual([2, 2, 1]);
   });
 });

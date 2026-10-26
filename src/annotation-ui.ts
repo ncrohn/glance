@@ -531,14 +531,30 @@ export function gutterLaneLefts(count: number, gutterWidth: number): number[] {
   return Array.from({ length: count }, (_, lane) => first + lane * step);
 }
 
+/** How many lanes each marker's row uses. A row is a cluster of markers whose
+ *  tops chain within `SAME_ROW_PX` of each other, so every marker in it is
+ *  spaced with the same step. */
+export function gutterRowLaneCounts(markers: { top: number; lane: number }[]): number[] {
+  const order = markers.map((_, i) => i).sort((a, b) => markers[a].top - markers[b].top);
+  const counts = new Array<number>(markers.length);
+  let start = 0;
+  for (let k = 1; k <= order.length; k++) {
+    const gap = k < order.length ? markers[order[k]].top - markers[order[k - 1]].top : Infinity;
+    if (gap < SAME_ROW_PX) continue;
+    const row = order.slice(start, k);
+    const lanes = 1 + Math.max(...row.map((i) => markers[i].lane));
+    for (const i of row) counts[i] = lanes;
+    start = k;
+  }
+  return counts;
+}
+
 function layoutGutterLanes(renderedEl: HTMLElement, placed: PlacedMarker[]): void {
   const gutterWidth = parseFloat(getComputedStyle(renderedEl).paddingLeft) || 0;
-  for (const p of placed) {
-    const lanes = 1 + Math.max(
-      ...placed.filter((q) => Math.abs(q.top - p.top) < SAME_ROW_PX).map((q) => q.lane),
-    );
-    p.chip.style.left = `${gutterLaneLefts(lanes, gutterWidth)[p.lane]}px`;
-  }
+  const counts = gutterRowLaneCounts(placed);
+  placed.forEach((p, i) => {
+    p.chip.style.left = `${gutterLaneLefts(counts[i], gutterWidth)[p.lane]}px`;
+  });
 }
 
 export interface Box { top: number; bottom: number; left: number; right: number }
