@@ -1,5 +1,4 @@
 import MarkdownIt from "markdown-it";
-import taskLists from "markdown-it-task-lists";
 import hljs from "highlight.js";
 import { parseFrontmatter, type FrontmatterEntry } from "./frontmatter";
 import { parseWikilink } from "./links";
@@ -32,7 +31,36 @@ const md = new MarkdownIt({
   },
 });
 
-md.use(taskLists);
+// GFM task lists: a list item whose paragraph opens with `[ ]`, `[x]` or `[X]`
+// gets a read-only checkbox. An empty `- [ ]` counts, since editors strip the
+// trailing space markdown-it-task-lists required, and so does a tab after it.
+const TASK_BOX = /^\[([ xX])\](?=\s|$)/;
+md.core.ruler.after("inline", "task_lists", (state) => {
+  const tokens = state.tokens;
+  for (let i = 2; i < tokens.length; i++) {
+    const inline = tokens[i];
+    if (
+      inline.type !== "inline" || tokens[i - 1].type !== "paragraph_open"
+      || tokens[i - 2].type !== "list_item_open"
+    ) continue;
+    const m = TASK_BOX.exec(inline.content);
+    const first = inline.children?.[0];
+    if (!m || first?.type !== "text" || !first.content.startsWith(m[0])) continue;
+    first.content = first.content.slice(m[0].length).replace(/^[ \t]+/, "");
+    const box = new state.Token("html_inline", "", 0);
+    box.content = `<input class="task-list-item-checkbox" type="checkbox" disabled${m[1] === " " ? "" : " checked"}>`;
+    inline.children!.unshift(box);
+    const item = tokens[i - 2];
+    item.attrJoin("class", "task-list-item");
+    for (let j = i - 3; j >= 0; j--) {
+      if (tokens[j].level !== item.level - 1) continue;
+      if (!tokens[j].attrGet("class")?.includes("contains-task-list")) {
+        tokens[j].attrJoin("class", "contains-task-list");
+      }
+      break;
+    }
+  }
+});
 
 // Fuzzy linkify turns filenames like AGENTS.md or setup.sh into links to
 // http://AGENTS.md. Link only URLs with a scheme, plus `www.` hosts as GFM does.
