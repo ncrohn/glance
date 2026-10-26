@@ -245,4 +245,22 @@ describe("comment positions follow the document text", () => {
     expect(lineLabel("x")).toBe("L7");
     expect(highlightLine()).toBe("7");
   });
+
+  it("a keystroke while positions catch up doesn't undo an outside edit", async () => {
+    const { EditorView } = await import("@codemirror/view");
+    await openWith(annotation("x"));
+    await toggleMode();
+    env.holdResolves = true;
+    const agent = "AGENT REWRITE\n\nhello world\n";
+    env.fs.set("/a.md", agent);
+    await diskChange(agent);
+    const v = EditorView.findFromDOM(document.querySelector(".cm-editor") as HTMLElement)!;
+    expect(v.state.doc.toString()).toBe(agent);
+    v.dispatch({ changes: { from: v.state.doc.length, insert: "k" } });
+    env.holdResolves = false;
+    for (const release of env.held.splice(0)) release();
+    await flush();
+    await emit("menu-save", undefined);
+    expect(env.fs.get("/a.md")).toBe(agent + "k");
+  });
 });

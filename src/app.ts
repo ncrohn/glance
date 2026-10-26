@@ -888,9 +888,11 @@ async function handleDiskChange(path: string, contents: string): Promise<void> {
   if (open) { open.latest = contents; return; }
   if (isKnownContent(doc, contents)) return;
   if (decideReload(doc) === "auto-reload") {
+    // Render before resolving: until render() remounts the editor, a keystroke
+    // would write the old text back over the disk change.
     state = applyDiskChange(state, doc.id, contents);
-    await catchUpResolutions(doc.absPath);
     render();
+    void catchUpResolutions(doc.absPath).then((fresh) => { if (fresh) redrawComments(doc.id); });
     return;
   }
   const pending: PendingReload = { latest: contents, live: true };
@@ -904,8 +906,8 @@ async function handleDiskChange(path: string, contents: string): Promise<void> {
   const latest = pending.latest;
   if (choice === "disk") {
     state = applyDiskChange(state, doc.id, latest);
-    await catchUpResolutions(doc.absPath);
     render();
+    void catchUpResolutions(doc.absPath).then((fresh) => { if (fresh) redrawComments(doc.id); });
   } else {
     // "mine": keep the editor text (still dirty) but record what disk holds now.
     state = setDiskContent(state, doc.id, latest);
