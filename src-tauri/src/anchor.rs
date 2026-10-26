@@ -156,9 +156,18 @@ fn resolve_with(text: &str, lines: &LineIndex, a: &Annotation) -> Resolution {
         0 => {}
         1 => return located(a, lines, full_occurrences[0] + a.prefix.len(), "exact"),
         // Several copies keep their context: the hint picks one, so it isn't
-        // the unambiguous find "exact" promises, but a bare copy whose
-        // surroundings differ must not win over them.
+        // the unambiguous find "exact" promises. A bare copy whose surroundings
+        // differ must not win over them, unless it is the nearest copy and
+        // still keeps one whole side of its context: that is the commented
+        // copy after an edit beside it, with untouched duplicates elsewhere.
         _ => {
+            let near = nearest_hint(&find_all(text, &a.quote));
+            let keeps_prefix = !a.prefix.is_empty() && text[..near].ends_with(&a.prefix);
+            let keeps_suffix =
+                !a.suffix.is_empty() && text[near + a.quote.len()..].starts_with(&a.suffix);
+            if keeps_prefix || keeps_suffix {
+                return located(a, lines, near, "quote-only");
+            }
             let starts: Vec<usize> = full_occurrences.iter().map(|&o| o + a.prefix.len()).collect();
             return located(a, lines, nearest_hint(&starts), "quote-only");
         }
@@ -248,6 +257,17 @@ mod tests {
         // Line 3 is also the nearest bare copy for a hint past the end.
         let text = "A dup B\nx\nx\nx\nA dup B\nC dup D\n";
         assert_eq!(resolve_anchor(text, &ann("dup", "A ", " B", 9)).start_line, Some(5));
+    }
+
+    #[test]
+    fn commented_copy_edited_beside_it_stays_put_among_untouched_duplicates() {
+        // Three identical copies; the comment is on line 5, whose suffix side
+        // was edited. Lines 1 and 3 still match the full context, but line 5
+        // is nearest the hint and keeps its prefix.
+        let text = "A dup B\nx\nA dup B\nx\nA dup C\n";
+        let r = resolve_anchor(text, &ann("dup", "A ", " B", 5));
+        assert_eq!(r.anchor, "quote-only");
+        assert_eq!(r.start_line, Some(5));
     }
 
     #[test]
