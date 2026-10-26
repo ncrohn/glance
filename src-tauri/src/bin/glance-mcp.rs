@@ -4,7 +4,8 @@
 
 use glance_lib::anchor::{resolve_anchor, Annotation, LineHint, Reply};
 use glance_lib::annotations::{
-    adopt_alias_store, apply_reply, mutate_store, now_iso8601, push_annotation, read_store, store_dir, unique_id, AnnotationStore,
+    adopt_alias_store, apply_reply, doc_key, has_store, mutate_store, now_iso8601, push_annotation, read_store, store_dir, unique_id,
+    AnnotationStore,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -389,7 +390,7 @@ mod tests {
         mutate_store(&doc, |s| s.annotations.push(done.clone())).unwrap();
         let store_path = glance_lib::annotations::store_path_for(&doc).unwrap();
         let on_disk = std::fs::read_to_string(&store_path).unwrap();
-        let out = call_tool("resolve_annotation", &json!({ "path": doc, "id": "u1", "note": "done" })).unwrap();
+        let out = call_in(&home, "resolve_annotation", &json!({ "path": doc, "id": "u1", "note": "done" })).unwrap();
         let res = tool_json(&out);
         assert_eq!(res["alreadyResolved"], true);
         assert_eq!(res["resolvedBy"], "user");
@@ -464,7 +465,7 @@ mod tests {
 
     #[test]
     fn handle_ping_returns_empty_ok() {
-        let result = handle("ping", &json!({}));
+        let result = handle("ping", &json!({}), None);
         assert!(matches!(result, Some(Ok(_))), "ping must return Some(Ok(_))");
         if let Some(Ok(v)) = result {
             assert_eq!(v, json!({}));
@@ -562,7 +563,7 @@ mod tests {
         let mut a = ann("big", "GONE", "open");
         a.line_hint = LineHint { start: 2, end: usize::MAX };
         mutate_store(&doc, |s| s.annotations.push(a.clone())).unwrap();
-        let out = call_tool("get_annotation", &json!({ "path": doc, "id": "big" })).unwrap();
+        let out = call_in(&home, "get_annotation", &json!({ "path": doc, "id": "big" })).unwrap();
         let detail = tool_json(&out);
         assert_eq!(detail["anchor"], "drifted");
         assert_eq!((detail["lineStart"].as_u64(), detail["lineEnd"].as_u64()), (Some(2), Some(10)));
@@ -595,7 +596,7 @@ mod tests {
         std::fs::write(&doc, NINE).unwrap();
         mutate_store(&doc, |s| s.annotations.push(ann("mid", "l5", "open"))).unwrap();
 
-        let out = call_tool("get_annotation", &json!({ "path": doc, "id": "mid" })).unwrap();
+        let out = call_in(&home, "get_annotation", &json!({ "path": doc, "id": "mid" })).unwrap();
         let payload: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(payload["id"], "mid");
         assert_eq!(payload["lineStart"], 5);
@@ -604,7 +605,7 @@ mod tests {
         assert_eq!(payload["context"]["after"], json!(["l6", "l7", "l8"]));
 
         // list_annotations is unchanged: no context field.
-        let out = call_tool("list_annotations", &json!({ "path": doc })).unwrap();
+        let out = call_in(&home, "list_annotations", &json!({ "path": doc })).unwrap();
         let list: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
         assert!(list[0].get("context").is_none());
     }
@@ -619,7 +620,7 @@ mod tests {
         let doc = format!("{home}/doc.md");
         std::fs::write(&doc, NINE).unwrap();
 
-        let out = call_tool("add_annotation", &json!({ "path": doc, "quote": "l5", "note": "see here" })).unwrap();
+        let out = call_in(&home, "add_annotation", &json!({ "path": doc, "quote": "l5", "note": "see here" })).unwrap();
         let first: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(first["number"], 1);
         assert_eq!(first["author"], "claude");
@@ -629,13 +630,13 @@ mod tests {
         assert_eq!(first["anchor"], "exact");
         assert_eq!(first["id"].as_str().unwrap().len(), 8);
 
-        let out = call_tool("add_annotation", &json!({ "path": doc, "quote": "l7", "note": "and here" })).unwrap();
+        let out = call_in(&home, "add_annotation", &json!({ "path": doc, "quote": "l7", "note": "and here" })).unwrap();
         let second: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(second["number"], 2);
         assert_ne!(second["id"], first["id"]);
 
         // The same quote and note twice in one second (a retry) still gets two ids.
-        let out = call_tool("add_annotation", &json!({ "path": doc, "quote": "l7", "note": "and here" })).unwrap();
+        let out = call_in(&home, "add_annotation", &json!({ "path": doc, "quote": "l7", "note": "and here" })).unwrap();
         let retry: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_ne!(retry["id"], second["id"]);
         mutate_store(&doc, |s| s.annotations.retain(|a| a.id != retry["id"].as_str().unwrap())).unwrap();
@@ -646,16 +647,16 @@ mod tests {
         assert_eq!(store.annotations[0].line_hint, LineHint { start: 5, end: 5 });
 
         // A quote not in the file errors and writes nothing (line hint in range → "drifted").
-        let err = call_tool("add_annotation", &json!({ "path": doc, "quote": "NOTINTEXTEVER", "note": "x" })).unwrap_err();
+        let err = call_in(&home, "add_annotation", &json!({ "path": doc, "quote": "NOTINTEXTEVER", "note": "x" })).unwrap_err();
         assert!(err.contains("quote not found"), "{err}");
         assert_eq!(read_store(&doc).unwrap().annotations.len(), 2);
         // A line hint past the end of the file is refused before anything is written.
-        let err = call_tool("add_annotation", &json!({ "path": doc, "quote": "NOTINTEXTEVER", "note": "x", "lineHint": { "start": 99 } })).unwrap_err();
+        let err = call_in(&home, "add_annotation", &json!({ "path": doc, "quote": "NOTINTEXTEVER", "note": "x", "lineHint": { "start": 99 } })).unwrap_err();
         assert!(err.contains("lineHint"), "{err}");
         assert_eq!(read_store(&doc).unwrap().annotations.len(), 2);
 
         // list_annotations shows both, numbered.
-        let out = call_tool("list_annotations", &json!({ "path": doc })).unwrap();
+        let out = call_in(&home, "list_annotations", &json!({ "path": doc })).unwrap();
         let list: Value = serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(list.as_array().unwrap().len(), 2);
         assert_eq!(list[1]["number"], 2);
@@ -684,11 +685,11 @@ mod tests {
         ] {
             let mut args = extra;
             args["path"] = json!(doc);
-            let err = call_tool(tool, &args).unwrap_err();
+            let err = call_in(&home, tool, &args).unwrap_err();
             assert!(err.contains("damaged"), "{tool}: {err}");
         }
         let uri = format!("glance://annotations/{doc}");
-        assert!(matches!(handle("resources/read", &json!({ "uri": uri })), Some(Err(_))));
+        assert!(matches!(handle_in(&home, "resources/read", &json!({ "uri": uri })), Some(Err(_))));
         assert_eq!(std::fs::read_to_string(&store_path).unwrap(), damaged);
     }
 
@@ -698,6 +699,15 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         std::env::set_var("HOME", &home);
         home
+    }
+
+    /// A tool call on a server whose project root is `dir`.
+    fn call_in(dir: impl AsRef<Path>, name: &str, args: &Value) -> Result<Value, String> {
+        call_tool(name, args, Some(&std::fs::canonicalize(dir).unwrap()))
+    }
+
+    fn handle_in(dir: impl AsRef<Path>, method: &str, params: &Value) -> Option<Result<Value, (i64, String)>> {
+        handle(method, params, Some(&std::fs::canonicalize(dir).unwrap()))
     }
 
     fn tool_json(out: &Value) -> Value {
@@ -726,7 +736,7 @@ mod tests {
         for (path, want) in &cases {
             for tool in ["list_annotations", "get_annotation", "add_annotation", "resolve_annotation", "reply_annotation"] {
                 let args = json!({ "path": path, "id": "x", "quote": "password", "note": "n", "text": "t" });
-                let err = call_tool(tool, &args).unwrap_err();
+                let err = call_in(&home, tool, &args).unwrap_err();
                 assert!(err.contains(want), "{tool} {path}: {err}");
             }
         }
@@ -734,20 +744,102 @@ mod tests {
 
         // A symlink to a doc, `~/`, `./` and `//` all reach the one store.
         std::os::unix::fs::symlink(&doc, home.join("alias.md")).unwrap();
-        call_tool("add_annotation", &json!({ "path": p("alias.md"), "quote": "l2", "note": "n" })).unwrap();
+        call_in(&home, "add_annotation", &json!({ "path": p("alias.md"), "quote": "l2", "note": "n" })).unwrap();
         for spelling in ["~/doc.md".to_string(), p("./doc.md"), format!("{}//doc.md", home.display()), p("doc.md")] {
-            let out = call_tool("list_annotations", &json!({ "path": spelling })).unwrap();
+            let out = call_in(&home, "list_annotations", &json!({ "path": spelling })).unwrap();
             assert_eq!(tool_json(&out).as_array().unwrap().len(), 1, "{spelling}");
         }
     }
 
-    fn tools_call(name: Value, arguments: Value) -> Option<Result<Value, (i64, String)>> {
-        handle("tools/call", &json!({ "name": name, "arguments": arguments }))
+    #[test]
+    fn project_root_is_the_canonical_cwd_unless_it_holds_home() {
+        let base = std::env::temp_dir().join(format!("glance-test-mcp-root-{}", std::process::id()));
+        let home = base.join("Users/me");
+        let proj = home.join("dev/proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let canonical = std::fs::canonicalize(&proj).unwrap();
+        assert_ne!(canonical, proj); // the temp dir sits behind /var -> /private/var
+        assert_eq!(project_root(&proj, Some(&home)), Some(canonical.clone()));
+        assert_eq!(project_root(&proj, None), Some(canonical));
+        let canonical_home = std::fs::canonicalize(&home).unwrap();
+        for too_broad in [home.clone(), canonical_home, home.join("dev/.."), base.join("Users"), base.clone(), PathBuf::from("/")] {
+            assert_eq!(project_root(&too_broad, Some(&home)), None, "{}", too_broad.display());
+        }
+        assert_eq!(project_root(Path::new("/"), None), None);
+        assert_eq!(project_root(&base.join("missing"), Some(&home)), None);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn tools_only_reach_docs_in_the_project_or_opened_in_glance() {
+        let home = fresh_home("scope");
+        let s = |p: &Path| p.to_string_lossy().into_owned();
+        let proj = home.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let inside = proj.join("plan.md");
+        std::fs::write(&inside, NINE).unwrap();
+        std::fs::write(home.join("secrets.txt"), "l1\npassword=hunter2\nl3\n").unwrap();
+        std::os::unix::fs::symlink(home.join("secrets.txt"), proj.join("leak.md")).unwrap();
+        std::fs::create_dir_all(home.join("other")).unwrap();
+        let other = home.join("other/notes.md");
+        std::fs::write(&other, NINE).unwrap();
+
+        // Inside the project: no store needed.
+        call_in(&proj, "add_annotation", &json!({ "path": s(&inside), "quote": "l5", "note": "n" })).unwrap();
+
+        // Outside it with no store: refused before the file is read or a store is made.
+        let refused = "Glance only works with documents in this project or ones opened in Glance";
+        for path in [s(&home.join("secrets.txt")), s(&proj.join("leak.md")), s(&other), "~/secrets.txt".into(), s(&home.join("missing.md"))] {
+            for tool in TOOL_NAMES {
+                let args = json!({ "path": path, "id": "x", "quote": "password", "note": "n", "text": "t" });
+                let err = call_in(&proj, tool, &args).unwrap_err();
+                assert!(err.contains(refused), "{tool} {path}: {err}");
+            }
+            let uri = format!("glance://annotations/{path}");
+            match handle_in(&proj, "resources/read", &json!({ "uri": uri })) {
+                Some(Err((_, e))) => assert!(e.contains(refused), "{uri}: {e}"),
+                other => panic!("{uri}: {other:?}"),
+            }
+            assert!(!glance_lib::annotations::store_path_for(&path.replace('~', &s(&home))).unwrap().exists(), "{path}");
+        }
+
+        // Opened in Glance (the app made its store): reachable from any project.
+        glance_lib::annotations::ensure_annotation_store(s(&other)).unwrap();
+        let out = call_in(&proj, "add_annotation", &json!({ "path": s(&other), "quote": "l2", "note": "n" })).unwrap();
+        assert_eq!(tool_json(&out)["lineStart"], 2);
+        let uri = format!("glance://annotations/{}", s(&other));
+        assert!(matches!(handle_in(&proj, "resources/read", &json!({ "uri": uri })), Some(Ok(_))));
+
+        // A server started in $HOME has no project, so only opened docs are reachable.
+        let root = project_root(&home, std::env::var_os("HOME").map(PathBuf::from).as_deref());
+        assert_eq!(root, None);
+        let fresh = home.join("fresh.md");
+        std::fs::write(&fresh, NINE).unwrap();
+        for path in [&fresh, &home.join("secrets.txt")] {
+            let err = call_tool("list_annotations", &json!({ "path": s(path) }), root.as_deref()).unwrap_err();
+            assert!(err.contains(refused), "{err}");
+        }
+        for path in [&inside, &other] {
+            call_tool("list_annotations", &json!({ "path": s(path) }), root.as_deref()).unwrap();
+        }
+
+        // Every doc the pending hook names has a store, so its pointer always works.
+        let lines = pending_lines(&home, load_stores(), |p| std::fs::read_to_string(p).ok());
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        for line in lines {
+            let doc = line.split(" on ").nth(1).and_then(|r| r.strip_suffix(". Read them with list_annotations before continuing.")).unwrap();
+            call_tool("list_annotations", &json!({ "path": doc }), None).unwrap();
+        }
+    }
+
+    fn tools_call(dir: &Path, name: Value, arguments: Value) -> Option<Result<Value, (i64, String)>> {
+        handle_in(dir, "tools/call", &json!({ "name": name, "arguments": arguments }))
     }
 
     /// The text of a tool result that must be flagged `isError`.
-    fn tool_err(name: &str, arguments: Value) -> String {
-        match tools_call(json!(name), arguments) {
+    fn tool_err(dir: &Path, name: &str, arguments: Value) -> String {
+        match tools_call(dir, json!(name), arguments) {
             Some(Ok(v)) => {
                 assert_eq!(v["isError"], true, "{v}");
                 v["content"][0]["text"].as_str().unwrap().to_string()
@@ -763,34 +855,34 @@ mod tests {
         let doc = home.join("doc.md").to_string_lossy().into_owned();
         std::fs::write(&doc, NINE).unwrap();
 
-        assert!(tool_err("get_annotation", json!({ "path": doc, "id": "nope" })).contains("no annotation 'nope'"));
-        assert!(tool_err("list_annotations", json!({ "path": doc, "status": "Open" })).contains("must be one of open, resolved, orphaned, all"));
-        assert!(tool_err("list_annotations", json!({ "path": doc, "status": 5 })).contains("'status' must be a string"));
-        assert!(tool_err("list_annotations", json!({ "path": 5 })).contains("'path' must be a string"));
-        assert!(tool_err("list_annotations", json!({})).contains("missing 'path'"));
-        assert!(tool_err("resolve_annotation", json!({ "path": doc, "id": "x", "note": 5 })).contains("'note' must be a string"));
-        assert!(tool_err("add_annotation", json!({ "path": doc, "quote": "l1", "note": "n", "prefix": 1 })).contains("'prefix' must be a string"));
-        assert!(tool_err("reply_annotation", json!({ "path": doc, "id": "x", "text": "  " })).contains("missing 'text'"));
-        assert!(tool_err("list_annotations", json!("x")).contains("'arguments' must be an object"));
+        assert!(tool_err(&home, "get_annotation", json!({ "path": doc, "id": "nope" })).contains("no annotation 'nope'"));
+        assert!(tool_err(&home, "list_annotations", json!({ "path": doc, "status": "Open" })).contains("must be one of open, resolved, orphaned, all"));
+        assert!(tool_err(&home, "list_annotations", json!({ "path": doc, "status": 5 })).contains("'status' must be a string"));
+        assert!(tool_err(&home, "list_annotations", json!({ "path": 5 })).contains("'path' must be a string"));
+        assert!(tool_err(&home, "list_annotations", json!({})).contains("missing 'path'"));
+        assert!(tool_err(&home, "resolve_annotation", json!({ "path": doc, "id": "x", "note": 5 })).contains("'note' must be a string"));
+        assert!(tool_err(&home, "add_annotation", json!({ "path": doc, "quote": "l1", "note": "n", "prefix": 1 })).contains("'prefix' must be a string"));
+        assert!(tool_err(&home, "reply_annotation", json!({ "path": doc, "id": "x", "text": "  " })).contains("missing 'text'"));
+        assert!(tool_err(&home, "list_annotations", json!("x")).contains("'arguments' must be an object"));
 
         // An unknown tool is a protocol error, whether or not a path came with it.
         for args in [json!({ "path": doc }), json!({})] {
-            match tools_call(json!("nope"), args) {
+            match tools_call(&home, json!("nope"), args) {
                 Some(Err((code, msg))) => assert_eq!((code, msg.as_str()), (-32602, "Unknown tool: nope")),
                 other => panic!("{other:?}"),
             }
         }
-        assert!(matches!(handle("tools/call", &json!({ "arguments": {} })), Some(Err((-32602, _)))));
+        assert!(matches!(handle_in(&home, "tools/call", &json!({ "arguments": {} })), Some(Err((-32602, _)))));
 
         // Success carries no isError flag; a null status means the default.
-        let ok = tools_call(json!("list_annotations"), json!({ "path": doc, "status": null })).unwrap().unwrap();
+        let ok = tools_call(&home, json!("list_annotations"), json!({ "path": doc, "status": null })).unwrap().unwrap();
         assert!(ok.get("isError").is_none(), "{ok}");
-        assert!(handle("tools/call", &json!({ "name": "list_annotations" })).unwrap().unwrap()["isError"] == true);
+        assert!(handle_in(&home, "tools/call", &json!({ "name": "list_annotations" })).unwrap().unwrap()["isError"] == true);
     }
 
     fn serve_lines(input: &[u8]) -> Vec<Value> {
         let mut out = Vec::new();
-        serve(std::io::Cursor::new(input.to_vec()), &mut out);
+        serve(std::io::Cursor::new(input.to_vec()), &mut out, None);
         String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect()
     }
 
@@ -871,7 +963,7 @@ mod tests {
             _ => format!("%{b:02X}"),
         }).collect();
         for uri in [format!("glance://annotations/{doc}"), format!("glance://annotations/{encoded}")] {
-            let out = handle("resources/read", &json!({ "uri": uri })).unwrap().unwrap();
+            let out = handle_in(&home, "resources/read", &json!({ "uri": uri })).unwrap().unwrap();
             let views: Value = serde_json::from_str(out["contents"][0]["text"].as_str().unwrap()).unwrap();
             assert_eq!(views.as_array().unwrap().len(), 1, "{uri}");
             assert_eq!(out["contents"][0]["uri"], uri.as_str());
@@ -881,17 +973,17 @@ mod tests {
             "glance://other/x.md".to_string(),
             format!("glance://annotations/{}%2", home.display()),
         ] {
-            match handle("resources/read", &json!({ "uri": uri })) {
+            match handle_in(&home, "resources/read", &json!({ "uri": uri })) {
                 Some(Err((-32602, _))) => {}
                 other => panic!("{uri}: {other:?}"),
             }
         }
-        assert!(matches!(handle("resources/read", &json!({})), Some(Err((-32602, _)))));
+        assert!(matches!(handle_in(&home, "resources/read", &json!({})), Some(Err((-32602, _)))));
         // The path rules apply here too.
         let env = home.join("x.env");
         std::fs::write(&env, "k=v").unwrap();
         let uri = format!("glance://annotations/{}", env.display());
-        assert!(matches!(handle("resources/read", &json!({ "uri": uri })), Some(Err(_))));
+        assert!(matches!(handle_in(&home, "resources/read", &json!({ "uri": uri })), Some(Err(_))));
     }
 
     #[test]
@@ -914,10 +1006,10 @@ mod tests {
         let via_link = home.join("link/Plan.md").to_string_lossy().into_owned();
         let old_link = legacy(&via_link, "fromlink");
         let old_tilde = legacy("~/link/Plan.md", "fromtilde");
-        let out = call_tool("list_annotations", &json!({ "path": via_link })).unwrap();
+        let out = call_in(&home, "list_annotations", &json!({ "path": via_link })).unwrap();
         assert_eq!(tool_json(&out).as_array().unwrap().len(), 1);
         assert!(!old_link.exists());
-        let out = call_tool("list_annotations", &json!({ "path": "~/link/Plan.md" })).unwrap();
+        let out = call_in(&home, "list_annotations", &json!({ "path": "~/link/Plan.md" })).unwrap();
         let ids: Vec<Value> = tool_json(&out).as_array().unwrap().iter().map(|v| v["id"].clone()).collect();
         assert_eq!(ids, vec![json!("fromlink"), json!("fromtilde")]);
         assert!(!old_tilde.exists());
@@ -929,9 +1021,9 @@ mod tests {
         let home = fresh_home("noop");
         let doc = home.join("doc.md").to_string_lossy().into_owned();
         std::fs::write(&doc, NINE).unwrap();
-        assert!(call_tool("resolve_annotation", &json!({ "path": doc, "id": "zzz" })).unwrap_err().contains("no annotation"));
-        assert!(call_tool("reply_annotation", &json!({ "path": doc, "id": "zzz", "text": "hi" })).unwrap_err().contains("no annotation"));
-        assert!(call_tool("get_annotation", &json!({ "path": doc, "id": "zzz" })).is_err());
+        assert!(call_in(&home, "resolve_annotation", &json!({ "path": doc, "id": "zzz" })).unwrap_err().contains("no annotation"));
+        assert!(call_in(&home, "reply_annotation", &json!({ "path": doc, "id": "zzz", "text": "hi" })).unwrap_err().contains("no annotation"));
+        assert!(call_in(&home, "get_annotation", &json!({ "path": doc, "id": "zzz" })).is_err());
         assert!(!home.join(".glance").exists());
     }
 
@@ -1060,7 +1152,7 @@ mod tests {
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
-const PATH_DESC: &str = "Absolute path (or ~/...) to an existing markdown or text file.";
+const PATH_DESC: &str = "Absolute path (or ~/...) to an existing markdown or text file inside this project (the directory your session started in) or one the user has opened in Glance. Other files are refused.";
 
 fn tool_schemas() -> Value {
     json!([
@@ -1149,22 +1241,41 @@ struct DocPath {
     spelled: String,
 }
 
-/// Validate a tool's `path` (see `canonical_doc_path`) and fold in any store an
-/// older glance-mcp filed under the literal `~/…` spelling.
-fn doc_path_arg(raw: &str) -> Result<DocPath, String> {
-    let (canonical, spelled) = canonical_doc_path(raw)?;
+/// The project this server may work in: its canonical working directory,
+/// which Claude Code sets to the directory the session was launched from.
+/// `None` when that is `/`, `home`, or an ancestor of `home`, which would put
+/// every project and the rest of the home directory in scope.
+fn project_root(cwd: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let root = std::fs::canonicalize(cwd).ok()?;
+    let home = home.map(|h| std::fs::canonicalize(h).unwrap_or_else(|_| h.to_path_buf()));
+    if root.parent().is_none() || home.is_some_and(|h| h.starts_with(&root)) {
+        return None;
+    }
+    Some(root)
+}
+
+/// Validate a tool's `path` (see `canonical_doc_path`), fold in any store an
+/// older glance-mcp filed under the literal `~/…` spelling, and refuse a doc
+/// that is neither inside `root` (see `project_root`) nor opened in Glance.
+/// Without the scope check, quoting and context would read any text file.
+fn doc_path_arg(raw: &str, root: Option<&Path>) -> Result<DocPath, String> {
+    let expanded = expand_doc_path(raw)?;
+    let spelled = expanded.to_string_lossy().into_owned();
     if raw.starts_with('~') {
         adopt_alias_store(raw, &spelled)?;
     }
+    // Scope before existence or type, so a refused path reveals nothing.
+    let in_root = root.is_some_and(|r| Path::new(&doc_key(&spelled)).starts_with(r));
+    if !in_root && !has_store(&spelled) {
+        return Err(format!("Glance only works with documents in this project or ones opened in Glance: {raw}"));
+    }
+    let canonical = canonical_doc_path(raw, &expanded)?;
     Ok(DocPath { canonical, spelled })
 }
 
-/// Resolve a tool's `path` to the doc's canonical path and its `~`-expanded
-/// spelling. A relative path is refused: this server's cwd isn't necessarily
-/// the caller's. Only an existing regular file whose real target (symlinks
-/// followed) has a markdown or text extension is accepted, so the tools can't
-/// be used to read any other file.
-fn canonical_doc_path(raw: &str) -> Result<(String, String), String> {
+/// Expand a leading `~` in a tool's `path`. A relative path is refused: this
+/// server's cwd isn't necessarily the caller's.
+fn expand_doc_path(raw: &str) -> Result<PathBuf, String> {
     let expanded = match raw.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => {
             let home = std::env::var_os("HOME").ok_or("can't expand '~': $HOME is not set")?;
@@ -1175,7 +1286,14 @@ fn canonical_doc_path(raw: &str) -> Result<(String, String), String> {
     if !expanded.is_absolute() {
         return Err(format!("'path' must be absolute (or start with ~/): {raw}"));
     }
-    let target = std::fs::canonicalize(&expanded).map_err(|e| match e.kind() {
+    Ok(expanded)
+}
+
+/// Resolve an expanded tool path to the doc's canonical path. Only an existing
+/// regular file whose real target (symlinks followed) has a markdown or text
+/// extension is accepted, so the tools can't be used to read any other file.
+fn canonical_doc_path(raw: &str, expanded: &Path) -> Result<String, String> {
+    let target = std::fs::canonicalize(expanded).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => format!("no such file: {raw}"),
         _ => format!("can't open {raw}: {e}"),
     })?;
@@ -1189,7 +1307,7 @@ fn canonical_doc_path(raw: &str) -> Result<(String, String), String> {
     if !is_doc {
         return Err(format!("Glance only annotates markdown and text files: {raw}"));
     }
-    Ok((target.to_string_lossy().into_owned(), expanded.to_string_lossy().into_owned()))
+    Ok(target.to_string_lossy().into_owned())
 }
 
 fn read_doc(path: &str) -> Result<String, String> {
@@ -1219,14 +1337,14 @@ fn required_str<'a>(args: &'a Value, key: &str, trim: bool) -> Result<&'a str, S
     v.filter(|s| !s.is_empty()).ok_or_else(|| format!("missing '{key}'"))
 }
 
-fn call_tool(name: &str, args: &Value) -> Result<Value, String> {
+fn call_tool(name: &str, args: &Value, root: Option<&Path>) -> Result<Value, String> {
     if !TOOL_NAMES.contains(&name) {
         return Err(format!("unknown tool '{name}'"));
     }
     if !args.is_object() {
         return Err("'arguments' must be an object".to_string());
     }
-    let doc = doc_path_arg(required_str(args, "path", false)?)?;
+    let doc = doc_path_arg(required_str(args, "path", false)?, root)?;
     let (path, store_path) = (doc.canonical.as_str(), doc.spelled.as_str());
     match name {
         "list_annotations" => {
@@ -1340,7 +1458,7 @@ fn tool_error(message: &str) -> Value {
     json!({ "content": [ { "type": "text", "text": message } ], "isError": true })
 }
 
-fn handle(method: &str, params: &Value) -> Option<Result<Value, (i64, String)>> {
+fn handle(method: &str, params: &Value, root: Option<&Path>) -> Option<Result<Value, (i64, String)>> {
     match method {
         "initialize" => Some(Ok(json!({
             "protocolVersion": PROTOCOL_VERSION,
@@ -1362,14 +1480,14 @@ fn handle(method: &str, params: &Value) -> Option<Result<Value, (i64, String)>> 
                 None | Some(Value::Null) => &empty,
                 Some(a) => a,
             };
-            Some(Ok(call_tool(name, args).unwrap_or_else(|e| tool_error(&e))))
+            Some(Ok(call_tool(name, args, root).unwrap_or_else(|e| tool_error(&e))))
         }
         "resources/list" => Some(Ok(json!({ "resources": [] }))),
         "resources/templates/list" => Some(Ok(json!({
             "resourceTemplates": [ {
                 "uriTemplate": "glance://annotations/{path}",
                 "name": "Glance annotations",
-                "description": "Open annotations for a markdown file.",
+                "description": "Open annotations for a markdown file in this project, or one the user has opened in Glance.",
                 "mimeType": "application/json"
             } ]
         }))),
@@ -1384,7 +1502,7 @@ fn handle(method: &str, params: &Value) -> Option<Result<Value, (i64, String)>> 
                 Ok(r) => r,
                 Err(e) => return Some(Err((-32602, format!("{e}: {uri}")))),
             };
-            let views = match doc_path_arg(&raw).and_then(|doc| {
+            let views = match doc_path_arg(&raw, root).and_then(|doc| {
                 let text = read_doc(&doc.canonical)?;
                 Ok(build_views(&read_store(&doc.spelled)?, &text, Some("open")))
             }) {
@@ -1411,7 +1529,7 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
 /// Answer one JSON-RPC message, or return `None` when nothing may be sent: a
 /// notification (no id), or a response from the client (result or error and
 /// no method), which must not itself be answered.
-fn handle_message(msg: &Value) -> Option<Value> {
+fn handle_message(msg: &Value, root: Option<&Path>) -> Option<Value> {
     let Some(obj) = msg.as_object() else {
         return Some(rpc_error(Value::Null, -32600, "Invalid Request: expected a JSON-RPC object"));
     };
@@ -1424,7 +1542,7 @@ fn handle_message(msg: &Value) -> Option<Value> {
     };
     let empty = json!({});
     let params = obj.get("params").unwrap_or(&empty);
-    let response = handle(method, params);
+    let response = handle(method, params, root);
     let id = id?; // notification: never answered
     Some(match response {
         Some(Ok(result)) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
@@ -1436,7 +1554,7 @@ fn handle_message(msg: &Value) -> Option<Value> {
 /// Answer one line of input. Bytes that aren't UTF-8 or text that isn't JSON
 /// get a -32700 parse error with a null id; a batch (array) gets an array of
 /// the answers to its members, or nothing if all were notifications.
-fn handle_line(bytes: &[u8]) -> Option<Value> {
+fn handle_line(bytes: &[u8], root: Option<&Path>) -> Option<Value> {
     let Ok(line) = std::str::from_utf8(bytes) else {
         return Some(rpc_error(Value::Null, -32700, "Parse error: input is not valid UTF-8"));
     };
@@ -1451,16 +1569,16 @@ fn handle_line(bytes: &[u8]) -> Option<Value> {
     match msg {
         Value::Array(items) if items.is_empty() => Some(rpc_error(Value::Null, -32600, "Invalid Request: empty batch")),
         Value::Array(items) => {
-            let answers: Vec<Value> = items.iter().filter_map(handle_message).collect();
+            let answers: Vec<Value> = items.iter().filter_map(|m| handle_message(m, root)).collect();
             (!answers.is_empty()).then_some(Value::Array(answers))
         }
-        msg => handle_message(&msg),
+        msg => handle_message(&msg, root),
     }
 }
 
 /// Serve newline-delimited JSON-RPC until EOF. Lines are read as bytes so one
 /// bad line is answered with an error instead of ending the server.
-fn serve(mut input: impl BufRead, mut output: impl Write) {
+fn serve(mut input: impl BufRead, mut output: impl Write, root: Option<&Path>) {
     let mut buf = Vec::new();
     loop {
         buf.clear();
@@ -1470,7 +1588,7 @@ fn serve(mut input: impl BufRead, mut output: impl Write) {
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         }
-        if let Some(resp) = handle_line(&buf) {
+        if let Some(resp) = handle_line(&buf, root) {
             let _ = writeln!(output, "{resp}");
             let _ = output.flush();
         }
@@ -1483,5 +1601,7 @@ fn main() {
         run_pending(&argv);
         return;
     }
-    serve(std::io::stdin().lock(), std::io::stdout());
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let root = std::env::current_dir().ok().and_then(|cwd| project_root(&cwd, home.as_deref()));
+    serve(std::io::stdin().lock(), std::io::stdout(), root.as_deref());
 }

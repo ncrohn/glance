@@ -86,6 +86,14 @@ pub fn store_path_for(doc_path: &str) -> Option<PathBuf> {
     store_dir().map(|d| store_file(&d, &doc_key(doc_path)))
 }
 
+/// Whether the doc has a store, under its key or a legacy one. The app creates
+/// one for every doc it opens, so this reads as "opened in Glance".
+pub fn has_store(doc_path: &str) -> bool {
+    let Some(dir) = store_dir() else { return false };
+    let key = doc_key(doc_path);
+    store_file(&dir, &key).exists() || has_legacy_store(&dir, doc_path, &key)
+}
+
 fn has_legacy_store(dir: &Path, doc_path: &str, key: &str) -> bool {
     legacy_keys(doc_path, key).iter().any(|k| store_file(dir, k).exists())
 }
@@ -1151,6 +1159,24 @@ mod tests {
         assert_eq!(ensure_annotation_store(dotted).unwrap(), expected);
         assert!(!old.exists());
         assert_eq!(read_store(&canonical).unwrap().annotations.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn has_store_sees_an_opened_doc_under_any_spelling_and_a_legacy_key() {
+        let home = fresh_home("has-store");
+        let (via_link, canonical) = linked_doc(&home);
+        assert!(!has_store(&canonical));
+        assert!(!has_store(&via_link));
+        ensure_annotation_store(canonical.clone()).unwrap();
+        assert!(has_store(&canonical));
+        assert!(has_store(&via_link));
+
+        let home = fresh_home("has-store-legacy");
+        let (via_link, canonical) = linked_doc(&home);
+        write_legacy(&via_link, &legacy_json(&via_link, &[("t", 1)]));
+        assert!(has_store(&via_link));
+        assert!(!has_store(&canonical)); // the canonical spelling can't name the old key
     }
 
     #[test]
