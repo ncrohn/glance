@@ -4,13 +4,13 @@
 
 use glance_lib::anchor::{resolve_anchor, Annotation, LineHint, Reply};
 use glance_lib::annotations::{
-    adopt_alias_store, apply_reply, doc_key, has_store, mutate_store, now_iso8601, push_annotation, read_store, store_dir, unique_id,
-    AnnotationStore,
+    adopt_alias_store, apply_reply, has_annotations, mutate_store_with_key, now_iso8601, push_annotation, read_store_with_key,
+    store_dir, unique_id, AnnotationStore,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Serialize, PartialEq, Debug)]
 struct AnnotationView {
@@ -295,6 +295,7 @@ fn run_pending(argv: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glance_lib::annotations::{mutate_store, read_store};
 
     fn ann(id: &str, quote: &str, status: &str) -> Annotation {
         Annotation {
@@ -772,7 +773,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn tools_only_reach_docs_in_the_project_or_opened_in_glance() {
+    fn tools_only_reach_docs_in_the_project_or_with_glance_comments() {
         let home = fresh_home("scope");
         let s = |p: &Path| p.to_string_lossy().into_owned();
         let proj = home.join("proj");
@@ -784,13 +785,32 @@ mod tests {
         std::fs::create_dir_all(home.join("other")).unwrap();
         let other = home.join("other/notes.md");
         std::fs::write(&other, NINE).unwrap();
+        // proj/link -> outside/sub, so proj/link/../x is outside/x, not proj/x.
+        std::fs::create_dir_all(home.join("outside/sub")).unwrap();
+        std::fs::write(home.join("outside/exists.md"), NINE).unwrap();
+        std::fs::write(home.join("outside/id_rsa"), "key\n").unwrap();
+        std::os::unix::fs::symlink(home.join("outside/sub"), proj.join("link")).unwrap();
+        std::os::unix::fs::symlink(home.join("outside/gone.md"), proj.join("dangling.md")).unwrap();
 
-        // Inside the project: no store needed.
+        // Inside the project: no store needed. A missing file there is just missing.
         call_in(&proj, "add_annotation", &json!({ "path": s(&inside), "quote": "l5", "note": "n" })).unwrap();
+        let err = call_in(&proj, "list_annotations", &json!({ "path": s(&proj.join("nope.md")) })).unwrap_err();
+        assert!(err.contains("no such file"), "{err}");
 
-        // Outside it with no store: refused before the file is read or a store is made.
-        let refused = "Glance only works with documents in this project or ones opened in Glance";
-        for path in [s(&home.join("secrets.txt")), s(&proj.join("leak.md")), s(&other), "~/secrets.txt".into(), s(&home.join("missing.md"))] {
+        // Outside it with no comments: refused before the file is read or a
+        // store is made, and the same answer whether or not the file exists.
+        let refused = "Glance only works with documents in this project or ones with Glance comments";
+        for path in [
+            s(&home.join("secrets.txt")),
+            s(&proj.join("leak.md")),
+            s(&other),
+            "~/secrets.txt".into(),
+            s(&home.join("missing.md")),
+            s(&proj.join("link/../exists.md")),
+            s(&proj.join("link/../id_rsa")),
+            s(&proj.join("link/../nope.md")),
+            s(&proj.join("dangling.md")),
+        ] {
             for tool in TOOL_NAMES {
                 let args = json!({ "path": path, "id": "x", "quote": "password", "note": "n", "text": "t" });
                 let err = call_in(&proj, tool, &args).unwrap_err();
@@ -804,8 +824,12 @@ mod tests {
             assert!(!glance_lib::annotations::store_path_for(&path.replace('~', &s(&home))).unwrap().exists(), "{path}");
         }
 
-        // Opened in Glance (the app made its store): reachable from any project.
+        // Opened in Glance, which writes an empty store, isn't enough: `mdview`
+        // is open to the agent too. A store holding a comment is.
         glance_lib::annotations::ensure_annotation_store(s(&other)).unwrap();
+        let err = call_in(&proj, "list_annotations", &json!({ "path": s(&other) })).unwrap_err();
+        assert!(err.contains(refused), "{err}");
+        glance_lib::annotations::add_annotation(s(&other), ann("u1", "l7", "open")).unwrap();
         let out = call_in(&proj, "add_annotation", &json!({ "path": s(&other), "quote": "l2", "note": "n" })).unwrap();
         assert_eq!(tool_json(&out)["lineStart"], 2);
         let uri = format!("glance://annotations/{}", s(&other));
@@ -831,6 +855,28 @@ mod tests {
             let doc = line.split(" on ").nth(1).and_then(|r| r.strip_suffix(". Read them with list_annotations before continuing.")).unwrap();
             call_tool("list_annotations", &json!({ "path": doc }), None).unwrap();
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_link_swapped_after_the_scope_check_cant_redirect_the_store() {
+        let home = fresh_home("swap");
+        let proj = home.join("proj");
+        std::fs::create_dir_all(proj.join("a")).unwrap();
+        std::fs::create_dir_all(home.join("outside")).unwrap();
+        std::fs::write(proj.join("a/x.md"), NINE).unwrap();
+        std::fs::write(home.join("outside/x.md"), NINE).unwrap();
+        std::os::unix::fs::symlink(proj.join("a"), proj.join("cur")).unwrap();
+        let raw = proj.join("cur/x.md").to_string_lossy().into_owned();
+        let doc = doc_path_arg(&raw, Some(&std::fs::canonicalize(&proj).unwrap())).unwrap();
+
+        std::fs::remove_file(proj.join("cur")).unwrap();
+        std::os::unix::fs::symlink(home.join("outside"), proj.join("cur")).unwrap();
+        mutate_store_with_key(&doc.spelled, &doc.canonical, |s| s.annotations.push(ann("a", "l2", "open"))).unwrap();
+        let store_of = |p: &Path| glance_lib::annotations::store_path_for(&p.to_string_lossy()).unwrap();
+        assert!(store_of(&proj.join("a/x.md")).exists());
+        assert!(!store_of(&home.join("outside/x.md")).exists());
+        assert_eq!(read_store_with_key(&doc.spelled, &doc.canonical).unwrap().annotations.len(), 1);
     }
 
     fn tools_call(dir: &Path, name: Value, arguments: Value) -> Option<Result<Value, (i64, String)>> {
@@ -1152,7 +1198,7 @@ mod tests {
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
-const PATH_DESC: &str = "Absolute path (or ~/...) to an existing markdown or text file inside this project (the directory your session started in) or one the user has opened in Glance. Other files are refused.";
+const PATH_DESC: &str = "Absolute path (or ~/...) to an existing markdown or text file inside this project (the directory your session started in) or one that already has Glance comments. Other files are refused.";
 
 fn tool_schemas() -> Value {
     json!([
@@ -1233,9 +1279,9 @@ fn tool_schemas() -> Value {
 /// Same list as `TEXT_EXTENSIONS` in commands.rs: the files the app opens.
 const DOC_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd", "mkdn", "mdx", "txt"];
 
-/// A validated tool path: `canonical` is the file to read; `spelled` is the
-/// caller's absolute spelling, which the store layer normalizes to the same
-/// key while still finding a store an older version filed under it.
+/// A validated tool path: `canonical` is the file to read and its store key;
+/// `spelled` is the caller's absolute spelling, used only to find a store an
+/// older version filed under it.
 struct DocPath {
     canonical: String,
     spelled: String,
@@ -1256,21 +1302,79 @@ fn project_root(cwd: &Path, home: Option<&Path>) -> Option<PathBuf> {
 
 /// Validate a tool's `path` (see `canonical_doc_path`), fold in any store an
 /// older glance-mcp filed under the literal `~/…` spelling, and refuse a doc
-/// that is neither inside `root` (see `project_root`) nor opened in Glance.
-/// Without the scope check, quoting and context would read any text file.
+/// that is neither inside `root` (see `project_root`) nor already commented on
+/// in Glance. Without the scope check, quoting and context would read any text
+/// file.
+///
+/// The path is resolved once. The scope check, the read and the store key all
+/// use that one canonical path, so a symlink swapped after the check can't
+/// point the read or the store at another file.
 fn doc_path_arg(raw: &str, root: Option<&Path>) -> Result<DocPath, String> {
     let expanded = expand_doc_path(raw)?;
     let spelled = expanded.to_string_lossy().into_owned();
-    if raw.starts_with('~') {
-        adopt_alias_store(raw, &spelled)?;
+    let resolved = std::fs::canonicalize(&expanded);
+    // Scope before existence or type, so a refused path reveals nothing: a
+    // missing file is placed where the OS would look for it, not lexically.
+    let location = match &resolved {
+        Ok(canonical) => Some(canonical.clone()),
+        Err(_) => missing_location(&expanded),
+    };
+    let key = location.as_ref().map(|l| l.to_string_lossy().into_owned());
+    if let Some(key) = key.as_deref().filter(|_| raw.starts_with('~')) {
+        adopt_alias_store(raw, key)?;
     }
-    // Scope before existence or type, so a refused path reveals nothing.
-    let in_root = root.is_some_and(|r| Path::new(&doc_key(&spelled)).starts_with(r));
-    if !in_root && !has_store(&spelled) {
-        return Err(format!("Glance only works with documents in this project or ones opened in Glance: {raw}"));
+    let in_root = matches!((root, &location), (Some(r), Some(l)) if l.starts_with(r));
+    if !in_root && !key.is_some_and(|k| has_annotations(&spelled, &k)) {
+        return Err(format!("Glance only works with documents in this project or ones with Glance comments: {raw}"));
     }
-    let canonical = canonical_doc_path(raw, &expanded)?;
+    let canonical = canonical_doc_path(raw, resolved)?;
     Ok(DocPath { canonical, spelled })
+}
+
+/// Where a path that doesn't resolve points: symlinks are followed a
+/// component at a time and `..` steps out of the real directory reached so
+/// far, as the OS walks a path, so `proj/link/../x.md` with `link` → `/out/sub`
+/// is `/out/x.md`. The deepest existing ancestor is then canonicalized (for
+/// case) and the missing names appended. `None` on a symlink loop or a link
+/// that can't be read.
+fn missing_location(path: &Path) -> Option<PathBuf> {
+    fn owned(c: Component) -> PathBuf {
+        PathBuf::from(c.as_os_str())
+    }
+    let mut todo: Vec<PathBuf> = path.components().rev().map(owned).collect();
+    let mut real = PathBuf::new();
+    let mut links = 0;
+    while let Some(next) = todo.pop() {
+        match next.components().next() {
+            Some(Component::Normal(name)) => {
+                let candidate = real.join(name);
+                if std::fs::symlink_metadata(&candidate).is_ok_and(|m| m.file_type().is_symlink()) {
+                    links += 1;
+                    if links > 40 {
+                        return None;
+                    }
+                    todo.extend(std::fs::read_link(&candidate).ok()?.components().rev().map(owned));
+                } else {
+                    real = candidate;
+                }
+            }
+            Some(Component::ParentDir) => {
+                real.pop();
+            }
+            Some(Component::RootDir) => real = PathBuf::from("/"),
+            _ => {}
+        }
+    }
+    let mut missing = Vec::new();
+    let mut cur = real.as_path();
+    loop {
+        if let Ok(mut found) = std::fs::canonicalize(cur) {
+            found.extend(missing.iter().rev());
+            return Some(found);
+        }
+        missing.push(cur.file_name()?);
+        cur = cur.parent()?;
+    }
 }
 
 /// Expand a leading `~` in a tool's `path`. A relative path is refused: this
@@ -1289,11 +1393,11 @@ fn expand_doc_path(raw: &str) -> Result<PathBuf, String> {
     Ok(expanded)
 }
 
-/// Resolve an expanded tool path to the doc's canonical path. Only an existing
-/// regular file whose real target (symlinks followed) has a markdown or text
-/// extension is accepted, so the tools can't be used to read any other file.
-fn canonical_doc_path(raw: &str, expanded: &Path) -> Result<String, String> {
-    let target = std::fs::canonicalize(expanded).map_err(|e| match e.kind() {
+/// Check a tool path's canonicalized form. Only an existing regular file whose
+/// real target (symlinks followed) has a markdown or text extension is
+/// accepted, so the tools can't be used to read any other file.
+fn canonical_doc_path(raw: &str, resolved: std::io::Result<PathBuf>) -> Result<String, String> {
+    let target = resolved.map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => format!("no such file: {raw}"),
         _ => format!("can't open {raw}: {e}"),
     })?;
@@ -1345,7 +1449,7 @@ fn call_tool(name: &str, args: &Value, root: Option<&Path>) -> Result<Value, Str
         return Err("'arguments' must be an object".to_string());
     }
     let doc = doc_path_arg(required_str(args, "path", false)?, root)?;
-    let (path, store_path) = (doc.canonical.as_str(), doc.spelled.as_str());
+    let (path, spelled) = (doc.canonical.as_str(), doc.spelled.as_str());
     match name {
         "list_annotations" => {
             let status = str_arg(args, "status")?.unwrap_or("open");
@@ -1353,14 +1457,14 @@ fn call_tool(name: &str, args: &Value, root: Option<&Path>) -> Result<Value, Str
                 return Err(format!("'status' must be one of {}; got '{status}'", STATUS_FILTERS.join(", ")));
             }
             let text = read_doc(path)?;
-            let store = read_store(store_path)?;
+            let store = read_store_with_key(spelled, path)?;
             let views = build_views(&store, &text, Some(status));
             Ok(text_result(serde_json::to_value(views).unwrap()))
         }
         "get_annotation" => {
             let id = required_str(args, "id", false)?;
             let text = read_doc(path)?;
-            let store = read_store(store_path)?;
+            let store = read_store_with_key(spelled, path)?;
             match store.annotations.iter().find(|a| a.id == id) {
                 Some(a) => Ok(text_result(serde_json::to_value(detail_of(a, &text)).unwrap())),
                 None => Err(format!("no annotation '{id}'")),
@@ -1371,7 +1475,7 @@ fn call_tool(name: &str, args: &Value, root: Option<&Path>) -> Result<Value, Str
             let note = str_arg(args, "note")?;
             // Read-modify-write under the shared cross-process lock so a
             // concurrent add/remove from the GUI isn't clobbered.
-            match mutate_store(store_path, |store| apply_resolve(store, id, note))? {
+            match mutate_store_with_key(spelled, path, |store| apply_resolve(store, id, note))? {
                 ResolveOutcome::Resolved => Ok(text_result(json!({ "ok": true, "id": id }))),
                 ResolveOutcome::AlreadyResolved { by, at } => {
                     let who = by.as_deref().unwrap_or("someone");
@@ -1407,7 +1511,7 @@ fn call_tool(name: &str, args: &Value, root: Option<&Path>) -> Result<Value, Str
                     a.line_hint = LineHint { start: s, end: e };
                 }
             }
-            let stored = mutate_store(store_path, |store| {
+            let stored = mutate_store_with_key(spelled, path, |store| {
                 let mut a = a.clone();
                 while store.annotations.iter().any(|b| b.id == a.id) {
                     a.id = unique_id(&a.id);
@@ -1420,7 +1524,7 @@ fn call_tool(name: &str, args: &Value, root: Option<&Path>) -> Result<Value, Str
         "reply_annotation" => {
             let id = required_str(args, "id", false)?;
             let text = required_str(args, "text", true)?;
-            if mutate_store(store_path, |store| apply_claude_reply(store, id, text))? {
+            if mutate_store_with_key(spelled, path, |store| apply_claude_reply(store, id, text))? {
                 Ok(text_result(json!({ "ok": true, "id": id })))
             } else {
                 Err(format!("no annotation '{id}'"))
@@ -1487,7 +1591,7 @@ fn handle(method: &str, params: &Value, root: Option<&Path>) -> Option<Result<Va
             "resourceTemplates": [ {
                 "uriTemplate": "glance://annotations/{path}",
                 "name": "Glance annotations",
-                "description": "Open annotations for a markdown file in this project, or one the user has opened in Glance.",
+                "description": "Open annotations for a markdown file in this project, or one that already has Glance comments.",
                 "mimeType": "application/json"
             } ]
         }))),
@@ -1504,7 +1608,7 @@ fn handle(method: &str, params: &Value, root: Option<&Path>) -> Option<Result<Va
             };
             let views = match doc_path_arg(&raw, root).and_then(|doc| {
                 let text = read_doc(&doc.canonical)?;
-                Ok(build_views(&read_store(&doc.spelled)?, &text, Some("open")))
+                Ok(build_views(&read_store_with_key(&doc.spelled, &doc.canonical)?, &text, Some("open")))
             }) {
                 Ok(v) => v,
                 Err(e) => return Some(Err((-32000, e))),

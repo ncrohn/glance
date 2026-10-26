@@ -86,12 +86,15 @@ pub fn store_path_for(doc_path: &str) -> Option<PathBuf> {
     store_dir().map(|d| store_file(&d, &doc_key(doc_path)))
 }
 
-/// Whether the doc has a store, under its key or a legacy one. The app creates
-/// one for every doc it opens, so this reads as "opened in Glance".
-pub fn has_store(doc_path: &str) -> bool {
+/// Whether the doc's store under `key` (see `doc_key`), or one under a legacy
+/// key of `doc_path`, holds at least one annotation. A bare store says nothing:
+/// the app writes an empty one for every doc it opens. A store that can't be
+/// read or parsed counts as none.
+pub fn has_annotations(doc_path: &str, key: &str) -> bool {
     let Some(dir) = store_dir() else { return false };
-    let key = doc_key(doc_path);
-    store_file(&dir, &key).exists() || has_legacy_store(&dir, doc_path, &key)
+    std::iter::once(key.to_string())
+        .chain(legacy_keys(doc_path, key))
+        .any(|k| read_store_file(&store_file(&dir, &k), key).is_ok_and(|s| !s.annotations.is_empty()))
 }
 
 fn has_legacy_store(dir: &Path, doc_path: &str, key: &str) -> bool {
@@ -108,12 +111,11 @@ fn migrate_legacy(dir: &Path, doc_path: &str, key: &str) -> Result<(), String> {
     migrate_from(dir, key, legacy_keys(doc_path, key))
 }
 
-/// Fold a store filed under `alias`, a spelling that can't be derived from
-/// `doc_path` (glance-mcp once keyed `~/notes.md` literally), into the doc's
-/// store, the same way an upgrade migrates a legacy key.
-pub fn adopt_alias_store(alias: &str, doc_path: &str) -> Result<(), String> {
+/// Fold a store filed under `alias`, a spelling that can't be derived from the
+/// doc's path (glance-mcp once keyed `~/notes.md` literally), into the store
+/// under `key` (see `doc_key`), the same way an upgrade migrates a legacy key.
+pub fn adopt_alias_store(alias: &str, key: &str) -> Result<(), String> {
     let Some(dir) = store_dir() else { return Ok(()) };
-    let key = doc_key(doc_path);
     if alias == key || !store_file(&dir, alias).exists() {
         return Ok(());
     }
@@ -170,7 +172,14 @@ fn merge_store(into: &mut AnnotationStore, from: AnnotationStore) {
 /// took it for "no comments" would show nothing, and a mutation would write the
 /// empty store over every comment in the file.
 pub fn read_store(doc_path: &str) -> Result<AnnotationStore, String> {
-    let key = doc_key(doc_path);
+    read_store_with_key(doc_path, &doc_key(doc_path))
+}
+
+/// `read_store` with the doc's key already resolved by the caller, so the
+/// store read is the one for the file the caller checked. `doc_path` only
+/// names legacy keys to migrate.
+pub fn read_store_with_key(doc_path: &str, key: &str) -> Result<AnnotationStore, String> {
+    let key = key.to_string();
     let Some(dir) = store_dir() else {
         return Ok(AnnotationStore { doc_path: key, ..Default::default() });
     };
@@ -276,12 +285,19 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// store yet it creates no store or lock file either: `f` is first tried on
 /// the empty store without the lock, and only runs again under the lock if it
 /// changed something.
-pub fn mutate_store<T>(
+pub fn mutate_store<T>(doc_path: &str, f: impl FnMut(&mut AnnotationStore) -> T) -> Result<T, String> {
+    mutate_store_with_key(doc_path, &doc_key(doc_path), f)
+}
+
+/// `mutate_store` with the doc's key already resolved by the caller; see
+/// `read_store_with_key`.
+pub fn mutate_store_with_key<T>(
     doc_path: &str,
+    key: &str,
     mut f: impl FnMut(&mut AnnotationStore) -> T,
 ) -> Result<T, String> {
     let dir = store_dir().ok_or_else(|| "Could not determine $HOME for annotation store".to_string())?;
-    let key = doc_key(doc_path);
+    let key = key.to_string();
     let store_path = store_file(&dir, &key);
     if !store_path.exists() && !has_legacy_store(&dir, doc_path, &key) {
         let mut probe = read_store_file(&store_path, &key)?;
@@ -1163,20 +1179,33 @@ mod tests {
 
     #[test]
     #[serial]
-    fn has_store_sees_an_opened_doc_under_any_spelling_and_a_legacy_key() {
-        let home = fresh_home("has-store");
+    fn has_annotations_needs_a_comment_under_any_spelling_or_a_legacy_key() {
+        let home = fresh_home("has-annotations");
         let (via_link, canonical) = linked_doc(&home);
-        assert!(!has_store(&canonical));
-        assert!(!has_store(&via_link));
+        let key = doc_key(&via_link);
+        assert!(!has_annotations(&canonical, &canonical));
+        assert!(!has_annotations(&via_link, &key));
+        // Opening a doc in the app writes an empty store; that isn't a comment.
         ensure_annotation_store(canonical.clone()).unwrap();
-        assert!(has_store(&canonical));
-        assert!(has_store(&via_link));
+        assert!(store_path_for(&canonical).unwrap().exists());
+        assert!(!has_annotations(&canonical, &canonical));
+        add_annotation(canonical.clone(), ann("a")).unwrap();
+        assert!(has_annotations(&canonical, &canonical));
+        assert!(has_annotations(&via_link, &key));
+        remove_annotation(canonical.clone(), "a".into()).unwrap();
+        assert!(!has_annotations(&canonical, &canonical));
 
-        let home = fresh_home("has-store-legacy");
+        // A damaged store counts as none.
+        std::fs::write(store_path_for(&canonical).unwrap(), "{not json").unwrap();
+        assert!(!has_annotations(&canonical, &canonical));
+
+        let home = fresh_home("has-annotations-legacy");
         let (via_link, canonical) = linked_doc(&home);
+        write_legacy(&via_link, &legacy_json(&via_link, &[]));
+        assert!(!has_annotations(&via_link, &canonical));
         write_legacy(&via_link, &legacy_json(&via_link, &[("t", 1)]));
-        assert!(has_store(&via_link));
-        assert!(!has_store(&canonical)); // the canonical spelling can't name the old key
+        assert!(has_annotations(&via_link, &canonical));
+        assert!(!has_annotations(&canonical, &canonical)); // the canonical spelling can't name the old key
     }
 
     #[test]
