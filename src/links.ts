@@ -82,7 +82,12 @@ export function slugify(text: string): string {
  *  TOC generators build it. */
 export function headingSlugs(text: string, checked?: boolean): string[] {
   const slugs = [slugify(text)];
-  if (checked !== undefined) slugs.push(slugify(`[${checked ? "x" : " "}] ${text}`));
+  if (checked !== undefined) {
+    const box = `[${checked ? "x" : " "}] ${text}`;
+    // `## - [x] Ship it` keeps its bullet in the source slug; `*` and `+` slug
+    // away, leaving the same slug as no bullet.
+    slugs.push(slugify(box), slugify(`- ${box}`));
+  }
   return slugs;
 }
 

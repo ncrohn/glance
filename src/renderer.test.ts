@@ -132,6 +132,13 @@ describe("renderMarkdown", () => {
     expect(html).toContain("Not [ ] at start");
   });
 
+  it("renders a heading's box when the heading text starts with a list bullet", () => {
+    const html = renderMarkdown("## - [x] memory — feedback\n\n### * [ ] next\n\n## - not a box");
+    expect(html).toMatch(/<h2[^>]*><input class="task-list-item-checkbox" type="checkbox" disabled checked>memory — feedback<\/h2>/);
+    expect(html).toMatch(/<h3[^>]*><input class="task-list-item-checkbox" type="checkbox" disabled>next<\/h3>/);
+    expect(html).toContain("- not a box");
+  });
+
   it("leaves brackets that aren't a task box alone", () => {
     expect(renderMarkdown("- [y] no\n- [ ]x no")).not.toContain("checkbox");
   });

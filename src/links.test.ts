@@ -56,8 +56,8 @@ describe("slugify", () => {
 
 describe("headingSlugs", () => {
   it("adds the GitHub slug of a checkbox heading's source text", () => {
-    expect(headingSlugs("Ship it", true)).toEqual(["ship-it", "x-ship-it"]);
-    expect(headingSlugs("Ship it", false)).toEqual(["ship-it", "--ship-it"]);
+    expect(headingSlugs("Ship it", true)).toEqual(["ship-it", "x-ship-it", "--x-ship-it"]);
+    expect(headingSlugs("Ship it", false)).toEqual(["ship-it", "--ship-it", "----ship-it"]);
   });
 
   it("returns only the text slug for a plain heading", () => {

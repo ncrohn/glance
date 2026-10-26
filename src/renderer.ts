@@ -34,8 +34,10 @@ const md = new MarkdownIt({
 // GFM task lists: a list item whose paragraph opens with `[ ]`, `[x]` or `[X]`
 // gets a read-only checkbox. An empty `- [ ]` counts, since editors strip the
 // trailing space markdown-it-task-lists required, and so does a tab after it.
-// A heading that opens with a box (`## [ ] Ship it`) gets one too.
+// A heading that opens with a box (`## [ ] Ship it`) gets one too, including
+// one written as a list item (`## - [x] Ship it`); the bullet is dropped.
 const TASK_BOX = /^\[([ xX])\](?=\s|$)/;
+const HEADING_TASK_BOX = /^(?:[-*+][ \t]+)?\[([ xX])\](?=\s|$)/;
 md.core.ruler.after("inline", "task_lists", (state) => {
   const tokens = state.tokens;
   for (let i = 1; i < tokens.length; i++) {
@@ -46,7 +48,7 @@ md.core.ruler.after("inline", "task_lists", (state) => {
       !heading
       && (tokens[i - 1].type !== "paragraph_open" || tokens[i - 2]?.type !== "list_item_open")
     ) continue;
-    const m = TASK_BOX.exec(inline.content);
+    const m = (heading ? HEADING_TASK_BOX : TASK_BOX).exec(inline.content);
     const first = inline.children?.[0];
     if (!m || first?.type !== "text" || !first.content.startsWith(m[0])) continue;
     first.content = first.content.slice(m[0].length).replace(/^[ \t]+/, "");
