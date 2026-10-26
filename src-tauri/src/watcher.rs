@@ -112,7 +112,9 @@ pub fn watch_file(
     path: String,
     app: AppHandle,
     watchers: State<Watchers>,
+    docs: State<crate::commands::OpenDocs>,
 ) -> Result<(), String> {
+    crate::commands::ensure_watchable(&docs, &path)?;
     let mut map = watchers.0.lock().map_err(|e| e.to_string())?;
     if map.contains_key(&path) {
         return Ok(());

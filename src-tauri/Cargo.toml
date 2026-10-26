@@ -31,6 +31,8 @@ tauri-build = { version = "2", features = [] }
 # Serializes tests that mutate the process-global HOME env var so they don't
 # race each other (each points HOME at its own throwaway store dir).
 serial_test = "3"
+# Mock runtime, to check the IPC allowlist against the real capability.
+tauri = { version = "2", features = ["test"] }
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
