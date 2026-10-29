@@ -19,6 +19,12 @@ describe("spliceLines", () => {
     const { start, gap } = appendTarget("para\n");
     expect(spliceLines("para\n", start, 0, "next", gap)).toBe("para\n\nnext\n");
   });
+  it("an emptied fresh block takes no lines, restoring the text", () => {
+    const typed = spliceLines("a\n", 2, 0, "b", true, true);
+    expect(typed).toBe("a\n\nb\n");
+    expect(spliceLines(typed, 2, splicedCount("b", true, true), "", true, true)).toBe("a\n");
+    expect(splicedCount("", true, true)).toBe(0);
+  });
   it("adds no gap for an empty insertion", () => {
     expect(spliceLines("para\n", 2, 0, "", true)).toBe("para\n\n");
   });

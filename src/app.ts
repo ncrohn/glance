@@ -1102,10 +1102,30 @@ function hasStampedInside(el: Element, except?: string): boolean {
   return Array.from(el.querySelectorAll("[data-sourceline]")).some((d) => !except || !d.matches(except));
 }
 
+// A list item's child that is a unit (or holds units) of its own: a nested
+// list, code block, table, or rule. Everything else is the item's own text.
+function isNestedChild(node: Node): boolean {
+  if (!(node instanceof HTMLElement)) return false;
+  return /^(UL|OL)$/.test(node.tagName) || node.matches("[data-sourceline]") || hasStampedInside(node);
+}
+
+// Whether a list item has text of its own, and whether any of it comes after
+// a nested block (then its own lines aren't one run, so it opens whole).
+function itemLayout(li: HTMLElement): { own: boolean; trailing: boolean } {
+  let own = false, trailing = false, nested = false;
+  for (const child of Array.from(li.childNodes)) {
+    if (isNestedChild(child)) { nested = true; continue; }
+    if ((child.textContent ?? "").trim() === "") continue;
+    own = true;
+    if (nested) trailing = true;
+  }
+  return { own, trailing };
+}
+
 function isUnit(el: HTMLElement): boolean {
   if (el.dataset.frontmatterLines || el.tagName === "TR") return true;
-  // A list item owns its text; its nested items are units of their own.
-  if (el.tagName === "LI") return !hasStampedInside(el, "li, ul, ol");
+  // A list item owns its text; nested items and blocks are units of their own.
+  if (el.tagName === "LI") return !hasStampedInside(el, "li, ul, ol") || itemLayout(el).own;
   return !hasStampedInside(el);
 }
 
@@ -1152,8 +1172,8 @@ function unitRange(el: HTMLElement, text: string): { start: number; end: number;
     if (body) return { ...body, code: true };
     if (!/^\s{0,3}(`{3,}|~{3,})/.test(text.split("\n")[start - 1] ?? "")) return { start, end, code: true };
   }
-  if (el.tagName === "LI") {
-    const nested = Array.from(el.querySelectorAll<HTMLElement>("li[data-sourceline]"), (n) => Number(n.dataset.sourceline));
+  if (el.tagName === "LI" && !itemLayout(el).trailing) {
+    const nested = Array.from(el.querySelectorAll<HTMLElement>("[data-sourceline]"), (n) => Number(n.dataset.sourceline));
     if (nested.length) end = Math.min(...nested) - 1;
   }
   return { start, end: start + trimBlankTail(text, start, end - start + 1) - 1, code: false };
@@ -1175,9 +1195,8 @@ function mountInUnit(el: HTMLElement, host: HTMLElement): void {
       return;
     case "LI":
       el.classList.add("block-editing");
-      for (const child of Array.from(el.childNodes)) {
-        if (!(child instanceof HTMLElement && /^(UL|OL)$/.test(child.tagName))) child.remove();
-      }
+      if (itemLayout(el).trailing) { el.replaceChildren(host); return; }
+      for (const child of Array.from(el.childNodes)) if (!isNestedChild(child)) child.remove();
       el.prepend(host);
       return;
     default:
@@ -1332,8 +1351,9 @@ function beginBlockEdit(target: UnitKey | "append", caret: Caret): void {
     onChange: (v) => {
       const d = state.docs.find((x) => x.id === be.docId);
       if (!d || blockEdit !== be) return;
-      const next = spliceLines(toLf(d.editorContent), be.start, be.occupied, v, be.gap);
-      be.occupied = splicedCount(v, be.gap);
+      const fresh = be.origLines === 0;
+      const next = spliceLines(toLf(d.editorContent), be.start, be.occupied, v, be.gap, fresh);
+      be.occupied = splicedCount(v, be.gap, fresh);
       state = updateEditorContent(state, d.id, withEol(next, d.eol));
       refreshTabDirty();
     },
@@ -1410,7 +1430,8 @@ function handleEditClick(e: MouseEvent): void {
           const r = u.getBoundingClientRect();
           return e.clientY >= r.top && e.clientY <= r.bottom;
         }).pop() ?? null;
-        const last = view.lastElementChild;
+        // Gutter chips are appended after the blocks but sit by their lines.
+        const last = Array.from(view.children).filter((c) => !c.classList.contains("anno-gutter-marker")).pop();
         if (!unit && (!last || e.clientY > last.getBoundingClientRect().bottom)) append = true;
       }
       if (unit || append) {

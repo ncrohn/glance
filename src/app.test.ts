@@ -733,3 +733,71 @@ describe("click-to-edit opens the smallest piece", () => {
     expect(await open(q("pre code", "const x"))).toBe("const x = 1;\nconst y = 2;");
   });
 });
+
+describe("click-to-edit edge cases", () => {
+  async function bootWith(text: string) {
+    env.fs.set("/e.md", text);
+    env.launch = ["/e.md"];
+    await boot();
+  }
+  const press = (node: Element, opts: MouseEventInit = {}) => {
+    node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, detail: 1, ...opts }));
+    node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, detail: 1, ...opts }));
+  };
+  async function editorText() {
+    await flush();
+    const { EditorView } = await import("@codemirror/view");
+    const node = document.querySelector(".block-editor .cm-editor");
+    return node ? EditorView.findFromDOM(node as HTMLElement)!.state.doc.toString() : null;
+  }
+  const li = (text: string) =>
+    Array.from(document.querySelectorAll<HTMLElement>("#content .rendered li")).find((e) => e.textContent?.trim().startsWith(text))!;
+
+  it("a click between blocks does nothing even when a gutter chip is last in the view", async () => {
+    await bootWith("One.\n\nTwo.\n");
+    const view = document.querySelector<HTMLElement>("#content .rendered")!;
+    const chip = document.createElement("div");
+    chip.className = "anno-gutter-marker";
+    view.appendChild(chip);
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains("anno-gutter-marker")) return new DOMRect(0, 0, 18, 18);
+      if (this.textContent === "One.") return new DOMRect(0, 0, 100, 100);
+      if (this.textContent === "Two.") return new DOMRect(0, 200, 100, 100);
+      return new DOMRect(0, 0, 100, 300);
+    });
+    press(view, { clientY: 150 });
+    rect.mockRestore();
+    expect(await editorText()).toBeNull();
+  });
+
+  it("a list item holding a code block opens its own line; the code opens on its own", async () => {
+    await bootWith("- item\n  ```\n  code\n  ```\n");
+    press(li("item"));
+    expect(await editorText()).toBe("- item");
+    document.querySelector(".block-editor .cm-content")!
+      .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flush();
+    press(document.querySelector("#content .rendered li pre code")!);
+    expect(await editorText()).toBe("  code");
+  });
+
+  it("a list item with text after its nested list opens whole", async () => {
+    await bootWith("- a\n  - b\n\n  more of a\n");
+    press(li("a"));
+    expect(await editorText()).toBe("- a\n  - b\n\n  more of a");
+  });
+
+  it("a new block typed and then emptied leaves the doc clean", async () => {
+    await bootWith("a\n");
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 100, 100));
+    press(document.getElementById("content")!, { clientY: 500 });
+    rect.mockRestore();
+    await flush();
+    const { EditorView } = await import("@codemirror/view");
+    const v = EditorView.findFromDOM(document.querySelector(".block-editor .cm-editor") as HTMLElement)!;
+    v.dispatch({ changes: { from: 0, insert: "b" } });
+    expect(isDirtyTab("/e.md")).toBe(true);
+    v.dispatch({ changes: { from: 0, to: 1, insert: "" } });
+    expect(isDirtyTab("/e.md")).toBe(false);
+  });
+});

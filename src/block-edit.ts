@@ -8,24 +8,29 @@ export function sliceLines(text: string, start: number, count: number): string {
 
 /** `text` with `count` lines from `start` replaced by `replacement`. A zero
  *  `count` inserts before line `start`; `gap` puts a blank line in front of a
- *  non-empty insertion so it doesn't merge into the block above. */
+ *  non-empty insertion so it doesn't merge into the block above. A `fresh`
+ *  block (one that didn't exist before) takes no lines at all when empty. */
 export function spliceLines(
   text: string,
   start: number,
   count: number,
   replacement: string,
   gap = false,
+  fresh = false,
 ): string {
   const lines = text.split("\n");
-  const insert = replacement.split("\n");
-  if (gap && replacement !== "") insert.unshift("");
-  lines.splice(start - 1, count, ...insert);
+  lines.splice(start - 1, count, ...insertedLines(replacement, gap, fresh));
   return lines.join("\n");
 }
 
-/** Lines `replacement` occupies once spliced in (see spliceLines' `gap`). */
-export function splicedCount(replacement: string, gap = false): number {
-  return replacement.split("\n").length + (gap && replacement !== "" ? 1 : 0);
+/** Lines `replacement` occupies once spliced in (see spliceLines). */
+export function splicedCount(replacement: string, gap = false, fresh = false): number {
+  return insertedLines(replacement, gap, fresh).length;
+}
+
+function insertedLines(replacement: string, gap: boolean, fresh: boolean): string[] {
+  if (replacement === "") return fresh ? [] : [""];
+  return gap ? ["", ...replacement.split("\n")] : replacement.split("\n");
 }
 
 /** Where a new block typed below the last one goes: before a trailing newline,
