@@ -372,7 +372,7 @@ export function renderMarkdown(
   resolveImage?: (src: string) => string | null,
 ): string {
   const { entries, body, lineOffset } = parseFrontmatter(src);
-  const card = entries.length ? frontmatterCard(entries) : "";
+  const card = entries.length ? frontmatterCard(entries, lineOffset) : "";
   const sourceLineCount = src.length
     ? src.replace(/\n$/, "").split("\n").length
     : 0;
@@ -384,7 +384,7 @@ export function renderMarkdown(
 
 // Render parsed frontmatter as a compact key→value card. Labels are muted,
 // scalar values plain, and list values (people/tags/…) become chips.
-function frontmatterCard(entries: FrontmatterEntry[]): string {
+function frontmatterCard(entries: FrontmatterEntry[], lines: number): string {
   const esc = md.utils.escapeHtml;
   const rows = entries
     .map((e) => {
@@ -398,5 +398,7 @@ function frontmatterCard(entries: FrontmatterEntry[]): string {
       )}</span>${value}</div>`;
     })
     .join("");
-  return `<div class="frontmatter-card" aria-label="Document metadata">${rows}</div>`;
+  // data-frontmatter-lines (not data-sourceline) so click-to-edit can find the
+  // fence's lines without the card joining comment anchoring.
+  return `<div class="frontmatter-card" data-frontmatter-lines="${lines}" aria-label="Document metadata">${rows}</div>`;
 }

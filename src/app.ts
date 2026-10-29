@@ -38,7 +38,8 @@ import {
   focusRailCard, parseRailPref,
 } from "./annotation-ui";
 import { annotationIdSelector } from "./annotation-ui";
-import { mountEditor, type EditorHandle } from "./editor";
+import { mountBlockEditor, mountEditor, type BlockEditorHandle, type EditorHandle } from "./editor";
+import { appendTarget, caretInSource, fenceBody, sliceLines, spliceLines, splicedCount, trimBlankTail } from "./block-edit";
 import { decideReload } from "./reload";
 import { restoreTarget, lineAtOffset, offsetForLine, type LineBlock } from "./scroll-restore";
 import { confirmOpenFile, confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker, showWhatsNew } from "./modal";
@@ -85,6 +86,30 @@ let editorDocId: string | null = null;
 // mode opens at the same place instead of the top.
 let pendingTopLine: number | null = null;
 let toolbar: { hide(): void; destroy(): void } | null = null;
+
+// The rendered block being edited in place. It took over source lines `start`
+// onward; `occupied` is how many lines its text fills now (0 for a new block at
+// the end not yet typed into), `origLines` how many it filled when opened.
+// `gap` adds a blank line above a new block.
+interface BlockEdit {
+  docId: string;
+  start: number;
+  occupied: number;
+  origLines: number;
+  gap: boolean;
+  host: HTMLElement;
+  handle: BlockEditorHandle;
+  // The text it opened with and when, to tell a double-click from an edit.
+  initial: string;
+  openedAt: number;
+}
+let blockEdit: BlockEdit | null = null;
+// The rendered view renderContent last built, so click-to-edit only ever acts
+// on the live one.
+let renderedView: HTMLElement | null = null;
+// A mousedown outside the block editor: its mouseup decides what the click
+// means, so the blur that mousedown causes mustn't close the editor first.
+let pointerDown = false;
 let teardownHovers: (() => void) | null = null;
 
 // #content is the scroll container and renderContent() wipes it on every state
@@ -532,14 +557,16 @@ function renderActions(): void {
   host.innerHTML = "";
   const doc = getActive(state);
   if (!doc) return;
-  const seg = el("div", "segmented");
-  const read = el("button", doc.viewMode === "rendered" ? "on" : undefined, "Read");
-  const edit = el("button", doc.viewMode === "source" ? "on" : undefined, "Edit");
-  read.onclick = () => { if (doc.viewMode !== "rendered") switchViewMode(doc.id); };
-  edit.onclick = () => { if (doc.viewMode !== "source") switchViewMode(doc.id); };
-  seg.appendChild(read);
-  seg.appendChild(edit);
-  host.appendChild(seg);
+  // Editing happens in place by clicking a block; ⌘E's whole-file source view
+  // is the escape hatch, and this is the way back out of it.
+  if (doc.viewMode === "source") {
+    const seg = el("div", "segmented");
+    const back = el("button", "on", "Source");
+    back.title = "Back to the formatted view (⌘E)";
+    back.onclick = () => switchViewMode(doc.id);
+    seg.appendChild(back);
+    host.appendChild(seg);
+  }
   if (hasUnreviewedChanges(doc)) {
     const review = el("button", "review-btn", "Mark reviewed");
     review.onclick = () => {
@@ -562,7 +589,14 @@ function renderContent(): void {
     activeEditor.setDark(currentAppearance() === "dark");
     return;
   }
+  // Same for a block being edited, as long as the doc still holds its text
+  // where we left it (a reload from disk may have moved or replaced it).
+  if (blockEdit) {
+    if (doc && blockEditStillFits(doc, blockEdit)) return;
+    dropBlockEdit();
+  }
   if (activeEditor) { activeEditor.destroy(); activeEditor = null; editorDocId = null; }
+  renderedView = null;
   host.innerHTML = "";
   if (toolbar) { toolbar.destroy(); toolbar = null; }
   if (!doc) {
@@ -597,7 +631,7 @@ function renderContent(): void {
     const hint = el("div", "hint");
     hint.innerHTML =
       'Open files with <kbd>mdview &lt;file&gt;</kbd> &nbsp;·&nbsp; ' +
-      'toggle source <kbd>⌘E</kbd> &nbsp;·&nbsp; save <kbd>⌘S</kbd> &nbsp;·&nbsp; ' +
+      'click to edit, whole-file source <kbd>⌘E</kbd> &nbsp;·&nbsp; save <kbd>⌘S</kbd> &nbsp;·&nbsp; ' +
       'comment <kbd>⌘⇧M</kbd>';
     empty.appendChild(hint);
 
@@ -628,6 +662,7 @@ function renderContent(): void {
     editorDocId = doc.id;
   } else {
     const view = el("div", "rendered");
+    renderedView = view;
     view.innerHTML = renderMarkdown(
       doc.editorContent,
       changedLines(doc),
@@ -674,7 +709,8 @@ function redrawComments(id: string): void {
   const doc = getActive(state);
   const view = document.querySelector<HTMLElement>("#content .rendered");
   if (!doc || doc.id !== id || doc.viewMode !== "rendered" || !view) return;
-  highlightComments(view, doc);
+  // Highlighting walks the view's text and would reach into the block editor.
+  if (blockEdit?.docId !== id) highlightComments(view, doc);
   renderRailFor();
 }
 
@@ -746,6 +782,10 @@ function selectAllContent(): void {
   const active = document.activeElement;
   if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
     active.select();
+    return;
+  }
+  if (blockEdit?.handle.hasFocus()) {
+    blockEdit.handle.selectAll();
     return;
   }
   const doc = getActive(state);
@@ -1049,6 +1089,344 @@ async function followWikilink(docPath: string, raw: string): Promise<void> {
   if (link.heading) requestAnimationFrame(() => requestAnimationFrame(() => scrollToHeading(link.heading)));
 }
 
+// ---- Click-to-edit -------------------------------------------------------
+
+// The smallest rendered element a click opens: a paragraph or heading (also one
+// inside a quote), a list item's own text, a table row, a code block's code, a
+// diagram, a rule, or the frontmatter card. Containers (lists, tables, quotes)
+// never open whole; a click on their padding goes to the unit level with it.
+const STAMPED = "[data-sourceline], [data-frontmatter-lines]";
+const NOT_EDITABLE = "a, button, input, textarea, select, mark.anno-highlight, .block-editor";
+
+function hasStampedInside(el: Element, except?: string): boolean {
+  return Array.from(el.querySelectorAll("[data-sourceline]")).some((d) => !except || !d.matches(except));
+}
+
+function isUnit(el: HTMLElement): boolean {
+  if (el.dataset.frontmatterLines || el.tagName === "TR") return true;
+  // A list item owns its text; its nested items are units of their own.
+  if (el.tagName === "LI") return !hasStampedInside(el, "li, ul, ol");
+  return !hasStampedInside(el);
+}
+
+function editUnits(view: HTMLElement): HTMLElement[] {
+  return Array.from(view.querySelectorAll<HTMLElement>(STAMPED)).filter(isUnit);
+}
+
+function unitAt(view: HTMLElement, node: Element, y: number): HTMLElement | null {
+  const el = node.closest<HTMLElement>(STAMPED);
+  if (!el || !view.contains(el)) return null;
+  if (isUnit(el)) return el;
+  const inside = editUnits(el);
+  let best: HTMLElement | null = null;
+  let bestGap = Infinity;
+  for (const u of inside) {
+    const r = u.getBoundingClientRect();
+    const gap = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+    if (gap <= bestGap) { best = u; bestGap = gap; }
+  }
+  return best;
+}
+
+// An element's identity across a redraw: its start line and tag.
+interface UnitKey { line: number; tag: string }
+
+function keyOf(el: HTMLElement): UnitKey {
+  return { line: el.dataset.frontmatterLines ? 0 : Number(el.dataset.sourceline), tag: el.tagName };
+}
+
+function unitFor(view: HTMLElement, key: UnitKey): HTMLElement | null {
+  if (key.line === 0) return view.querySelector<HTMLElement>("[data-frontmatter-lines]");
+  return Array.from(view.querySelectorAll<HTMLElement>(`[data-sourceline="${key.line}"]`))
+    .find((e) => e.tagName === key.tag && isUnit(e)) ?? null;
+}
+
+// The source lines a unit opens (1-based, inclusive), and whether they're code.
+function unitRange(el: HTMLElement, text: string): { start: number; end: number; code: boolean } {
+  const fm = el.dataset.frontmatterLines;
+  if (fm) return { start: 1, end: Number(fm), code: false };
+  const start = Number(el.dataset.sourceline);
+  let end = Number(el.dataset.sourcelineEnd ?? start);
+  if (el.tagName === "PRE") {
+    const body = fenceBody(text, start, end);
+    if (body) return { ...body, code: true };
+    if (!/^\s{0,3}(`{3,}|~{3,})/.test(text.split("\n")[start - 1] ?? "")) return { start, end, code: true };
+  }
+  if (el.tagName === "LI") {
+    const nested = Array.from(el.querySelectorAll<HTMLElement>("li[data-sourceline]"), (n) => Number(n.dataset.sourceline));
+    if (nested.length) end = Math.min(...nested) - 1;
+  }
+  return { start, end: start + trimBlankTail(text, start, end - start + 1) - 1, code: false };
+}
+
+// Put the editor where the unit's content was, so it keeps the unit's spacing
+// and typography. The unit is rebuilt by the render that closes the editor.
+function mountInUnit(el: HTMLElement, host: HTMLElement): void {
+  switch (el.tagName) {
+    case "TR": {
+      const td = document.createElement("td");
+      td.colSpan = Math.max(el.children.length, 1);
+      td.appendChild(host);
+      el.replaceChildren(td);
+      return;
+    }
+    case "HR":
+      el.replaceWith(host);
+      return;
+    case "LI":
+      el.classList.add("block-editing");
+      for (const child of Array.from(el.childNodes)) {
+        if (!(child instanceof HTMLElement && /^(UL|OL)$/.test(child.tagName))) child.remove();
+      }
+      el.prepend(host);
+      return;
+    default:
+      if (el.dataset.frontmatterLines || el.querySelector(".mermaid-diagram, .mermaid-error, pre.mermaid-block")) {
+        host.classList.add("raw");
+      }
+      el.replaceChildren(host);
+  }
+}
+
+// The rendered text from the start of `el` up to the point clicked.
+function textBefore(el: Element, x: number, y: number): string {
+  const caret = document.caretRangeFromPoint?.(x, y);
+  if (!caret || !el.contains(caret.startContainer)) return el.textContent ?? "";
+  const r = document.createRange();
+  r.setStart(el, 0);
+  r.setEnd(caret.startContainer, caret.startOffset);
+  return r.toString();
+}
+
+function blockEditText(be: BlockEdit): string {
+  const text = be.handle.text();
+  return be.gap && text !== "" ? `\n${text}` : text;
+}
+
+function blockEditStillFits(doc: Doc, be: BlockEdit): boolean {
+  if (doc.id !== be.docId || doc.viewMode !== "rendered" || !be.host.isConnected) return false;
+  const want = be.occupied === 0 ? "" : blockEditText(be);
+  return sliceLines(toLf(doc.editorContent), be.start, be.occupied) === want;
+}
+
+// The view still shows the text from before the open edit, so lines below the
+// unit being edited are stale by however many lines the edit added or removed.
+function currentLine(line: number, be: BlockEdit | null): number {
+  if (!be) return line;
+  const origEnd = be.start + be.origLines - 1;
+  return line > origEnd ? line + be.occupied - be.origLines : line;
+}
+
+// Close the editor without redrawing; the doc already holds every keystroke.
+function dropBlockEdit(): void {
+  const be = blockEdit;
+  if (!be) return;
+  blockEdit = null;
+  be.handle.destroy();
+  be.host.remove();
+  // Typing doesn't re-resolve comment anchors, so they catch up here.
+  const doc = state.docs.find((d) => d.id === be.docId);
+  if (doc) void catchUpResolutions(doc.absPath).then((fresh) => { if (fresh) redrawComments(be.docId); });
+}
+
+// Close the editor and show the unit formatted again. An editor no longer on
+// the page was already swept away by a newer render, which mustn't be undone.
+function finishBlockEdit(): void {
+  if (!blockEdit) return;
+  const live = blockEdit.host.isConnected;
+  dropBlockEdit();
+  if (live) render();
+}
+
+// A point in the rendered text, kept as (unit line, tag, text offset) so it can
+// be found again after a redraw rebuilds every node.
+interface TextPoint { line: number; tag: string; offset: number }
+
+function textPoint(view: HTMLElement, node: Node, offset: number): TextPoint | null {
+  const el = (node instanceof Element ? node : node.parentElement)?.closest<HTMLElement>("[data-sourceline]");
+  if (!el || !view.contains(el) || el.closest(".block-editor")) return null;
+  const r = document.createRange();
+  r.setStart(el, 0);
+  r.setEnd(node, offset);
+  return { line: Number(el.dataset.sourceline), tag: el.tagName, offset: r.toString().length };
+}
+
+function nodeAt(view: HTMLElement, p: TextPoint): [Node, number] | null {
+  const el = Array.from(view.querySelectorAll<HTMLElement>(`[data-sourceline="${p.line}"]`)).find((e) => e.tagName === p.tag);
+  if (!el) return null;
+  const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let left = p.offset;
+  let last: Text | null = null;
+  for (let n = walk.nextNode() as Text | null; n; n = walk.nextNode() as Text | null) {
+    if (left <= n.data.length) return [n, left];
+    left -= n.data.length;
+    last = n;
+  }
+  return last ? [last, last.data.length] : [el, 0];
+}
+
+// Close the editor but keep a selection the user just made elsewhere in the
+// view, so it can still be commented on.
+function finishKeepingSelection(view: HTMLElement): void {
+  const be = blockEdit;
+  const sel = window.getSelection();
+  const a = sel?.anchorNode ? textPoint(view, sel.anchorNode, sel.anchorOffset) : null;
+  const f = sel?.focusNode ? textPoint(view, sel.focusNode, sel.focusOffset) : null;
+  finishBlockEdit();
+  const fresh = renderedView;
+  if (!a || !f || !fresh || !sel) return;
+  const an = nodeAt(fresh, { ...a, line: currentLine(a.line, be) });
+  const fn = nodeAt(fresh, { ...f, line: currentLine(f.line, be) });
+  if (an && fn) sel.setBaseAndExtent(an[0], an[1], fn[0], fn[1]);
+}
+
+// Select the word under (x, y) in the rendered view.
+function selectWordAt(x: number, y: number): void {
+  const caret = document.caretRangeFromPoint?.(x, y);
+  const node = caret?.startContainer;
+  if (!caret || !(node instanceof Text)) return;
+  const word = /[\p{L}\p{N}_'’]/u;
+  let from = caret.startOffset;
+  let to = caret.startOffset;
+  while (from > 0 && word.test(node.data[from - 1])) from--;
+  while (to < node.data.length && word.test(node.data[to])) to++;
+  if (to > from) window.getSelection()?.setBaseAndExtent(node, from, node, to);
+}
+
+type Caret = { before: string } | "start" | "end";
+
+function beginBlockEdit(target: UnitKey | "append", caret: Caret): void {
+  const doc = getActive(state);
+  const view = renderedView;
+  if (!doc || doc.viewMode !== "rendered" || !view?.isConnected) return;
+  const text = toLf(doc.editorContent);
+  const host = el("div", "block-editor");
+  let start: number, occupied: number, gap = false, code = false;
+  if (target === "append") {
+    ({ start, gap } = appendTarget(text));
+    occupied = 0;
+    view.appendChild(host);
+  } else {
+    const unit = unitFor(view, target);
+    if (!unit) return;
+    const r = unitRange(unit, text);
+    start = r.start;
+    occupied = r.end - r.start + 1;
+    code = r.code;
+    mountInUnit(unit, host);
+  }
+  const src = occupied ? sliceLines(text, start, occupied) : "";
+  const cursor = caret === "end" ? src.length
+    : caret === "start" ? (code ? 0 : caretInSource(src, ""))
+    : caretInSource(src, caret.before);
+  toolbar?.hide();
+  const be: BlockEdit = {
+    docId: doc.id, start, occupied, origLines: occupied, gap, host, initial: src, openedAt: performance.now(),
+    handle: null as unknown as BlockEditorHandle,
+  };
+  blockEdit = be;
+  be.handle = mountBlockEditor(host, src, {
+    dark: currentAppearance() === "dark",
+    lang: code ? "plain" : "markdown",
+    cursor,
+    onChange: (v) => {
+      const d = state.docs.find((x) => x.id === be.docId);
+      if (!d || blockEdit !== be) return;
+      const next = spliceLines(toLf(d.editorContent), be.start, be.occupied, v, be.gap);
+      be.occupied = splicedCount(v, be.gap);
+      state = updateEditorContent(state, d.id, withEol(next, d.eol));
+      refreshTabDirty();
+    },
+    onExit: (via) => {
+      if (via === "escape") { finishBlockEdit(); return; }
+      const lines = be.handle.text().split("\n").length;
+      const first = be.start + (be.gap && be.handle.text() !== "" ? 1 : 0);
+      const last = first + lines - 1;
+      finishBlockEdit();
+      const fresh = renderedView;
+      const d = getActive(state);
+      if (!fresh || !d) return;
+      const now = toLf(d.editorContent);
+      const ranged = editUnits(fresh).map((u) => ({ u, r: unitRange(u, now) }));
+      const next = via === "up"
+        ? ranged.filter((x) => x.r.end < first).pop()
+        : ranged.find((x) => x.r.start > last);
+      if (next) beginBlockEdit(keyOf(next.u), via === "up" ? "end" : "start");
+    },
+    onBlur: () => {
+      // Leaving the window keeps the editor open; a click elsewhere is handled
+      // by its mouseup. Anything else (Tab, a modal taking focus) closes it.
+      setTimeout(() => {
+        if (blockEdit !== be || pointerDown || !document.hasFocus() || be.handle.hasFocus()) return;
+        finishBlockEdit();
+      }, 0);
+    },
+  });
+}
+
+// A double-click opens the unit on its first click. If nothing was typed yet,
+// the second click undoes that and selects the word instead, as it would on
+// plain text, so double-click-to-comment still works.
+function handleEditMouseDown(e: MouseEvent): void {
+  const be = blockEdit;
+  if (!be) return;
+  const target = e.target as Node;
+  if (!be.host.contains(target)) { pointerDown = true; return; }
+  if (e.detail < 2 || be.handle.text() !== be.initial || performance.now() - be.openedAt > 1000) return;
+  e.preventDefault();
+  e.stopPropagation();
+  finishBlockEdit();
+  selectWordAt(e.clientX, e.clientY);
+}
+
+function handleEditClick(e: MouseEvent): void {
+  const wasDown = pointerDown;
+  pointerDown = false;
+  if (e.button !== 0) return;
+  const target = e.target as Element | null;
+  const be = blockEdit;
+  if (!target || be?.host.contains(target)) return;
+  const doc = getActive(state);
+  const content = document.getElementById("content");
+  const view = renderedView?.isConnected ? renderedView : null;
+  const sel = window.getSelection();
+  const selected = !!sel && !sel.isCollapsed;
+  if (doc?.viewMode === "rendered" && view && content?.contains(target)) {
+    // A drag or double/triple-click selection is for commenting, not editing.
+    if (selected) {
+      if (be && wasDown) finishKeepingSelection(view);
+      return;
+    }
+    if (e.detail === 1 && !target.closest(NOT_EDITABLE) && !target.closest(".comment-hint")) {
+      let unit: HTMLElement | null = null;
+      let append = false;
+      if (view.contains(target) && target !== view) {
+        unit = unitAt(view, target, e.clientY);
+      } else {
+        // The margins and the space below: the unit level with the click, or a
+        // new block at the end.
+        const units = editUnits(view);
+        unit = units.filter((u) => {
+          const r = u.getBoundingClientRect();
+          return e.clientY >= r.top && e.clientY <= r.bottom;
+        }).pop() ?? null;
+        const last = view.lastElementChild;
+        if (!unit && (!last || e.clientY > last.getBoundingClientRect().bottom)) append = true;
+      }
+      if (unit || append) {
+        const before = unit ? (target === view || !unit.contains(target) ? unit.textContent ?? "" : textBefore(unit, e.clientX, e.clientY)) : "";
+        const key = unit ? keyOf(unit) : null;
+        if (key && key.line) key.line = currentLine(key.line, be);
+        if (be) finishBlockEdit();
+        beginBlockEdit(key ?? "append", { before });
+        return;
+      }
+    }
+  }
+  // Defer, so a link clicked on the way out still gets its click event.
+  if (be && wasDown) setTimeout(() => { if (blockEdit === be) finishBlockEdit(); }, 0);
+}
+
 function renderedBlocks(content: HTMLElement): LineBlock[] {
   const view = content.querySelector(".rendered");
   if (!view) return [];
@@ -1061,6 +1439,7 @@ function renderedBlocks(content: HTMLElement): LineBlock[] {
 }
 
 function switchViewMode(id: string): void {
+  dropBlockEdit();
   const content = document.getElementById("content");
   pendingTopLine = activeEditor
     ? activeEditor.topLine()
@@ -1111,6 +1490,8 @@ export async function start(): Promise<void> {
   if (grip && railEl) mountRailResizer(grip, railEl, (w) => localStorage.setItem(LS_RAIL_W, String(w)));
 
   document.addEventListener("click", handleLinkClick);
+  document.addEventListener("mousedown", handleEditMouseDown, true);
+  document.addEventListener("mouseup", handleEditClick);
   await onOpenFile((absPath) => {
     void openPath(absPath).catch((err) => showNotice(`Couldn't open ${absPath}: ${err}`, false));
   });
@@ -1154,7 +1535,7 @@ export async function start(): Promise<void> {
     if (e.metaKey && e.shiftKey && (e.key === "m" || e.key === "M")) {
       e.preventDefault();
       const doc = getActive(state);
-      if (doc && doc.viewMode === "rendered") { toolbar?.hide(); startComment(doc.absPath); }
+      if (doc && doc.viewMode === "rendered" && !blockEdit) { toolbar?.hide(); startComment(doc.absPath); }
     }
   });
   let toRestore: unknown = [];

@@ -584,6 +584,12 @@ export function fabPosition(
 const FAB_FALLBACK_SIZE = { width: 96, height: 26 };
 
 /** Show a floating "Comment" button whenever the user has text selected in the view. */
+// A selection inside a block being edited is source text, not commentable.
+function inBlockEditor(node: Node | null): boolean {
+  const e = node instanceof Element ? node : node?.parentElement;
+  return !!e?.closest(".block-editor");
+}
+
 export function mountSelectionToolbar(
   renderedEl: HTMLElement,
   onComment: () => void,
@@ -612,7 +618,7 @@ export function mountSelectionToolbar(
   };
   const place = () => {
     const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || sel.rangeCount === 0 || !renderedEl.contains(sel.anchorNode)) {
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0 || !renderedEl.contains(sel.anchorNode) || inBlockEditor(sel.anchorNode)) {
       hide();
       return;
     }
