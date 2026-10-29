@@ -558,3 +558,246 @@ describe("opening files", () => {
     expect(toastText()).toContain("a.md changed on disk but can't be read");
   });
 });
+
+describe("click a block to edit its markdown in place", () => {
+  const doc = "# Title\n\nFirst para.\n\n- one\n- two\n\nLast para.\n";
+
+  function press(node: Element, opts: MouseEventInit = {}) {
+    node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0, detail: 1, ...opts }));
+    node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0, detail: 1, ...opts }));
+  }
+  const block = (text: string) =>
+    Array.from(document.querySelectorAll<HTMLElement>("#content .rendered [data-sourceline]"))
+      .filter((e) => e.textContent?.includes(text)).pop()!;
+  async function blockView() {
+    const { EditorView } = await import("@codemirror/view");
+    const node = document.querySelector(".block-editor .cm-editor");
+    return node ? EditorView.findFromDOM(node as HTMLElement) : null;
+  }
+  const escape = async () => {
+    document.querySelector(".block-editor .cm-content")!
+      .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flush();
+  };
+  const renderedText = () => document.querySelector("#content .rendered")?.textContent ?? "";
+
+  beforeEach(async () => {
+    env.fs.set("/a.md", doc);
+    env.launch = ["/a.md"];
+    await boot();
+  });
+
+  it("has no Read/Edit switch; only the clicked block shows its markdown", async () => {
+    expect(document.querySelector("#titlebar-actions .segmented")).toBeNull();
+    press(block("First para."));
+    await flush();
+    expect((await blockView())!.state.doc.toString()).toBe("First para.");
+    expect(renderedText()).toContain("Title");
+    expect(renderedText()).toContain("Last para.");
+  });
+
+  it("typing edits the doc; Esc shows the result formatted", async () => {
+    press(block("First para."));
+    await flush();
+    const v = (await blockView())!;
+    v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: "**Bold** para\nsecond line" } });
+    expect(isDirtyTab("/a.md")).toBe(true);
+    await escape();
+    expect(document.querySelector(".block-editor")).toBeNull();
+    expect(document.querySelector("#content .rendered strong")?.textContent).toBe("Bold");
+    await emit("menu-save");
+    expect(env.fs.get("/a.md")).toBe("# Title\n\n**Bold** para\nsecond line\n\n- one\n- two\n\nLast para.\n");
+  });
+
+  it("Cmd+S keeps the block editor open", async () => {
+    press(block("First para."));
+    await flush();
+    const v1 = (await blockView())!;
+    v1.dispatch({ changes: { from: 0, insert: "X" } });
+    await emit("menu-save");
+    expect(env.fs.get("/a.md")).toContain("XFirst para.");
+    expect(await blockView()).toBe(v1);
+  });
+
+  it("a list item edits on its own", async () => {
+    press(block("two"));
+    await flush();
+    expect((await blockView())!.state.doc.toString()).toBe("- two");
+  });
+
+  it("the editor opens inside the element it replaces, keeping its type", async () => {
+    press(block("Title"));
+    await flush();
+    expect(document.querySelector("#content h1 > .block-editor")).not.toBeNull();
+    expect((await blockView())!.state.doc.toString()).toBe("# Title");
+  });
+
+  it("a double-click selects instead of editing", async () => {
+    press(block("First para."));
+    await flush();
+    const inEditor = document.querySelector(".block-editor .cm-content")!;
+    inEditor.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, detail: 2 }));
+    await flush();
+    expect(document.querySelector(".block-editor")).toBeNull();
+    expect(isDirtyTab("/a.md")).toBe(false);
+  });
+
+  it("selecting text elsewhere closes the editor and keeps the selection", async () => {
+    press(block("First para."));
+    await flush();
+    const last = block("Last para.");
+    last.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, detail: 1 }));
+    const text = last.firstChild as Text;
+    window.getSelection()!.setBaseAndExtent(text, 0, text, 4);
+    last.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, detail: 1 }));
+    await flush();
+    expect(document.querySelector(".block-editor")).toBeNull();
+    expect(window.getSelection()!.toString()).toBe("Last");
+    expect(block("Last para.").contains(window.getSelection()!.anchorNode)).toBe(true);
+  });
+
+  it("clicking another block moves the editor there, past lines the edit added", async () => {
+    press(block("First para."));
+    await flush();
+    const v = (await blockView())!;
+    v.dispatch({ changes: { from: v.state.doc.length, insert: "\nmore\nlines" } });
+    press(block("Last para."));
+    await flush();
+    expect((await blockView())!.state.doc.toString()).toBe("Last para.");
+    expect(renderedText()).toContain("more");
+  });
+
+  it("clicking below the last block starts a new one", async () => {
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 100, 100));
+    press(document.getElementById("content")!, { clientY: 500 });
+    rect.mockRestore();
+    await flush();
+    const v = (await blockView())!;
+    expect(v.state.doc.toString()).toBe("");
+    v.dispatch({ changes: { from: 0, insert: "New para." } });
+    await escape();
+    await emit("menu-save");
+    expect(env.fs.get("/a.md")).toBe(doc + "\nNew para.\n");
+  });
+});
+
+describe("click-to-edit keeps line endings", () => {
+  it("a CRLF file stays CRLF", async () => {
+    env.fs.set("/w.md", "one\r\n\r\ntwo\r\n");
+    env.launch = ["/w.md"];
+    await boot();
+    const p = Array.from(document.querySelectorAll("#content .rendered p")).find((e) => e.textContent === "two")!;
+    p.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, detail: 1 }));
+    p.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, detail: 1 }));
+    await flush();
+    const { EditorView } = await import("@codemirror/view");
+    const v = EditorView.findFromDOM(document.querySelector(".block-editor .cm-editor") as HTMLElement)!;
+    v.dispatch({ changes: { from: v.state.doc.length, insert: "\nthree" } });
+    await emit("menu-save");
+    expect(env.fs.get("/w.md")).toBe("one\r\n\r\ntwo\r\nthree\r\n");
+  });
+});
+
+describe("click-to-edit opens the smallest piece", () => {
+  const doc = [
+    "- outer", "  - inner", "", "> quote one", ">", "> quote two", "",
+    "| A | B |", "| - | - |", "| a | 1 |", "| b | 2 |", "",
+    "```ts", "const x = 1;", "const y = 2;", "```", "",
+  ].join("\n");
+  const open = async (node: Element) => {
+    node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, detail: 1 }));
+    node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, detail: 1 }));
+    await flush();
+    const { EditorView } = await import("@codemirror/view");
+    return EditorView.findFromDOM(document.querySelector(".block-editor .cm-editor") as HTMLElement)!.state.doc.toString();
+  };
+  const q = (sel: string, text: string) =>
+    Array.from(document.querySelectorAll(`#content .rendered ${sel}`)).find((e) => e.textContent?.includes(text))!;
+
+  beforeEach(async () => {
+    env.fs.set("/s.md", doc);
+    env.launch = ["/s.md"];
+    await boot();
+  });
+
+  it("a list item with nested items opens just its own line", async () => {
+    expect(await open(q("li", "outer").firstChild!.parentElement!)).toBe("- outer");
+  });
+  it("a quote opens one paragraph at a time", async () => {
+    expect(await open(q("blockquote p", "quote two"))).toBe("> quote two");
+  });
+  it("a table opens one row", async () => {
+    expect(await open(q("td", "b"))).toBe("| b | 2 |");
+  });
+  it("a code block opens just its code, between the fences", async () => {
+    expect(await open(q("pre code", "const x"))).toBe("const x = 1;\nconst y = 2;");
+  });
+});
+
+describe("click-to-edit edge cases", () => {
+  async function bootWith(text: string) {
+    env.fs.set("/e.md", text);
+    env.launch = ["/e.md"];
+    await boot();
+  }
+  const press = (node: Element, opts: MouseEventInit = {}) => {
+    node.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, detail: 1, ...opts }));
+    node.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, detail: 1, ...opts }));
+  };
+  async function editorText() {
+    await flush();
+    const { EditorView } = await import("@codemirror/view");
+    const node = document.querySelector(".block-editor .cm-editor");
+    return node ? EditorView.findFromDOM(node as HTMLElement)!.state.doc.toString() : null;
+  }
+  const li = (text: string) =>
+    Array.from(document.querySelectorAll<HTMLElement>("#content .rendered li")).find((e) => e.textContent?.trim().startsWith(text))!;
+
+  it("a click between blocks does nothing even when a gutter chip is last in the view", async () => {
+    await bootWith("One.\n\nTwo.\n");
+    const view = document.querySelector<HTMLElement>("#content .rendered")!;
+    const chip = document.createElement("div");
+    chip.className = "anno-gutter-marker";
+    view.appendChild(chip);
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains("anno-gutter-marker")) return new DOMRect(0, 0, 18, 18);
+      if (this.textContent === "One.") return new DOMRect(0, 0, 100, 100);
+      if (this.textContent === "Two.") return new DOMRect(0, 200, 100, 100);
+      return new DOMRect(0, 0, 100, 300);
+    });
+    press(view, { clientY: 150 });
+    rect.mockRestore();
+    expect(await editorText()).toBeNull();
+  });
+
+  it("a list item holding a code block opens its own line; the code opens on its own", async () => {
+    await bootWith("- item\n  ```\n  code\n  ```\n");
+    press(li("item"));
+    expect(await editorText()).toBe("- item");
+    document.querySelector(".block-editor .cm-content")!
+      .dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flush();
+    press(document.querySelector("#content .rendered li pre code")!);
+    expect(await editorText()).toBe("  code");
+  });
+
+  it("a list item with text after its nested list opens whole", async () => {
+    await bootWith("- a\n  - b\n\n  more of a\n");
+    press(li("a"));
+    expect(await editorText()).toBe("- a\n  - b\n\n  more of a");
+  });
+
+  it("a new block typed and then emptied leaves the doc clean", async () => {
+    await bootWith("a\n");
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 100, 100));
+    press(document.getElementById("content")!, { clientY: 500 });
+    rect.mockRestore();
+    await flush();
+    const { EditorView } = await import("@codemirror/view");
+    const v = EditorView.findFromDOM(document.querySelector(".block-editor .cm-editor") as HTMLElement)!;
+    v.dispatch({ changes: { from: 0, insert: "b" } });
+    expect(isDirtyTab("/e.md")).toBe(true);
+    v.dispatch({ changes: { from: 0, to: 1, insert: "" } });
+    expect(isDirtyTab("/e.md")).toBe(false);
+  });
+});

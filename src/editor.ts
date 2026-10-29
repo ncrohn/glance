@@ -119,6 +119,95 @@ export function mountEditor(
   };
 }
 
+// The in-place editor a rendered block turns into when clicked. It sits inside
+// the block's own element and takes that element's typography (a heading stays
+// heading-sized, body text stays in the body face), so opening a block only
+// reveals its markdown symbols instead of reflowing it into a code box.
+const blockTheme = EditorView.theme({
+  "&": { backgroundColor: "transparent", color: "inherit", fontSize: "inherit" },
+  "&.cm-focused": { outline: "none" },
+  ".cm-scroller": { fontFamily: "inherit", fontSize: "inherit", lineHeight: "inherit", overflow: "visible" },
+  ".cm-content": { padding: "0", caretColor: "var(--accent)", fontFamily: "inherit" },
+  ".cm-line": { padding: "0" },
+  ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--accent)", borderLeftWidth: "2px" },
+  "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
+    backgroundColor: "var(--selection)",
+  },
+});
+
+// Markdown symbols are dimmed rather than colored, so the text still reads as
+// the rendered block; inline styles mirror what rendering gives them.
+const blockHighlight = HighlightStyle.define([
+  { tag: t.processingInstruction, color: "var(--faint)" },
+  { tag: t.strong, fontWeight: "600" },
+  { tag: t.emphasis, fontStyle: "italic" },
+  { tag: t.strikethrough, textDecoration: "line-through" },
+  { tag: t.monospace, fontFamily: "var(--font-mono)", fontSize: "0.86em", color: "var(--accent)" },
+  { tag: t.link, color: "var(--accent)" },
+  { tag: t.url, color: "var(--faint)" },
+]);
+
+export interface BlockEditorOptions {
+  dark: boolean;
+  /** "plain" for code, whose text isn't markdown. */
+  lang: "markdown" | "plain";
+  /** Source offset to put the caret at. */
+  cursor: number;
+  onChange: (v: string) => void;
+  /** Esc, or an arrow key pressed past the first/last line. */
+  onExit: (via: "escape" | "up" | "down") => void;
+  onBlur: () => void;
+}
+
+export function mountBlockEditor(host: HTMLElement, initial: string, opts: BlockEditorOptions): BlockEditorHandle {
+  const atEdge = (view: EditorView, dir: "up" | "down") => {
+    const sel = view.state.selection.main;
+    if (!sel.empty) return false;
+    // Only leave from the first/last visual row, so wrapped lines still move.
+    const row = view.moveToLineBoundary(sel, dir === "down", true).head;
+    return dir === "up" ? row === 0 : row === view.state.doc.length;
+  };
+  const view = new EditorView({
+    parent: host,
+    state: EditorState.create({
+      doc: initial,
+      selection: { anchor: Math.min(Math.max(opts.cursor, 0), initial.length) },
+      extensions: [
+        history(),
+        keymap.of([
+          { key: "Escape", run: () => { opts.onExit("escape"); return true; } },
+          { key: "ArrowUp", run: (v) => { if (!atEdge(v, "up")) return false; opts.onExit("up"); return true; } },
+          { key: "ArrowDown", run: (v) => { if (!atEdge(v, "down")) return false; opts.onExit("down"); return true; } },
+          ...defaultKeymap,
+          ...historyKeymap,
+        ]),
+        opts.lang === "markdown" ? [markdown(), syntaxHighlighting(blockHighlight)] : [],
+        EditorView.lineWrapping,
+        blockTheme,
+        EditorView.theme({}, { dark: opts.dark }),
+        EditorView.updateListener.of((u) => {
+          if (u.docChanged) opts.onChange(u.state.doc.toString());
+        }),
+        EditorView.domEventHandlers({ blur: () => { opts.onBlur(); } }),
+      ],
+    }),
+  });
+  view.focus();
+  return {
+    destroy: () => view.destroy(),
+    text: () => view.state.doc.toString(),
+    selectAll: () => { view.focus(); selectAll(view); },
+    hasFocus: () => view.hasFocus,
+  };
+}
+
+export interface BlockEditorHandle {
+  destroy(): void;
+  text(): string;
+  selectAll(): void;
+  hasFocus(): boolean;
+}
+
 export interface EditorHandle {
   destroy(): void;
   /** Replace the text (an outside change), keeping selection and undo history. */

@@ -1611,3 +1611,19 @@ body.rail-resizing #rail { transition: none; }
   cursor: pointer;
 }
 .review-btn:hover { background: var(--accent); color: var(--bg); }
+
+/* ---- Click-to-edit block editor --------------------------------------- */
+/* The editor sits inside the unit it opened and inherits its type; only the
+   markdown symbols appear (dimmed). Code, diagrams and frontmatter show their
+   source in the code face. */
+.rendered [data-sourceline], .rendered [data-frontmatter-lines] { cursor: text; }
+.rendered li.block-editing { list-style: none; }
+.rendered li.block-editing > .block-editor { margin-left: -1.1em; }
+.rendered pre > .block-editor,
+.block-editor.raw {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+.block-editor.raw { white-space: pre-wrap; }
