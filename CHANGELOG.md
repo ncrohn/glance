@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0
+
+Click to edit, right in the formatted view.
+
+- Click any block to edit its markdown in place. Esc or a click elsewhere puts it back.
+- Arrow keys move between blocks. Click below the last one to add another.
+- Drag or double-click to select text for comments, as before.
+- ⌘E opens the whole file as source.
+
 ## 0.10.1
 
 Two display fixes.
