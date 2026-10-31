@@ -436,9 +436,9 @@ export function showAbout(version: string): void {
   // system browser instead of navigating (and replacing) the app webview.
   const link = document.createElement("a");
   link.className = "about-link";
-  link.href = "https://escapementlab.com";
-  link.textContent = "escapementlab.com";
-  link.onclick = (e) => { e.preventDefault(); void openExternal("https://escapementlab.com"); };
+  link.href = "https://escapementlabs.dev";
+  link.textContent = "escapementlabs.dev";
+  link.onclick = (e) => { e.preventDefault(); void openExternal("https://escapementlabs.dev"); };
 
   m.body.append(icon, name, tagline, ver, meta, link);
 
