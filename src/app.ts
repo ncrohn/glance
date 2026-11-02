@@ -31,6 +31,7 @@ import { showToast } from "./toast";
 import { applyRailWidth, mountRailResizer, parseRailWidth } from "./rail-resize";
 import { sectionFor, shouldShowWhatsNew } from "./whats-new";
 import { isCheckDue, isNewer, parseRelease } from "./update-check";
+import { isMissingManifest } from "./update-check";
 import changelog from "../CHANGELOG.md?raw";
 import { diffActivity, activityMessage } from "./activity";
 import {
@@ -44,6 +45,7 @@ import { decideReload } from "./reload";
 import { restoreTarget, lineAtOffset, offsetForLine, type LineBlock } from "./scroll-restore";
 import { confirmOpenFile, confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker, showWhatsNew } from "./modal";
 import { showUpdateAvailable, showUpToDate } from "./modal";
+import { showUpdateProgress } from "./modal";
 import { fetchLatestRelease, onCheckForUpdates } from "./ipc";
 import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
@@ -1032,7 +1034,9 @@ let quitting = false;
 // Cmd+Q / the window's close button. Walks the dirty docs one at a time
 // (showing each), and quits only if every one was saved or let go.
 async function requestQuit(): Promise<void> {
-  if (quitting) return;
+  // An update in progress restarts Glance itself; a second unsaved prompt
+  // racing it would only get in the way.
+  if (quitting || installing) return;
   quitting = true;
   try {
     if (!(await settleAllUnsaved())) return;
@@ -1732,64 +1736,115 @@ export async function start(): Promise<void> {
 // toast replaced by another one shows again next launch.
 async function checkForUpdates(manual: boolean): Promise<void> {
   if (!manual && !isCheckDue(localStorage.getItem(LS_UPDATE_CHECKED), Date.now())) return;
-  let update: AppUpdate | null;
+  let found: AppUpdate | null;
   try {
-    update = await checkForAppUpdate();
-  } catch {
-    // No signed manifest to update from, so point at the release page instead.
-    return checkForReleasePage(manual);
+    found = await checkForAppUpdate();
+  } catch (err) {
+    // No signed manifest for this Mac is expected for older releases; anything
+    // else is a broken update worth naming when someone asked.
+    const note = isMissingManifest(err) ? undefined : `Automatic update failed: ${errorText(err)}`;
+    return checkForReleasePage(manual, note);
   }
-  const markChecked = () => localStorage.setItem(LS_UPDATE_CHECKED, String(Date.now()));
-  if (!update) {
-    markChecked();
+  if (!found) {
+    markUpdateChecked();
     if (manual) showUpToDate(await appVersion().catch(() => ""));
     return;
   }
-  const found = update;
+  const u = adoptUpdate(found);
   if (manual) {
-    markChecked();
-    showUpdateAvailable(found.currentVersion, found.version, "", () => { void installUpdate(found); });
+    markUpdateChecked();
+    showUpdateAvailable(u.currentVersion, u.version, { onUpdate: () => { void installUpdate(); } });
     return;
   }
   // The launch check downloads quietly and only asks once the update is ready.
-  try { await found.download(); } catch { return; }
-  downloadedUpdate = found;
-  showToast(`Glance ${found.version} is ready.`, {
+  try { await downloadUpdate(); } catch { return; }
+  showUpdateReady(u.version);
+}
+
+const markUpdateChecked = () => localStorage.setItem(LS_UPDATE_CHECKED, String(Date.now()));
+const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+// The newest update found and its download. One at a time: a later check for
+// the same version reuses it (and a finished download), and a replaced one is
+// closed so its bytes don't sit on the Rust side.
+let pending: { handle: AppUpdate; download: Promise<void> | null } | null = null;
+let onDownloadProgress: ((done: number, total?: number) => void) | null = null;
+let installing = false;
+
+function adoptUpdate(found: AppUpdate): AppUpdate {
+  if (pending?.handle.version === found.version) {
+    void found.close().catch(() => {});
+    return pending.handle;
+  }
+  if (pending) void pending.handle.close().catch(() => {});
+  pending = { handle: found, download: null };
+  return found;
+}
+
+// Start the download, or join the one already running or finished.
+function downloadUpdate(): Promise<void> {
+  const p = pending;
+  if (!p) return Promise.reject(new Error("No update to download"));
+  p.download ??= p.handle.download((done, total) => onDownloadProgress?.(done, total)).catch((err) => {
+    p.download = null;
+    throw err;
+  });
+  return p.download;
+}
+
+function showUpdateReady(version: string): void {
+  showToast(`Glance ${version} is ready.`, {
     actionLabel: "Restart to update",
-    onAction: () => { markChecked(); void installUpdate(found); },
-    onExpire: markChecked,
+    onAction: () => {
+      markUpdateChecked();
+      // Cancelled at the unsaved prompt: offer it again rather than lose it.
+      void installUpdate().then((went) => { if (!went) showUpdateReady(version); });
+    },
+    onExpire: markUpdateChecked,
     ms: UPDATE_TOAST_MS,
   });
 }
 
-// The update a launch check already downloaded, so installing skips the fetch.
-let downloadedUpdate: AppUpdate | null = null;
-let installing = false;
-
-// Unsaved edits get the same Save / Don't Save / Cancel as quitting, then the
-// update replaces the app and Glance starts again on the new version.
-async function installUpdate(update: AppUpdate): Promise<void> {
-  if (installing) return;
+// Unsaved edits get the same Save / Don't Save / Cancel as quitting. Then a
+// blocking progress modal stays up through download, install and restart, so
+// nothing new can be typed and lost. False only when the prompt was cancelled.
+async function installUpdate(): Promise<boolean> {
+  const p = pending;
+  if (!p || installing || quitting) return true;
   installing = true;
+  let progress: ReturnType<typeof showUpdateProgress> | null = null;
   try {
-    if (!(await settleAllUnsaved())) return;
-    if (downloadedUpdate !== update) {
-      showToast(`Downloading Glance ${update.version}…`, { ms: UPDATE_TOAST_MS });
-      await update.download();
-      downloadedUpdate = update;
+    if (!(await settleAllUnsaved())) return false;
+    progress = showUpdateProgress(p.handle.version);
+    const shown = progress;
+    onDownloadProgress = (done, total) => {
+      shown.set(total ? `Downloading… ${Math.floor((done / total) * 100)}%` : "Downloading…");
+    };
+    await downloadUpdate();
+    progress.set("Installing…");
+    await p.handle.install();
+    progress.close();
+    progress = null;
+    // The restart skips the quit prompt, so check once more right before it.
+    if (!(await settleAllUnsaved())) {
+      showNotice(`Glance ${p.handle.version} is installed and starts the next time you open Glance.`);
+      return true;
     }
-    await update.install();
     await relaunchApp();
+    return true;
   } catch (err) {
-    showNotice(`Couldn't install the update. ${err instanceof Error ? err.message : err}`, false);
+    progress?.close();
+    showNotice(`Couldn't install the update. ${errorText(err)}`, false);
+    return true;
   } finally {
+    onDownloadProgress = null;
     installing = false;
   }
 }
 
 // The check before auto-update: compare with GitHub's latest release and link
-// to its page.
-async function checkForReleasePage(manual: boolean): Promise<void> {
+// to its page. `note` explains why the in-place update wasn't used.
+async function checkForReleasePage(manual: boolean, note?: string): Promise<void> {
   let current = "";
   let release = null;
   try {
@@ -1797,21 +1852,20 @@ async function checkForReleasePage(manual: boolean): Promise<void> {
     release = parseRelease(await fetchLatestRelease());
     if (!release) throw new Error("GitHub didn't return a usable release");
   } catch (err) {
-    if (manual) showNotice(`Couldn't check for updates. ${err instanceof Error ? err.message : err}`, false);
+    if (manual) showNotice(`Couldn't check for updates. ${note ?? errorText(err)}`, false);
     return;
   }
-  const markChecked = () => localStorage.setItem(LS_UPDATE_CHECKED, String(Date.now()));
   const { version, url } = release;
   if (!isNewer(version, current)) {
-    markChecked();
-    if (manual) showUpToDate(current);
+    markUpdateChecked();
+    if (manual) showUpToDate(current, note);
     return;
   }
-  if (manual) { markChecked(); showUpdateAvailable(current, version, url); return; }
+  if (manual) { markUpdateChecked(); showUpdateAvailable(current, version, { url, note }); return; }
   showToast(`Glance ${version} is available.`, {
     actionLabel: "Details",
-    onAction: () => { markChecked(); showUpdateAvailable(current, version, url); },
-    onExpire: markChecked,
+    onAction: () => { markUpdateChecked(); showUpdateAvailable(current, version, { url }); },
+    onExpire: markUpdateChecked,
     ms: ERROR_TOAST_MS,
   });
 }

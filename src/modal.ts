@@ -496,8 +496,14 @@ export function showWhatsNew(version: string, html: string, onClose: () => void)
 /** A newer release is on GitHub. Download opens the release page; Homebrew
  *  installs get the upgrade command instead. */
 // With `onUpdate` the update installs in place; without it (no signed update
-// for this Mac) the modal links to the release page and the Homebrew command.
-export function showUpdateAvailable(current: string, latest: string, url: string, onUpdate?: () => void): void {
+// for this Mac) the modal links to `url` and the Homebrew command. `note` says
+// why the in-place update wasn't available, when that was unexpected.
+export function showUpdateAvailable(
+  current: string,
+  latest: string,
+  opts: { url?: string; onUpdate?: () => void; note?: string },
+): void {
+  const { url = "", onUpdate, note } = opts;
   const m = openModal({ title: "", onEscape: () => m.close() });
   m.card.classList.add("update");
   m.card.querySelector(".modal-title")?.remove();
@@ -527,6 +533,13 @@ export function showUpdateAvailable(current: string, latest: string, url: string
   titles.append(name, versions);
   head.append(icon, titles);
   m.card.insertBefore(head, m.body);
+
+  if (note) {
+    const why = document.createElement("p");
+    why.className = "update-label";
+    why.textContent = note;
+    m.body.appendChild(why);
+  }
 
   if (onUpdate) {
     const msg = document.createElement("p");
@@ -572,15 +585,36 @@ export function showUpdateAvailable(current: string, latest: string, url: string
   download.focus();
 }
 
-export function showUpToDate(version: string): void {
+export function showUpToDate(version: string, note?: string): void {
   const m = openModal({ title: "You're up to date", onEscape: () => m.close() });
   const msg = document.createElement("p");
   msg.textContent = `Glance ${version} is the latest version.`;
   m.body.appendChild(msg);
+  if (note) {
+    const why = document.createElement("p");
+    why.className = "update-label";
+    why.textContent = note;
+    m.body.appendChild(why);
+  }
   const okBtn = button("OK", true);
   okBtn.onclick = m.close;
   m.footer.appendChild(okBtn);
   okBtn.focus();
+}
+
+// Shown from the moment an update starts until Glance restarts. It has no
+// buttons and ignores Escape, and it takes focus from the editor, so nothing
+// can be typed into a document the restart would then throw away.
+export function showUpdateProgress(version: string): { set(text: string): void; close(): void } {
+  const m = openModal({ title: `Updating to Glance ${version}`, decision: true });
+  const msg = document.createElement("p");
+  msg.className = "update-progress";
+  msg.textContent = "Downloading…";
+  m.body.appendChild(msg);
+  m.overlay.tabIndex = -1;
+  (document.activeElement as HTMLElement | null)?.blur?.();
+  m.overlay.focus();
+  return { set: (text) => { msg.textContent = text; }, close: m.close };
 }
 
 // Asked before a link hands a file that might be a program (.command, .app, a

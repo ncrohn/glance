@@ -215,8 +215,11 @@ export async function fetchLatestRelease(): Promise<unknown> {
 export interface AppUpdate {
   version: string;
   currentVersion: string;
-  download(): Promise<void>;
+  /** `onProgress` gets bytes so far and the total, when the server sends one. */
+  download(onProgress?: (done: number, total?: number) => void): Promise<void>;
   install(): Promise<void>;
+  /** Free the update (and any downloaded bytes) on the Rust side. */
+  close(): Promise<void>;
 }
 
 // Null when the release manifest names no newer version. Throws when there is
@@ -228,8 +231,16 @@ export async function checkForAppUpdate(): Promise<AppUpdate | null> {
   return {
     version: u.version,
     currentVersion: u.currentVersion,
-    download: () => u.download(),
+    download: (onProgress) => {
+      let done = 0;
+      let total: number | undefined;
+      return u.download((e) => {
+        if (e.event === "Started") total = e.data.contentLength;
+        else if (e.event === "Progress") { done += e.data.chunkLength; onProgress?.(done, total); }
+      });
+    },
     install: () => u.install(),
+    close: () => u.close(),
   };
 }
 

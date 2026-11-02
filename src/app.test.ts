@@ -18,7 +18,10 @@ const env = {
   watched: [] as string[],
   unwatched: [] as string[],
   storeGate: null as null | Promise<void>,
-  update: null as null | "no-manifest" | { version: string; currentVersion: string; download(): Promise<void>; install(): Promise<void> },
+  update: null as null | "no-manifest" | "broken" | {
+    version: string; currentVersion: string;
+    download(cb?: (done: number, total?: number) => void): Promise<void>; install(): Promise<void>; close(): Promise<void>;
+  },
   latestRelease: null as unknown,
   version: "0.0.0-test",
 };
@@ -79,7 +82,8 @@ vi.mock("./ipc", () => ({
   onShowAbout: on("x2"), onShowWhatsNew: on("x3"), onShowTheme: on("x4"),
   onCheckForUpdates: on("check-for-updates"), fetchLatestRelease: async () => env.latestRelease,
   checkForAppUpdate: async () => {
-    if (env.update === "no-manifest") throw new Error("no manifest");
+    if (env.update === "no-manifest") throw new Error("Could not fetch a valid release JSON from the remote");
+    if (env.update === "broken") throw new Error("invalid type: expected a string");
     return env.update;
   },
   relaunchApp: async () => { env.calls.push("relaunch"); },
@@ -860,11 +864,12 @@ describe("find in file", () => {
 });
 
 describe("auto-update", () => {
-  function fakeUpdate(version = "9.9.9") {
+  function fakeUpdate(version = "9.9.9", onInstall?: () => Promise<void>) {
     return {
       version, currentVersion: "0.0.0-test",
       download: async () => { env.calls.push(`download ${version}`); },
-      install: async () => { env.calls.push(`install ${version}`); },
+      install: async () => { env.calls.push(`install ${version}`); await onInstall?.(); },
+      close: async () => { env.calls.push(`close ${version}`); },
     };
   }
   const toastAction = () => document.querySelector<HTMLButtonElement>(".toast-action");
@@ -899,6 +904,64 @@ describe("auto-update", () => {
     await emit("check-for-updates");
     await click("Update and Restart");
     expect(env.calls).toEqual(["download 9.9.9", "install 9.9.9", "relaunch"]);
+  });
+
+  it("Cancel at the unsaved prompt brings the ready message back", async () => {
+    env.fs.set("/a.md", "hello\n");
+    env.launch = ["/a.md"];
+    env.update = fakeUpdate();
+    await boot();
+    await type("UNSAVED ");
+    toastAction()!.click();
+    await flush();
+    await click("Cancel");
+    expect(document.querySelector(".toast-text")?.textContent).toBe("Glance 9.9.9 is ready.");
+  });
+
+  it("a menu check after the launch download reuses it", async () => {
+    env.update = fakeUpdate();
+    await boot();
+    env.update = fakeUpdate();
+    await emit("check-for-updates");
+    await click("Update and Restart");
+    expect(env.calls).toEqual(["download 9.9.9", "close 9.9.9", "install 9.9.9", "relaunch"]);
+  });
+
+  it("edits that slip in before the restart are asked about again", async () => {
+    env.fs.set("/a.md", "hello\n");
+    env.launch = ["/a.md"];
+    env.update = fakeUpdate("9.9.9", () => type("LATE "));
+    await boot();
+    toastAction()!.click();
+    await flush();
+    await flush(); // the fake install's typing switches to Edit first
+    expect(modalText()).toContain("Save changes");
+    await click("Cancel");
+    expect(env.calls).not.toContain("relaunch");
+    expect(modalText()).toContain("starts the next time you open Glance");
+  });
+
+  it("quitting while an update installs doesn't start a second prompt", async () => {
+    let finish!: () => void;
+    env.update = fakeUpdate("9.9.9", () => new Promise<void>((r) => { finish = r; }));
+    await boot();
+    toastAction()!.click();
+    await flush();
+    await emit("quit-requested");
+    expect(env.calls).not.toContain("quit");
+    finish();
+    await flush();
+    expect(env.calls).toContain("relaunch");
+  });
+
+  it("names a broken manifest instead of hiding it", async () => {
+    localStorage.setItem("glance.updateCheckedAt", String(Date.now()));
+    env.update = "broken";
+    env.version = "0.1.0";
+    env.latestRelease = { tag_name: "v9.9.9", html_url: "https://github.com/ncrohn/glance/releases/tag/v9.9.9" };
+    await boot();
+    await emit("check-for-updates");
+    expect(modalText()).toContain("Automatic update failed: invalid type");
   });
 
   it("with no signed manifest, falls back to the release page", async () => {

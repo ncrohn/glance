@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CHECK_INTERVAL_MS, isCheckDue, isNewer, parseRelease } from "./update-check";
+import { CHECK_INTERVAL_MS, isCheckDue, isNewer, parseRelease, isMissingManifest } from "./update-check";
 
 describe("isNewer", () => {
   it("compares each part numerically", () => {
@@ -67,5 +67,16 @@ describe("isCheckDue", () => {
 
   it("is due when the clock moved backwards", () => {
     expect(isCheckDue(String(now + 60_000), now)).toBe(true);
+  });
+});
+
+describe("isMissingManifest", () => {
+  it("is true for a release without latest.json or without this Mac's build", () => {
+    expect(isMissingManifest(new Error("Could not fetch a valid release JSON from the remote"))).toBe(true);
+    expect(isMissingManifest("the platform `darwin-x86_64` was not found in the response `platforms` object")).toBe(true);
+  });
+
+  it("is false for anything else", () => {
+    expect(isMissingManifest(new Error("invalid type: expected a string"))).toBe(false);
   });
 });
