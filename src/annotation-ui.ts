@@ -499,11 +499,8 @@ function placeGutterMarker(
   placed: PlacedMarker[],
   onActivate?: (id: string) => void,
 ): void {
-  const top = anchorEl.getBoundingClientRect().top - renderedEl.getBoundingClientRect().top;
-  let lane = 0;
-  for (const p of placed) {
-    if (Math.abs(p.top - top) < SAME_ROW_PX) lane = Math.max(lane, p.lane + 1);
-  }
+  const top = topWithin(renderedEl, anchorEl);
+  const lane = laneFor(top, placed);
 
   const chip = el("span", "anno-gutter-marker", markerLabel(marker.number));
   if (anchor === "drifted") chip.classList.add("drifted");
@@ -513,7 +510,39 @@ function placeGutterMarker(
   chip.style.top = `${top}px`;
   chip.onclick = (e) => { e.stopPropagation(); onActivate?.(id); };
   renderedEl.appendChild(chip);
+  markerAnchors.set(chip, anchorEl);
   placed.push({ top, lane, chip });
+}
+
+// Each marker's anchor, so `relayoutGutterMarkers` can re-measure without
+// re-highlighting (which would replace text nodes and drop a selection).
+const markerAnchors = new WeakMap<HTMLElement, HTMLElement>();
+
+function topWithin(renderedEl: HTMLElement, anchorEl: HTMLElement): number {
+  return anchorEl.getBoundingClientRect().top - renderedEl.getBoundingClientRect().top;
+}
+
+function laneFor(top: number, placed: PlacedMarker[]): number {
+  let lane = 0;
+  for (const p of placed) {
+    if (Math.abs(p.top - top) < SAME_ROW_PX) lane = Math.max(lane, p.lane + 1);
+  }
+  return lane;
+}
+
+/** Re-place the gutter markers after the text re-wraps (reading width, window
+ *  or rail resize, a late-loading image). Marker tops are pixel offsets
+ *  measured at render, so they go stale whenever the layout moves. */
+export function relayoutGutterMarkers(renderedEl: HTMLElement): void {
+  const placed: PlacedMarker[] = [];
+  renderedEl.querySelectorAll<HTMLElement>(".anno-gutter-marker").forEach((chip) => {
+    const anchorEl = markerAnchors.get(chip);
+    if (!anchorEl?.isConnected) return;
+    const top = topWithin(renderedEl, anchorEl);
+    chip.style.top = `${top}px`;
+    placed.push({ top, lane: laneFor(top, placed), chip });
+  });
+  layoutGutterLanes(renderedEl, placed);
 }
 
 /** Left offset of each lane on a row of `count` markers. Lanes start 14px in

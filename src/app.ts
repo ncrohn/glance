@@ -39,6 +39,7 @@ import {
   focusRailCard, parseRailPref,
 } from "./annotation-ui";
 import { annotationIdSelector } from "./annotation-ui";
+import { relayoutGutterMarkers } from "./annotation-ui";
 import { mountBlockEditor, mountEditor, type BlockEditorHandle, type EditorHandle } from "./editor";
 import { appendTarget, caretInSource, fenceBody, sliceLines, spliceLines, splicedCount, trimBlankTail } from "./block-edit";
 import { decideReload } from "./reload";
@@ -676,6 +677,7 @@ function renderContent(): void {
   } else {
     const view = el("div", "rendered");
     renderedView = view;
+    observeColumn(view);
     view.innerHTML = renderMarkdown(
       doc.editorContent,
       changedLines(doc),
@@ -1638,6 +1640,22 @@ function changeTheme(pref: ThemePref): void {
 // block can break out to fill it (see block-expand.ts + styles.css). Tracks the
 // pane, not the window, so it stays correct when the annotation rail (a sibling
 // of #content) opens and shrinks the pane.
+// Gutter markers are placed in px at render, so move them whenever the text
+// column changes size: a reading-width change, a window or rail resize, or an
+// image or diagram finishing late. Only the markers move; the highlights stay.
+let columnObserver: ResizeObserver | null = null;
+
+function observeColumn(view: HTMLElement): void {
+  columnObserver ??= new ResizeObserver((entries) => {
+    for (const e of entries) {
+      const el = e.target as HTMLElement;
+      if (el.isConnected) relayoutGutterMarkers(el);
+    }
+  });
+  columnObserver.disconnect();
+  columnObserver.observe(view);
+}
+
 function trackPaneWidth(): void {
   const content = document.getElementById("content");
   if (!content) return;

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { annotationIdSelector, focusRailCard, linkAnnotationHovers } from "./annotation-ui";
+import { annotationIdSelector, applyHighlights, assignMarkers, focusRailCard, linkAnnotationHovers, relayoutGutterMarkers } from "./annotation-ui";
+import type { Annotation } from "./annotations";
 
 const ids = ['a"b', "c\\d", "e]f", "line\nbreak", "plain"];
 
@@ -43,5 +44,36 @@ describe.each([
     mark.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
     expect(c.classList.contains("anno-emphasis")).toBe(true);
     unlink();
+  });
+});
+
+describe("relayoutGutterMarkers", () => {
+  it("moves a marker to its quote's new position after the text re-wraps", () => {
+    const rendered = document.createElement("div");
+    rendered.innerHTML = '<p data-sourceline="1">alpha beta gamma</p>';
+    document.body.appendChild(rendered);
+    const a: Annotation = {
+      id: "n1", number: 1, quote: "beta", prefix: "alpha ", suffix: " gamma",
+      lineHint: { start: 1, end: 1 }, note: "", status: "open", author: "user", createdAt: "",
+    };
+    const res = { n1: { id: "n1", startLine: 1, endLine: 1, anchor: "exact" as const } };
+
+    let markTop = 120;
+    const rectAt = (top: number) => ({ top, bottom: top, left: 0, right: 0, width: 0, height: 0, x: 0, y: top, toJSON() {} });
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return rectAt(this.matches("mark.anno-highlight") ? markTop : 0) as DOMRect;
+    });
+
+    applyHighlights(rendered, [a], res, assignMarkers([a], res));
+    const chip = rendered.querySelector<HTMLElement>(".anno-gutter-marker")!;
+    expect(chip.style.top).toBe("120px");
+
+    markTop = 48; // a wider column: the quote now sits higher
+    relayoutGutterMarkers(rendered);
+    expect(chip.style.top).toBe("48px");
+    expect(rendered.querySelectorAll("mark.anno-highlight")).toHaveLength(1);
+
+    vi.restoreAllMocks();
+    rendered.remove();
   });
 });
