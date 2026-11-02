@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.0
+
+Find in a file, updates that install themselves, and two new themes.
+
+- ⌘F finds text in the open file, formatted or in ⌘E source. ⌘G and ⇧⌘G step through the matches.
+- From this version on, Glance downloads new releases in the background and asks you to restart when one is ready. Glance → Check for Updates… can install one right away.
+- Unsaved changes are asked about before any update restarts Glance.
+- Two new themes, Mesa Pop Light and Mesa Pop Dark, in the Escapement Labs colors.
+- Button labels are easier to read in the dark themes.
+
 ## 0.11.0
 
 Click to edit, right in the formatted view.
