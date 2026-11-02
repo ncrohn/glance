@@ -59,6 +59,13 @@
 @font-face { font-family: "Atkinson Hyperlegible"; font-style: italic; font-weight: 400; font-display: swap; src: url("./assets/fonts/atkinson-italic.woff2") format("woff2"); }
 @font-face { font-family: "Atkinson Hyperlegible"; font-style: normal; font-weight: 700; font-display: swap; src: url("./assets/fonts/atkinson-700.woff2") format("woff2"); }
 
+@font-face { font-family: "Bricolage Grotesque"; font-style: normal; font-weight: 200 800; font-display: swap; src: url("./assets/fonts/bricolage-grotesque-latin-wght.woff2") format("woff2"); }
+@font-face { font-family: "DM Sans"; font-style: normal; font-weight: 100 1000; font-display: swap; src: url("./assets/fonts/dm-sans-latin-wght.woff2") format("woff2"); }
+@font-face { font-family: "DM Sans"; font-style: italic; font-weight: 100 1000; font-display: swap; src: url("./assets/fonts/dm-sans-latin-wght-italic.woff2") format("woff2"); }
+@font-face { font-family: "DM Mono"; font-style: normal; font-weight: 400; font-display: swap; src: url("./assets/fonts/dm-mono-400.woff2") format("woff2"); }
+/* DM Mono tops out at 500; let bold code use it rather than a synthesized bold. */
+@font-face { font-family: "DM Mono"; font-style: normal; font-weight: 500 700; font-display: swap; src: url("./assets/fonts/dm-mono-500.woff2") format("woff2"); }
+
 /* ============================================================================
    Themes
    Every theme is a palette (the same variable names) plus a `--code-*` syntax
@@ -309,6 +316,88 @@
   --anno-6: #85b9ec;
   --anno-tint: 22%;
   --anno-tint-hover: 36%;
+  --anno-chip-ink: var(--bg);
+}
+
+/* ---- Mesa Pop Light — Escapement Labs brand ---------------------------- */
+:root[data-theme="mesa-pop-light"] {
+  color-scheme: light;
+  --font-display: "Bricolage Grotesque", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-body: "DM Sans", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-ui: "DM Sans", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-mono: "DM Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --bg: #fff6e8;
+  --bg-grad-a: #fff9f0;
+  --bg-grad-b: #fbebd2;
+  --surface: #fffcf6;
+  --raised: #fbebd2;
+  --border: #efdcc0;
+  --border-soft: #f6e8d3;
+  --ink: #22181c;
+  --ink-soft: #5a4a50;
+  --muted: #86727a;
+  --faint: #bca8ae;
+  --accent: #c2401b;
+  --accent-bright: #e4572e;
+  --accent-tint: rgba(228, 87, 46, 0.1);
+  --accent-line: rgba(228, 87, 46, 0.34);
+  --shadow: 0 1px 2px rgba(42, 27, 51, 0.06), 0 10px 30px rgba(42, 27, 51, 0.08);
+  --selection: rgba(255, 194, 71, 0.45);
+  --code-keyword: #b8285f;
+  --code-string: #14706f;
+  --code-number: #c2401b;
+  --code-title: #5c3a78;
+  --code-attr: #94620a;
+  --code-regexp: #8e1c48;
+  --anno-1: #c2401b;
+  --anno-2: #14706f;
+  --anno-3: #6a3f9a;
+  --anno-4: #b8285f;
+  --anno-5: #4a7a2e;
+  --anno-6: #2a68a8;
+  --anno-tint: 22%;
+  --anno-tint-hover: 36%;
+  --anno-chip-ink: #ffffff;
+}
+
+/* ---- Mesa Pop Dark — Escapement Labs brand ----------------------------- */
+:root[data-theme="mesa-pop-dark"] {
+  color-scheme: dark;
+  --font-display: "Bricolage Grotesque", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-body: "DM Sans", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-ui: "DM Sans", ui-sans-serif, -apple-system, system-ui, sans-serif;
+  --font-mono: "DM Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --bg: #23162a;
+  --bg-grad-a: #2a1b33;
+  --bg-grad-b: #1d1223;
+  --surface: #2a1b33;
+  --raised: #3a2645;
+  --border: #4a3456;
+  --border-soft: #36233f;
+  --ink: #fff6e8;
+  --ink-soft: #ecdfd2;
+  --muted: #b3a3c0;
+  --faint: #7d6b8a;
+  --accent: #ffc247;
+  --accent-bright: #ffd06b;
+  --accent-tint: rgba(255, 194, 71, 0.13);
+  --accent-line: rgba(255, 194, 71, 0.36);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 14px 40px rgba(0, 0, 0, 0.45);
+  --selection: rgba(228, 87, 46, 0.4);
+  --code-keyword: #f28bb4;
+  --code-string: #6fd0c6;
+  --code-number: #ff9466;
+  --code-title: #ffc247;
+  --code-attr: #c9b6e0;
+  --code-regexp: #ff9a7a;
+  --anno-1: #ff9466;
+  --anno-2: #5fcfc2;
+  --anno-3: #c0a6ee;
+  --anno-4: #f290b8;
+  --anno-5: #a8d68a;
+  --anno-6: #ffc247;
+  --anno-tint: 20%;
+  --anno-tint-hover: 32%;
   --anno-chip-ink: var(--bg);
 }
 
