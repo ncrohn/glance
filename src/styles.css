@@ -1360,7 +1360,35 @@ body {
 .theme-swatch--high-contrast i { background: #ffb454; }
 
 /* ── Annotation workspace + rail ───────────────────────────── */
-#workspace { display: flex; flex: 1; min-height: 0; }
+#workspace { display: flex; flex: 1; min-height: 0; position: relative; }
+
+/* ---- Find in file (⌘F) ------------------------------------------------ */
+.find-bar {
+  position: absolute; top: 10px; right: 20px; z-index: 40;
+  display: flex; align-items: center; gap: 4px;
+  padding: 5px 6px 5px 10px; border-radius: 8px;
+  background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow);
+  font: 13px/1 var(--font-ui); color: var(--ink);
+}
+.find-bar[hidden] { display: none; }
+.find-input {
+  width: 200px; padding: 5px 2px; border: none; outline: none;
+  background: transparent; color: var(--ink); font: inherit;
+}
+.find-input::placeholder { color: var(--faint); }
+.find-count { min-width: 64px; text-align: right; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.find-bar.no-match .find-count { color: var(--accent); }
+.find-btn {
+  width: 24px; height: 24px; border: none; border-radius: 5px;
+  background: transparent; color: var(--muted); font: 16px/1 var(--font-ui); cursor: pointer;
+}
+.find-btn:hover:not(:disabled) { background: var(--raised); color: var(--ink); }
+.find-btn:disabled { opacity: 0.4; cursor: default; }
+/* Separate rules: a browser without ::highlight would drop a shared one whole. */
+::highlight(find-match) { background-color: color-mix(in srgb, var(--accent) 24%, transparent); }
+::highlight(find-current) { background-color: var(--accent); color: var(--bg); }
+.cm-find-match { background-color: color-mix(in srgb, var(--accent) 24%, transparent); }
+.cm-find-current { background-color: var(--accent); color: var(--bg); }
 
 .comment-fab {
   position: fixed; z-index: 50;

@@ -13,11 +13,22 @@
 #      (App Store Connect API key — no app password in env. App-specific
 #      password works too: --apple-id ... --password ... --team-id 9Q64ABWBCM)
 #
+#   3. The auto-update signing key at ~/.tauri/glance.key (no password). Its
+#      public half is plugins.updater.pubkey in tauri.conf.json; installed copies
+#      only accept updates signed by it, so keep a backup.
+#
 # Then: bash scripts/release.sh   [NOTARY_PROFILE defaults to "glance-notary"]
+# Upload the .dmg, the .app.tar.gz and latest.json it prints to the GitHub release.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NOTARY_PROFILE="${NOTARY_PROFILE:-glance-notary}"
+UPDATER_KEY="${UPDATER_KEY:-$HOME/.tauri/glance.key}"
+
+if [[ ! -f "$UPDATER_KEY" ]]; then
+  echo "✗ No auto-update signing key at $UPDATER_KEY." >&2
+  exit 1
+fi
 
 if ! security find-identity -v -p codesigning | grep -q "Developer ID Application"; then
   echo "✗ No 'Developer ID Application' certificate in the keychain." >&2
@@ -49,4 +60,31 @@ echo "Verifying Gatekeeper acceptance…"
 spctl -a -vvv -t install "$APP" || true
 xcrun stapler validate "$DMG"
 
+# Auto-update bundle: the stapled app, tarred and signed for the updater
+# plugin, plus the manifest installed copies read from releases/latest.
+VERSION="$(node -p 'require("./src-tauri/tauri.conf.json").version')"
+case "$(uname -m)" in
+  arm64) ARCH=aarch64 ;;
+  x86_64) ARCH=x86_64 ;;
+  *) echo "Unknown architecture $(uname -m)" >&2; exit 1 ;;
+esac
+OUT="src-tauri/target/release/bundle/updater"
+TARBALL="Glance_${VERSION}_${ARCH}.app.tar.gz"
+rm -rf "$OUT" && mkdir -p "$OUT"
+COPYFILE_DISABLE=1 tar -czf "$OUT/$TARBALL" -C "$(dirname "$APP")" Glance.app
+pnpm tauri signer sign --private-key-path "$UPDATER_KEY" --password "" "$OUT/$TARBALL"
+SIG="$(cat "$OUT/$TARBALL.sig")" \
+URL="https://github.com/ncrohn/glance/releases/download/v$VERSION/$TARBALL" \
+VERSION="$VERSION" TARGET="darwin-$ARCH" \
+node -e '
+  const { SIG, URL, VERSION, TARGET } = process.env;
+  const manifest = {
+    version: VERSION,
+    pub_date: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
+    platforms: { [TARGET]: { signature: SIG, url: URL } },
+  };
+  process.stdout.write(JSON.stringify(manifest, null, 2) + "\n");
+' > "$OUT/latest.json"
+
 echo "✓ Signed + notarized + stapled: $DMG"
+echo "✓ Auto-update files: $OUT/$TARBALL and $OUT/latest.json"

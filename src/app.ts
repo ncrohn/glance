@@ -31,6 +31,7 @@ import { showToast } from "./toast";
 import { applyRailWidth, mountRailResizer, parseRailWidth } from "./rail-resize";
 import { sectionFor, shouldShowWhatsNew } from "./whats-new";
 import { isCheckDue, isNewer, parseRelease } from "./update-check";
+import { isMissingManifest } from "./update-check";
 import changelog from "../CHANGELOG.md?raw";
 import { diffActivity, activityMessage } from "./activity";
 import {
@@ -44,6 +45,7 @@ import { decideReload } from "./reload";
 import { restoreTarget, lineAtOffset, offsetForLine, type LineBlock } from "./scroll-restore";
 import { confirmOpenFile, confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker, showWhatsNew } from "./modal";
 import { showUpdateAvailable, showUpToDate } from "./modal";
+import { showUpdateProgress } from "./modal";
 import { fetchLatestRelease, onCheckForUpdates } from "./ipc";
 import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
@@ -53,6 +55,10 @@ import { needsSetup } from "./integration";
 import { shouldShowCommentHint } from "./hint";
 import type { ClientInfo, IntegrationAction } from "./ipc";
 import { confirmUnsaved } from "./modal";
+import { clampIndex, collectText, findMatches, rangesFor, stepIndex, type Match } from "./find";
+import { mountFindBar, type FindBar } from "./find-bar";
+import { onMenuFind, type FindAction } from "./ipc";
+import { checkForAppUpdate, relaunchApp, type AppUpdate } from "./ipc";
 
 const LS_OPEN = "glance.openPaths";
 const LS_RECENT = "glance.recent";
@@ -154,6 +160,8 @@ function el<K extends keyof HTMLElementTagNameMap>(
 const annotationsLoaded = new Set<string>();
 
 const ERROR_TOAST_MS = 12000;
+// Long enough to notice; a missed toast comes back on the next daily check.
+const UPDATE_TOAST_MS = 30000;
 
 async function loadAnnotations(absPath: string): Promise<void> {
   let store;
@@ -658,6 +666,8 @@ function renderContent(): void {
       const eol = state.docs.find((d) => d.id === doc.id)?.eol ?? doc.eol;
       state = updateEditorContent(state, doc.id, withEol(v, eol));
       refreshTabDirty(); // toggle dirty dot in place; don't rebuild tab nodes mid-interaction
+      // CodeMirror can't take a dispatch from inside its own update.
+      if (findBar?.isOpen()) queueMicrotask(() => runFind(false));
     }, currentAppearance() === "dark");
     editorDocId = doc.id;
   } else {
@@ -711,6 +721,8 @@ function redrawComments(id: string): void {
   if (!doc || doc.id !== id || doc.viewMode !== "rendered" || !view) return;
   // Highlighting walks the view's text and would reach into the block editor.
   if (blockEdit?.docId !== id) highlightComments(view, doc);
+  // Redrawing comments replaces the text nodes the find ranges point into.
+  if (findBar?.isOpen()) runFind(false);
   renderRailFor();
 }
 
@@ -764,11 +776,135 @@ export function render(): void {
   lastRenderedId = next.id;
   lastRenderedMode = next.mode;
   syncShowInFinderMenu();
+  if (findBar?.isOpen()) runFind(false);
   if (teardownHovers) { teardownHovers(); teardownHovers = null; }
   const renderedView = document.querySelector<HTMLElement>(".rendered");
   const railEl = document.getElementById("rail");
   if (renderedView && railEl) teardownHovers = linkAnnotationHovers(renderedView, railEl);
   saveSession();
+}
+
+// ---- Find in file (⌘F) ---------------------------------------------------
+// The bar stays put across renders; every render re-runs the search against the
+// fresh view, keeping the current match by index.
+let findBar: FindBar | null = null;
+let findIndex = -1;
+let findDocId: string | null = null;
+
+const canHighlight = () => typeof Highlight !== "undefined" && typeof CSS !== "undefined" && "highlights" in CSS;
+
+function clearFindMarks(): void {
+  if (canHighlight()) { CSS.highlights.delete("find-match"); CSS.highlights.delete("find-current"); }
+  if (activeEditor) activeEditor.showFind([], -1, false);
+}
+
+// The last search, kept so stepping only repaints the current match. Rebuilt on
+// every render, comment redraw and source-view edit while the bar is open.
+let findHits: Range[] = [];
+let findSpans: Match[] = [];
+const findCount = () => findSpans.length || findHits.length;
+
+// Search the active doc and paint every match.
+function searchFind(): void {
+  findHits = [];
+  findSpans = [];
+  if (!findBar) return;
+  const doc = getActive(state);
+  if (doc?.id !== findDocId) { findIndex = -1; findDocId = doc?.id ?? null; }
+  const query = findBar.query();
+  clearFindMarks();
+  if (doc && query) {
+    const view = document.querySelector<HTMLElement>("#content .rendered");
+    if (doc.viewMode === "source" && activeEditor) {
+      findSpans = findMatches(activeEditor.text(), query);
+    } else if (view) {
+      const { text, pieces } = collectText(view);
+      findHits = rangesFor(pieces, findMatches(text, query));
+    }
+  }
+  const count = findCount();
+  findIndex = count === 0 ? -1 : findIndex < 0 ? 0 : clampIndex(findIndex, count);
+  if (canHighlight() && findHits.length) CSS.highlights.set("find-match", new Highlight(...findHits));
+}
+
+// Mark the current match and update the count. `reveal` scrolls it into view;
+// a re-render passes false so it doesn't fight scroll restore.
+function showCurrent(reveal: boolean): void {
+  if (!findBar) return;
+  findBar.setCount(findIndex, findCount());
+  if (activeEditor && getActive(state)?.viewMode === "source") {
+    activeEditor.showFind(findSpans, findIndex, reveal);
+    return;
+  }
+  const current = findHits[findIndex];
+  if (canHighlight()) {
+    if (current) CSS.highlights.set("find-current", new Highlight(current));
+    else CSS.highlights.delete("find-current");
+  }
+  const content = document.getElementById("content");
+  if (reveal && current && content) {
+    const box = content.getBoundingClientRect();
+    const r = current.getBoundingClientRect();
+    if (r.top < box.top + 40 || r.bottom > box.bottom - 40) {
+      content.scrollTop += r.top - box.top - box.height / 3;
+    }
+  }
+}
+
+function runFind(reveal: boolean): void {
+  searchFind();
+  showCurrent(reveal);
+}
+
+// The bar sits over #content's top-right corner, clear of the comment rail.
+function placeFindBar(): void {
+  const bar = document.querySelector<HTMLElement>(".find-bar");
+  const content = document.getElementById("content");
+  const workspace = document.getElementById("workspace");
+  if (!bar || !content || !workspace) return;
+  bar.style.right = `${workspace.getBoundingClientRect().right - content.getBoundingClientRect().right + 20}px`;
+}
+
+function handleFind(action: FindAction): void {
+  if (!findBar) return;
+  if (action === "open") {
+    // The block editor's text would be searched as source, so show it formatted.
+    const editing = blockEdit !== null;
+    finishBlockEdit();
+    placeFindBar();
+    findBar.open();
+    searchFind();
+    // Closing the editor re-rendered, and that render restores the scroll
+    // position on the next frame; reveal the match after it.
+    if (editing) requestAnimationFrame(() => showCurrent(true));
+    else showCurrent(true);
+    return;
+  }
+  if (!findBar.isOpen()) { placeFindBar(); findBar.open(); runFind(true); return; }
+  stepFind(action === "next" ? 1 : -1);
+}
+
+function stepFind(dir: 1 | -1): void {
+  findIndex = stepIndex(findIndex, findCount(), dir);
+  showCurrent(true);
+}
+
+function mountFind(): void {
+  const workspace = document.getElementById("workspace");
+  if (!workspace) return;
+  findBar = mountFindBar(workspace, {
+    onQuery: () => { findIndex = -1; runFind(true); },
+    onStep: stepFind,
+    onClose: () => {
+      findBar?.close();
+      clearFindMarks();
+      findHits = [];
+      findSpans = [];
+      findIndex = -1;
+    },
+  });
+  const content = document.getElementById("content");
+  if (content) new ResizeObserver(placeFindBar).observe(content);
 }
 
 // Cmd+A, routed from the native Edit menu (lib.rs) so we can do a real
@@ -898,17 +1034,26 @@ let quitting = false;
 // Cmd+Q / the window's close button. Walks the dirty docs one at a time
 // (showing each), and quits only if every one was saved or let go.
 async function requestQuit(): Promise<void> {
-  if (quitting) return;
+  // An update in progress restarts Glance itself; a second unsaved prompt
+  // racing it would only get in the way.
+  if (quitting || installing) return;
   quitting = true;
   try {
-    for (const doc of state.docs.filter(isDirty)) {
-      if (state.activeId !== doc.id) { state = setActive(state, doc.id); render(); }
-      if (!(await settleUnsaved(doc.id))) return;
-    }
+    if (!(await settleAllUnsaved())) return;
     await quitApp().catch((err) => showNotice(`Couldn't quit: ${err}`, false));
   } finally {
     quitting = false;
   }
+}
+
+// Walk every tab with unsaved edits through Save / Don't Save / Cancel. False
+// when one was cancelled.
+async function settleAllUnsaved(): Promise<boolean> {
+  for (const doc of state.docs.filter(isDirty)) {
+    if (state.activeId !== doc.id) { state = setActive(state, doc.id); render(); }
+    if (!(await settleUnsaved(doc.id))) return false;
+  }
+  return true;
 }
 
 // A change event whose text we already account for: what we last saw on disk,
@@ -1536,6 +1681,8 @@ export async function start(): Promise<void> {
   await onQuitRequested(() => { void requestQuit(); });
   await onMenuSave(() => saveActive());
   await onSelectAll(() => selectAllContent());
+  mountFind();
+  await onMenuFind(handleFind);
   await onShowInFinder(() => {
     // The menu item is greyed out unless canRevealActive(state), so these guards
     // only fire if the file vanishes between the last render and the click.
@@ -1589,6 +1736,115 @@ export async function start(): Promise<void> {
 // toast replaced by another one shows again next launch.
 async function checkForUpdates(manual: boolean): Promise<void> {
   if (!manual && !isCheckDue(localStorage.getItem(LS_UPDATE_CHECKED), Date.now())) return;
+  let found: AppUpdate | null;
+  try {
+    found = await checkForAppUpdate();
+  } catch (err) {
+    // No signed manifest for this Mac is expected for older releases; anything
+    // else is a broken update worth naming when someone asked.
+    const note = isMissingManifest(err) ? undefined : `Automatic update failed: ${errorText(err)}`;
+    return checkForReleasePage(manual, note);
+  }
+  if (!found) {
+    markUpdateChecked();
+    if (manual) showUpToDate(await appVersion().catch(() => ""));
+    return;
+  }
+  const u = adoptUpdate(found);
+  if (manual) {
+    markUpdateChecked();
+    showUpdateAvailable(u.currentVersion, u.version, { onUpdate: () => { void installUpdate(); } });
+    return;
+  }
+  // The launch check downloads quietly and only asks once the update is ready.
+  try { await downloadUpdate(); } catch { return; }
+  showUpdateReady(u.version);
+}
+
+const markUpdateChecked = () => localStorage.setItem(LS_UPDATE_CHECKED, String(Date.now()));
+const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+// The newest update found and its download. One at a time: a later check for
+// the same version reuses it (and a finished download), and a replaced one is
+// closed so its bytes don't sit on the Rust side.
+let pending: { handle: AppUpdate; download: Promise<void> | null } | null = null;
+let onDownloadProgress: ((done: number, total?: number) => void) | null = null;
+let installing = false;
+
+function adoptUpdate(found: AppUpdate): AppUpdate {
+  if (pending?.handle.version === found.version) {
+    void found.close().catch(() => {});
+    return pending.handle;
+  }
+  if (pending) void pending.handle.close().catch(() => {});
+  pending = { handle: found, download: null };
+  return found;
+}
+
+// Start the download, or join the one already running or finished.
+function downloadUpdate(): Promise<void> {
+  const p = pending;
+  if (!p) return Promise.reject(new Error("No update to download"));
+  p.download ??= p.handle.download((done, total) => onDownloadProgress?.(done, total)).catch((err) => {
+    p.download = null;
+    throw err;
+  });
+  return p.download;
+}
+
+function showUpdateReady(version: string): void {
+  showToast(`Glance ${version} is ready.`, {
+    actionLabel: "Restart to update",
+    onAction: () => {
+      markUpdateChecked();
+      // Cancelled at the unsaved prompt: offer it again rather than lose it.
+      void installUpdate().then((went) => { if (!went) showUpdateReady(version); });
+    },
+    onExpire: markUpdateChecked,
+    ms: UPDATE_TOAST_MS,
+  });
+}
+
+// Unsaved edits get the same Save / Don't Save / Cancel as quitting. Then a
+// blocking progress modal stays up through download, install and restart, so
+// nothing new can be typed and lost. False only when the prompt was cancelled.
+async function installUpdate(): Promise<boolean> {
+  const p = pending;
+  if (!p || installing || quitting) return true;
+  installing = true;
+  let progress: ReturnType<typeof showUpdateProgress> | null = null;
+  try {
+    if (!(await settleAllUnsaved())) return false;
+    progress = showUpdateProgress(p.handle.version);
+    const shown = progress;
+    onDownloadProgress = (done, total) => {
+      shown.set(total ? `Downloading… ${Math.floor((done / total) * 100)}%` : "Downloading…");
+    };
+    await downloadUpdate();
+    progress.set("Installing…");
+    await p.handle.install();
+    progress.close();
+    progress = null;
+    // The restart skips the quit prompt, so check once more right before it.
+    if (!(await settleAllUnsaved())) {
+      showNotice(`Glance ${p.handle.version} is installed and starts the next time you open Glance.`);
+      return true;
+    }
+    await relaunchApp();
+    return true;
+  } catch (err) {
+    progress?.close();
+    showNotice(`Couldn't install the update. ${errorText(err)}`, false);
+    return true;
+  } finally {
+    onDownloadProgress = null;
+    installing = false;
+  }
+}
+
+// The check before auto-update: compare with GitHub's latest release and link
+// to its page. `note` explains why the in-place update wasn't used.
+async function checkForReleasePage(manual: boolean, note?: string): Promise<void> {
   let current = "";
   let release = null;
   try {
@@ -1596,21 +1852,20 @@ async function checkForUpdates(manual: boolean): Promise<void> {
     release = parseRelease(await fetchLatestRelease());
     if (!release) throw new Error("GitHub didn't return a usable release");
   } catch (err) {
-    if (manual) showNotice(`Couldn't check for updates. ${err instanceof Error ? err.message : err}`, false);
+    if (manual) showNotice(`Couldn't check for updates. ${note ?? errorText(err)}`, false);
     return;
   }
-  const markChecked = () => localStorage.setItem(LS_UPDATE_CHECKED, String(Date.now()));
   const { version, url } = release;
   if (!isNewer(version, current)) {
-    markChecked();
-    if (manual) showUpToDate(current);
+    markUpdateChecked();
+    if (manual) showUpToDate(current, note);
     return;
   }
-  if (manual) { markChecked(); showUpdateAvailable(current, version, url); return; }
+  if (manual) { markUpdateChecked(); showUpdateAvailable(current, version, { url, note }); return; }
   showToast(`Glance ${version} is available.`, {
     actionLabel: "Details",
-    onAction: () => { markChecked(); showUpdateAvailable(current, version, url); },
-    onExpire: markChecked,
+    onAction: () => { markUpdateChecked(); showUpdateAvailable(current, version, { url }); },
+    onExpire: markUpdateChecked,
     ms: ERROR_TOAST_MS,
   });
 }
