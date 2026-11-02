@@ -15,6 +15,13 @@
             : p;
           document.documentElement.dataset.theme = id;
         } catch (e) {}
+        // Same for the reading width. Mirrors WIDTHS in reading-width.ts.
+        try {
+          var w = { narrow: "40rem", standard: "47rem", wide: "62rem", full: "100%" }[
+            localStorage.getItem("glance.readingWidth")
+          ];
+          if (w) document.documentElement.style.setProperty("--reading-w", w);
+        } catch (e) {}
       })();
     </script>
   </head>

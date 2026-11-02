@@ -2,6 +2,7 @@ import type { SetupResult, ClientInfo, IntegrationAction } from "./ipc";
 import { openExternal } from "./ipc";
 import { groupSteps, capabilitySummary, isSelectable } from "./integration";
 import { AUTO, THEMES, type ThemePref } from "./theme";
+import { DEFAULT_WIDTH, WIDTHS } from "./reading-width";
 import appIcon from "./assets/app-icon.png";
 
 // Shared modal scaffold. Builds the overlay + card, wires Escape / backdrop
@@ -398,6 +399,67 @@ export function showThemePicker(
   // no element inside the overlay holds focus and Escape (which fires via the
   // overlay's keydown handler) never reaches onEscape/revertAndClose.
   done.focus();
+}
+
+// Reading width picker — same live-preview / Cancel-reverts flow as the theme picker.
+export function showReadingWidthPicker(
+  current: string,
+  opts: { onPreview: (id: string) => void; onCommit: (id: string) => void },
+): void {
+  let selected = current;
+
+  const revertAndClose = () => { opts.onPreview(current); m.close(); };
+  const m = openModal({ title: "Reading Width", onEscape: revertAndClose });
+  m.card.classList.add("theme-picker");
+
+  const list = document.createElement("div");
+  list.className = "theme-list";
+  m.body.appendChild(list);
+
+  const rows: HTMLButtonElement[] = [];
+  WIDTHS.forEach((w, i) => {
+    const row = document.createElement("button");
+    row.className = "theme-row";
+    row.dataset.pref = w.id;
+    if (w.id === selected) row.classList.add("active");
+
+    const swatch = document.createElement("span");
+    swatch.className = "width-swatch";
+    const barW = `${8 + i * 5}px`;
+    for (let n = 0; n < 3; n++) {
+      const bar = document.createElement("i");
+      bar.style.width = barW;
+      swatch.appendChild(bar);
+    }
+
+    const label = document.createElement("span");
+    label.className = "theme-label";
+    label.textContent = w.name;
+
+    const tagEl = document.createElement("span");
+    tagEl.className = "theme-tag";
+    tagEl.textContent = w.id === DEFAULT_WIDTH ? "Default" : "";
+
+    const check = document.createElement("span");
+    check.className = "theme-check";
+    check.textContent = "✓";
+
+    row.append(swatch, label, tagEl, check);
+    row.onclick = () => {
+      selected = w.id;
+      for (const r of rows) r.classList.toggle("active", r.dataset.pref === w.id);
+      opts.onPreview(w.id);
+    };
+    rows.push(row);
+    list.appendChild(row);
+  });
+
+  const cancel = button("Cancel");
+  cancel.onclick = revertAndClose;
+  const done = button("Done", true);
+  done.onclick = () => { opts.onCommit(selected); m.close(); };
+  m.footer.append(cancel, done);
+  done.focus(); // see showThemePicker: Escape needs focus inside the overlay
 }
 
 // About box — app icon, wordmark, version, and attribution. Centered layout,

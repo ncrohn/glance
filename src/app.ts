@@ -39,6 +39,7 @@ import {
   focusRailCard, parseRailPref,
 } from "./annotation-ui";
 import { annotationIdSelector } from "./annotation-ui";
+import { relayoutGutterMarkers } from "./annotation-ui";
 import { mountBlockEditor, mountEditor, type BlockEditorHandle, type EditorHandle } from "./editor";
 import { appendTarget, caretInSource, fenceBody, sliceLines, spliceLines, splicedCount, trimBlankTail } from "./block-edit";
 import { decideReload } from "./reload";
@@ -47,6 +48,9 @@ import { confirmOpenFile, confirmReload, showNotice, showSetupResult, showIntegr
 import { showUpdateAvailable, showUpToDate } from "./modal";
 import { showUpdateProgress } from "./modal";
 import { fetchLatestRelease, onCheckForUpdates } from "./ipc";
+import { onShowReadingWidth } from "./ipc";
+import { showReadingWidthPicker } from "./modal";
+import { applyWidth, loadWidthPref, saveWidthPref } from "./reading-width";
 import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
 } from "./theme";
@@ -673,6 +677,7 @@ function renderContent(): void {
   } else {
     const view = el("div", "rendered");
     renderedView = view;
+    observeColumn(view);
     view.innerHTML = renderMarkdown(
       doc.editorContent,
       changedLines(doc),
@@ -1635,6 +1640,22 @@ function changeTheme(pref: ThemePref): void {
 // block can break out to fill it (see block-expand.ts + styles.css). Tracks the
 // pane, not the window, so it stays correct when the annotation rail (a sibling
 // of #content) opens and shrinks the pane.
+// Gutter markers are placed in px at render, so move them whenever the text
+// column changes size: a reading-width change, a window or rail resize, or an
+// image or diagram finishing late. Only the markers move; the highlights stay.
+let columnObserver: ResizeObserver | null = null;
+
+function observeColumn(view: HTMLElement): void {
+  columnObserver ??= new ResizeObserver((entries) => {
+    for (const e of entries) {
+      const el = e.target as HTMLElement;
+      if (el.isConnected) relayoutGutterMarkers(el);
+    }
+  });
+  columnObserver.disconnect();
+  columnObserver.observe(view);
+}
+
 function trackPaneWidth(): void {
   const content = document.getElementById("content");
   if (!content) return;
@@ -1649,6 +1670,7 @@ export async function start(): Promise<void> {
   // inline bootstrap in index.html already set data-theme to avoid a flash;
   // this re-applies it and, for Auto, keeps it in sync with the OS.
   applyTheme(loadThemePref(), render);
+  applyWidth(loadWidthPref());
   trackPaneWidth();
   applyRailWidth(parseRailWidth(localStorage.getItem(LS_RAIL_W)));
   const grip = document.getElementById("rail-grip");
@@ -1675,6 +1697,12 @@ export async function start(): Promise<void> {
     showThemePicker(loadThemePref(), {
       onPreview: (pref) => applyTheme(pref, render),
       onCommit: changeTheme,
+    });
+  });
+  await onShowReadingWidth(() => {
+    showReadingWidthPicker(loadWidthPref(), {
+      onPreview: applyWidth,
+      onCommit: (id) => { saveWidthPref(id); applyWidth(id); },
     });
   });
   await onCloseActiveTab(() => { const d = getActive(state); if (d) void closeTab(d.id); });
