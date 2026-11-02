@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.0
+
+Choose how wide the text column is.
+
+- View → Reading Width… sets the column to Narrow, Standard, Wide or Full width. Standard is the width Glance has always used.
+- Comment markers in the margin stay next to their text when the window, the comment sidebar or the reading width changes size.
+
 ## 0.12.0
 
 Find in a file, updates that install themselves, and two new themes.
