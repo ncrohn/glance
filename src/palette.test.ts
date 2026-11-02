@@ -101,6 +101,27 @@ describe("annotation palette", () => {
   }
 });
 
+// Labels on accent-filled buttons use --on-accent. Blue and orange accents of
+// middle lightness can't reach 4.5 with any label color; those themes are held
+// to the best the pair allows.
+const ON_ACCENT_TARGET: Record<string, number> = { paper: 4.3, "solarized-light": 3.6, "solarized-dark": 4 };
+
+describe("labels on the accent color", () => {
+  for (const theme of THEMES) {
+    it(`${theme.id} keeps button labels legible`, () => {
+      const block = themeBlock(theme.id);
+      const raw = token(block, "on-accent");
+      const accent = token(block, "accent");
+      const bg = token(block, "bg");
+      if (!raw || !accent || !bg) throw new Error(`${theme.id}: missing --on-accent, --accent or --bg`);
+      const label = hexToRgb(raw === "var(--bg)" ? bg : raw);
+      const ratio = contrastRatio(label, hexToRgb(accent));
+      const target = ON_ACCENT_TARGET[theme.id] ?? 4.5;
+      expect(ratio, `${theme.id} label on accent: ${ratio.toFixed(2)} < ${target}`).toBeGreaterThanOrEqual(target);
+    });
+  }
+});
+
 // <mark> ships with a browser default of black text. Without this override,
 // highlighted text goes black on every dark theme regardless of the palette.
 it("highlight text inherits the theme ink instead of mark's default black", () => {
