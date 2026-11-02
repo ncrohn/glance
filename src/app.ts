@@ -53,6 +53,9 @@ import { needsSetup } from "./integration";
 import { shouldShowCommentHint } from "./hint";
 import type { ClientInfo, IntegrationAction } from "./ipc";
 import { confirmUnsaved } from "./modal";
+import { clampIndex, collectText, findMatches, rangesFor, stepIndex } from "./find";
+import { mountFindBar, type FindBar } from "./find-bar";
+import { onMenuFind, type FindAction } from "./ipc";
 
 const LS_OPEN = "glance.openPaths";
 const LS_RECENT = "glance.recent";
@@ -764,11 +767,109 @@ export function render(): void {
   lastRenderedId = next.id;
   lastRenderedMode = next.mode;
   syncShowInFinderMenu();
+  if (findBar?.isOpen()) runFind(false);
   if (teardownHovers) { teardownHovers(); teardownHovers = null; }
   const renderedView = document.querySelector<HTMLElement>(".rendered");
   const railEl = document.getElementById("rail");
   if (renderedView && railEl) teardownHovers = linkAnnotationHovers(renderedView, railEl);
   saveSession();
+}
+
+// ---- Find in file (⌘F) ---------------------------------------------------
+// The bar stays put across renders; every render re-runs the search against the
+// fresh view, keeping the current match by index.
+let findBar: FindBar | null = null;
+let findIndex = -1;
+let findDocId: string | null = null;
+
+const canHighlight = () => typeof Highlight !== "undefined" && typeof CSS !== "undefined" && "highlights" in CSS;
+
+function clearFindMarks(): void {
+  if (canHighlight()) { CSS.highlights.delete("find-match"); CSS.highlights.delete("find-current"); }
+  if (activeEditor) activeEditor.showFind([], -1, false);
+}
+
+// Search the active doc and paint the matches. `reveal` scrolls the current
+// match into view; a re-render passes false so it doesn't fight scroll restore.
+// Returns the match count.
+function runFind(reveal: boolean): number {
+  if (!findBar) return 0;
+  const doc = getActive(state);
+  if (doc?.id !== findDocId) { findIndex = -1; findDocId = doc?.id ?? null; }
+  const query = findBar.query();
+  clearFindMarks();
+  if (!doc || !query) { findIndex = -1; findBar.setCount(-1, 0); return 0; }
+  if (doc.viewMode === "source" && activeEditor) {
+    const matches = findMatches(activeEditor.text(), query);
+    findIndex = findIndex < 0 && matches.length ? 0 : clampIndex(findIndex, matches.length);
+    activeEditor.showFind(matches, findIndex, reveal);
+    findBar.setCount(findIndex, matches.length);
+    return matches.length;
+  }
+  const view = document.querySelector<HTMLElement>("#content .rendered");
+  if (!view) { findBar.setCount(-1, 0); return 0; }
+  const { text, pieces } = collectText(view);
+  const ranges = rangesFor(pieces, findMatches(text, query));
+  findIndex = findIndex < 0 && ranges.length ? 0 : clampIndex(findIndex, ranges.length);
+  findBar.setCount(findIndex, ranges.length);
+  if (canHighlight() && ranges.length) {
+    CSS.highlights.set("find-match", new Highlight(...ranges));
+    CSS.highlights.set("find-current", new Highlight(ranges[findIndex]));
+  }
+  const current = ranges[findIndex];
+  const content = document.getElementById("content");
+  if (reveal && current && content) {
+    const box = content.getBoundingClientRect();
+    const r = current.getBoundingClientRect();
+    if (r.top < box.top + 40 || r.bottom > box.bottom - 40) {
+      content.scrollTop += r.top - box.top - box.height / 3;
+    }
+  }
+  return ranges.length;
+}
+
+// The bar sits over #content's top-right corner, clear of the comment rail.
+function placeFindBar(): void {
+  const bar = document.querySelector<HTMLElement>(".find-bar");
+  const content = document.getElementById("content");
+  const workspace = document.getElementById("workspace");
+  if (!bar || !content || !workspace) return;
+  bar.style.right = `${workspace.getBoundingClientRect().right - content.getBoundingClientRect().right + 20}px`;
+}
+
+function handleFind(action: FindAction): void {
+  if (!findBar) return;
+  if (action === "open") {
+    // The block editor's text would be searched as source, so show it formatted.
+    finishBlockEdit();
+    placeFindBar();
+    findBar.open();
+    runFind(true);
+    return;
+  }
+  if (!findBar.isOpen()) { placeFindBar(); findBar.open(); runFind(true); return; }
+  stepFind(action === "next" ? 1 : -1);
+}
+
+function stepFind(dir: 1 | -1): void {
+  findIndex = stepIndex(findIndex, runFind(false), dir);
+  runFind(true);
+}
+
+function mountFind(): void {
+  const workspace = document.getElementById("workspace");
+  if (!workspace) return;
+  findBar = mountFindBar(workspace, {
+    onQuery: () => { findIndex = -1; runFind(true); },
+    onStep: stepFind,
+    onClose: () => {
+      findBar?.close();
+      clearFindMarks();
+      findIndex = -1;
+    },
+  });
+  const content = document.getElementById("content");
+  if (content) new ResizeObserver(placeFindBar).observe(content);
 }
 
 // Cmd+A, routed from the native Edit menu (lib.rs) so we can do a real
@@ -1536,6 +1637,8 @@ export async function start(): Promise<void> {
   await onQuitRequested(() => { void requestQuit(); });
   await onMenuSave(() => saveActive());
   await onSelectAll(() => selectAllContent());
+  mountFind();
+  await onMenuFind(handleFind);
   await onShowInFinder(() => {
     // The menu item is greyed out unless canRevealActive(state), so these guards
     // only fire if the file vanishes between the last render and the click.

@@ -332,6 +332,15 @@ pub fn run() {
                 "select_all" => {
                     let _ = app.emit("menu-select-all", ());
                 }
+                "find" => {
+                    let _ = app.emit("menu-find", "open");
+                }
+                "find_next" => {
+                    let _ = app.emit("menu-find", "next");
+                }
+                "find_previous" => {
+                    let _ = app.emit("menu-find", "previous");
+                }
                 "setup_integration" => {
                     let _ = app.emit("show-integration-picker", "setup");
                 }
@@ -483,6 +492,17 @@ pub fn run() {
                 true,
                 Some("CmdOrCtrl+A"),
             )?;
+            // Find runs in the frontend, which owns the find bar and the view.
+            let find_item = MenuItem::with_id(handle, "find", "Find…", true, Some("CmdOrCtrl+F"))?;
+            let find_next_item =
+                MenuItem::with_id(handle, "find_next", "Find Next", true, Some("CmdOrCtrl+G"))?;
+            let find_previous_item = MenuItem::with_id(
+                handle,
+                "find_previous",
+                "Find Previous",
+                true,
+                Some("CmdOrCtrl+Shift+G"),
+            )?;
             let edit_menu = Submenu::with_items(
                 handle,
                 "Edit",
@@ -495,6 +515,10 @@ pub fn run() {
                     &PredefinedMenuItem::copy(handle, None)?,
                     &PredefinedMenuItem::paste(handle, None)?,
                     &select_all_item,
+                    &PredefinedMenuItem::separator(handle)?,
+                    &find_item,
+                    &find_next_item,
+                    &find_previous_item,
                 ],
             )?;
             let theme_item = MenuItem::with_id(

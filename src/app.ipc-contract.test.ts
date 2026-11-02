@@ -150,7 +150,7 @@ vi.mock("./ipc", () => ({
   onShowIntegrationPicker: on("x1"), listIntegrationTargets: async () => [], runIntegration: async () => [],
   onShowAbout: on("x2"), onShowWhatsNew: on("x3"), onShowTheme: on("x4"),
   onCheckForUpdates: on("x7"), fetchLatestRelease: async () => null,
-  onCloseActiveTab: on("close-active-tab"), onMenuSave: on("menu-save"), onSelectAll: on("x5"),
+  onCloseActiveTab: on("close-active-tab"), onMenuSave: on("menu-save"), onSelectAll: on("x5"), onMenuFind: on("menu-find"),
   onShowInFinder: on("x6"), onQuitRequested: on("quit-requested"),
   quitApp: async () => { env.quit++; },
   readReviewed: async () => null, writeReviewed: async () => {},

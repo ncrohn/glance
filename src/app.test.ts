@@ -72,7 +72,7 @@ vi.mock("./ipc", () => ({
   onShowIntegrationPicker: on("x1"), listIntegrationTargets: async () => [], runIntegration: async () => [],
   onShowAbout: on("x2"), onShowWhatsNew: on("x3"), onShowTheme: on("x4"),
   onCheckForUpdates: on("x7"), fetchLatestRelease: async () => null,
-  onCloseActiveTab: on("close-active-tab"), onMenuSave: on("menu-save"), onSelectAll: on("x5"),
+  onCloseActiveTab: on("close-active-tab"), onMenuSave: on("menu-save"), onSelectAll: on("x5"), onMenuFind: on("menu-find"),
   onShowInFinder: on("x6"), onQuitRequested: on("quit-requested"),
   quitApp: async () => { env.calls.push("quit"); },
   readReviewed: async () => null, writeReviewed: async () => {},
@@ -799,5 +799,51 @@ describe("click-to-edit edge cases", () => {
     expect(isDirtyTab("/e.md")).toBe(true);
     v.dispatch({ changes: { from: 0, to: 1, insert: "" } });
     expect(isDirtyTab("/e.md")).toBe(false);
+  });
+});
+
+describe("find in file", () => {
+  const count = () => document.querySelector(".find-count")?.textContent;
+  async function search(q: string) {
+    const input = document.querySelector<HTMLInputElement>(".find-input")!;
+    input.value = q;
+    input.dispatchEvent(new Event("input"));
+    await flush();
+  }
+
+  it("counts matches in the formatted view and steps with Find Next / Previous", async () => {
+    env.fs.set("/a.md", "# Cat\n\nA cat and a **ca**t.\n");
+    env.launch = ["/a.md"];
+    await boot();
+    await emit("menu-find", "open");
+    expect(document.querySelector<HTMLElement>(".find-bar")!.hidden).toBe(false);
+    await search("cat");
+    expect(count()).toBe("1 of 3");
+    await emit("menu-find", "next");
+    expect(count()).toBe("2 of 3");
+    await emit("menu-find", "previous");
+    await emit("menu-find", "previous");
+    expect(count()).toBe("3 of 3");
+  });
+
+  it("searches the source text in ⌘E view and keeps counting after a re-render", async () => {
+    env.fs.set("/a.md", "one **two** one\n");
+    env.launch = ["/a.md"];
+    await boot();
+    await emit("menu-find", "open");
+    await search("**");
+    expect(count()).toBe("No matches");
+    await editorView();
+    expect(count()).toBe("1 of 2");
+    expect(document.querySelectorAll(".cm-find-match").length).toBeGreaterThan(0);
+  });
+
+  it("Escape closes the bar", async () => {
+    env.fs.set("/a.md", "a\n");
+    env.launch = ["/a.md"];
+    await boot();
+    await emit("menu-find", "open");
+    document.querySelector(".find-input")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(document.querySelector<HTMLElement>(".find-bar")!.hidden).toBe(true);
   });
 });

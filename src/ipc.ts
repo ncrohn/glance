@@ -221,6 +221,10 @@ export function onMenuSave(cb: () => void): Promise<UnlistenFn> {
 export function onSelectAll(cb: () => void): Promise<UnlistenFn> {
   return listen("menu-select-all", () => cb());
 }
+export type FindAction = "open" | "next" | "previous";
+export function onMenuFind(cb: (action: FindAction) => void): Promise<UnlistenFn> {
+  return listen<FindAction>("menu-find", (e) => cb(e.payload));
+}
 export function onShowInFinder(cb: () => void): Promise<UnlistenFn> {
   return listen("show-in-finder", () => cb());
 }
