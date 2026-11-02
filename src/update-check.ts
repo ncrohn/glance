@@ -41,3 +41,12 @@ export function isCheckDue(lastChecked: string | null, now: number): boolean {
   if (!lastChecked || !Number.isFinite(last)) return true;
   return now - last >= CHECK_INTERVAL_MS || now < last;
 }
+
+/** True when the updater found no signed manifest for this Mac: the release
+ *  predates auto-update, or has no build for this architecture. Matches the
+ *  updater plugin's messages for those two cases; anything else is a real
+ *  failure worth showing. */
+export function isMissingManifest(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /Could not fetch a valid release JSON|was not found in the response `platforms` object/.test(msg);
+}

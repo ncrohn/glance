@@ -18,6 +18,12 @@ const env = {
   watched: [] as string[],
   unwatched: [] as string[],
   storeGate: null as null | Promise<void>,
+  update: null as null | "no-manifest" | "broken" | {
+    version: string; currentVersion: string;
+    download(cb?: (done: number, total?: number) => void): Promise<void>; install(): Promise<void>; close(): Promise<void>;
+  },
+  latestRelease: null as unknown,
+  version: "0.0.0-test",
 };
 
 function resetEnv(): void {
@@ -34,13 +40,16 @@ function resetEnv(): void {
   env.annotations = new Map();
   env.storeError = null;
   env.calls = [];
+  env.update = null;
+  env.latestRelease = null;
+  env.version = "0.0.0-test";
 }
 
 const on = (name: string) => async (cb: Handler) => { env.handlers.set(name, cb); return () => {}; };
 const storeOp = async () => { if (env.storeError) throw env.storeError; };
 
 vi.mock("./ipc", () => ({
-  appVersion: async () => "0.0.0-test",
+  appVersion: async () => env.version,
   openExternal: async () => {}, openFileExternal: async () => {},
   localFileUrl: (p: string) => p, resolveWikilink: async () => null,
   setShowInFinderEnabled: async () => {}, revealInFinder: async () => {},
@@ -71,7 +80,13 @@ vi.mock("./ipc", () => ({
   watchAnnotations: async (s: string) => { env.watched.push(s); }, onAnnotationsChanged: on("annotations-changed"),
   onShowIntegrationPicker: on("x1"), listIntegrationTargets: async () => [], runIntegration: async () => [],
   onShowAbout: on("x2"), onShowWhatsNew: on("x3"), onShowTheme: on("x4"),
-  onCheckForUpdates: on("x7"), fetchLatestRelease: async () => null,
+  onCheckForUpdates: on("check-for-updates"), fetchLatestRelease: async () => env.latestRelease,
+  checkForAppUpdate: async () => {
+    if (env.update === "no-manifest") throw new Error("Could not fetch a valid release JSON from the remote");
+    if (env.update === "broken") throw new Error("invalid type: expected a string");
+    return env.update;
+  },
+  relaunchApp: async () => { env.calls.push("relaunch"); },
   onCloseActiveTab: on("close-active-tab"), onMenuSave: on("menu-save"), onSelectAll: on("x5"), onMenuFind: on("menu-find"),
   onShowInFinder: on("x6"), onQuitRequested: on("quit-requested"),
   quitApp: async () => { env.calls.push("quit"); },
@@ -845,6 +860,126 @@ describe("find in file", () => {
     await emit("menu-find", "open");
     document.querySelector(".find-input")!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     expect(document.querySelector<HTMLElement>(".find-bar")!.hidden).toBe(true);
+  });
+});
+
+describe("auto-update", () => {
+  function fakeUpdate(version = "9.9.9", onInstall?: () => Promise<void>) {
+    return {
+      version, currentVersion: "0.0.0-test",
+      download: async () => { env.calls.push(`download ${version}`); },
+      install: async () => { env.calls.push(`install ${version}`); await onInstall?.(); },
+      close: async () => { env.calls.push(`close ${version}`); },
+    };
+  }
+  const toastAction = () => document.querySelector<HTMLButtonElement>(".toast-action");
+
+  it("the launch check downloads quietly, then Restart to update installs and relaunches", async () => {
+    env.update = fakeUpdate();
+    await boot();
+    expect(env.calls).toEqual(["download 9.9.9"]);
+    expect(document.querySelector(".toast-text")?.textContent).toBe("Glance 9.9.9 is ready.");
+    toastAction()!.click();
+    await flush();
+    expect(env.calls).toEqual(["download 9.9.9", "install 9.9.9", "relaunch"]);
+  });
+
+  it("unsaved edits are asked about first, and Cancel stops the update", async () => {
+    env.fs.set("/a.md", "hello\n");
+    env.launch = ["/a.md"];
+    env.update = fakeUpdate();
+    await boot();
+    await type("UNSAVED ");
+    toastAction()!.click();
+    await flush();
+    await click("Cancel");
+    expect(env.calls).toEqual(["download 9.9.9"]);
+  });
+
+  it("Check for Updates offers Update and Restart, downloading on demand", async () => {
+    localStorage.setItem("glance.updateCheckedAt", String(Date.now()));
+    env.update = fakeUpdate();
+    await boot();
+    expect(env.calls).toEqual([]);
+    await emit("check-for-updates");
+    await click("Update and Restart");
+    expect(env.calls).toEqual(["download 9.9.9", "install 9.9.9", "relaunch"]);
+  });
+
+  it("Cancel at the unsaved prompt brings the ready message back", async () => {
+    env.fs.set("/a.md", "hello\n");
+    env.launch = ["/a.md"];
+    env.update = fakeUpdate();
+    await boot();
+    await type("UNSAVED ");
+    toastAction()!.click();
+    await flush();
+    await click("Cancel");
+    expect(document.querySelector(".toast-text")?.textContent).toBe("Glance 9.9.9 is ready.");
+  });
+
+  it("a menu check after the launch download reuses it", async () => {
+    env.update = fakeUpdate();
+    await boot();
+    env.update = fakeUpdate();
+    await emit("check-for-updates");
+    await click("Update and Restart");
+    expect(env.calls).toEqual(["download 9.9.9", "close 9.9.9", "install 9.9.9", "relaunch"]);
+  });
+
+  it("edits that slip in before the restart are asked about again", async () => {
+    env.fs.set("/a.md", "hello\n");
+    env.launch = ["/a.md"];
+    env.update = fakeUpdate("9.9.9", () => type("LATE "));
+    await boot();
+    toastAction()!.click();
+    await flush();
+    await flush(); // the fake install's typing switches to Edit first
+    expect(modalText()).toContain("Save changes");
+    await click("Cancel");
+    expect(env.calls).not.toContain("relaunch");
+    expect(modalText()).toContain("starts the next time you open Glance");
+  });
+
+  it("quitting while an update installs doesn't start a second prompt", async () => {
+    let finish!: () => void;
+    env.update = fakeUpdate("9.9.9", () => new Promise<void>((r) => { finish = r; }));
+    await boot();
+    toastAction()!.click();
+    await flush();
+    await emit("quit-requested");
+    expect(env.calls).not.toContain("quit");
+    finish();
+    await flush();
+    expect(env.calls).toContain("relaunch");
+  });
+
+  it("names a broken manifest instead of hiding it", async () => {
+    localStorage.setItem("glance.updateCheckedAt", String(Date.now()));
+    env.update = "broken";
+    env.version = "0.1.0";
+    env.latestRelease = { tag_name: "v9.9.9", html_url: "https://github.com/ncrohn/glance/releases/tag/v9.9.9" };
+    await boot();
+    await emit("check-for-updates");
+    expect(modalText()).toContain("Automatic update failed: invalid type");
+  });
+
+  it("with no signed manifest, falls back to the release page", async () => {
+    localStorage.setItem("glance.updateCheckedAt", String(Date.now()));
+    env.update = "no-manifest";
+    env.version = "0.1.0";
+    env.latestRelease = { tag_name: "v9.9.9", html_url: "https://github.com/ncrohn/glance/releases/tag/v9.9.9" };
+    await boot();
+    await emit("check-for-updates");
+    expect(modalText()).toContain("brew upgrade --cask glance");
+    expect(Array.from(document.querySelectorAll("#modal-root button")).map((b) => b.textContent)).toContain("Download");
+  });
+
+  it("an up-to-date manifest says so", async () => {
+    localStorage.setItem("glance.updateCheckedAt", String(Date.now()));
+    await boot();
+    await emit("check-for-updates");
+    expect(modalText()).toContain("You're up to date");
   });
 });
 

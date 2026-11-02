@@ -8,6 +8,8 @@
     "core:window:allow-start-dragging",
     "opener:default",
     "opener:allow-reveal-item-in-dir",
+    "updater:default",
+    "process:allow-restart",
     { "identifier": "opener:allow-open-path", "allow": [{ "path": "**" }] },
     "allow-read-file",
     "allow-write-file",
