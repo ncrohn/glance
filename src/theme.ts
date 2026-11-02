@@ -32,8 +32,10 @@ export const AUTO_DARK = "ink";
 export const THEMES: ThemeMeta[] = [
   { id: "paper", name: "Paper", appearance: "light" },
   { id: "solarized-light", name: "Solarized Light", appearance: "light" },
+  { id: "mesa-pop-light", name: "Mesa Pop Light", appearance: "light" },
   { id: "ink", name: "Ink", appearance: "dark" },
   { id: "solarized-dark", name: "Solarized Dark", appearance: "dark" },
+  { id: "mesa-pop-dark", name: "Mesa Pop Dark", appearance: "dark" },
   { id: "nord", name: "Nord", appearance: "dark" },
   { id: "high-contrast", name: "High Contrast", appearance: "dark" },
 ];

@@ -4,6 +4,8 @@ import { openUrl, openPath as openWithDefaultApp, revealItemInDir } from "@tauri
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { Annotation, AnnotationPatch, AnnotationStore, Resolution } from "./annotations";
 import { LATEST_RELEASE_URL } from "./update-check";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 export function appVersion(): Promise<string> {
   return getVersion();
@@ -207,6 +209,45 @@ export async function fetchLatestRelease(): Promise<unknown> {
   return res.json();
 }
 
+// A signed update the updater plugin found (lib.rs, tauri.conf.json
+// plugins.updater). `download` fetches and verifies it; `install` swaps the app
+// bundle in place, so the new version runs after `relaunchApp`.
+export interface AppUpdate {
+  version: string;
+  currentVersion: string;
+  /** `onProgress` gets bytes so far and the total, when the server sends one. */
+  download(onProgress?: (done: number, total?: number) => void): Promise<void>;
+  install(): Promise<void>;
+  /** Free the update (and any downloaded bytes) on the Rust side. */
+  close(): Promise<void>;
+}
+
+// Null when the release manifest names no newer version. Throws when there is
+// no usable manifest: a release from before auto-update, or none built for
+// this Mac's architecture.
+export async function checkForAppUpdate(): Promise<AppUpdate | null> {
+  const u = await check({ timeout: 10_000 });
+  if (!u) return null;
+  return {
+    version: u.version,
+    currentVersion: u.currentVersion,
+    download: (onProgress) => {
+      let done = 0;
+      let total: number | undefined;
+      return u.download((e) => {
+        if (e.event === "Started") total = e.data.contentLength;
+        else if (e.event === "Progress") { done += e.data.chunkLength; onProgress?.(done, total); }
+      });
+    },
+    install: () => u.install(),
+    close: () => u.close(),
+  };
+}
+
+export function relaunchApp(): Promise<void> {
+  return relaunch();
+}
+
 export function onShowTheme(cb: () => void): Promise<UnlistenFn> {
   return listen("show-theme", () => cb());
 }
@@ -220,6 +261,10 @@ export function onMenuSave(cb: () => void): Promise<UnlistenFn> {
 }
 export function onSelectAll(cb: () => void): Promise<UnlistenFn> {
   return listen("menu-select-all", () => cb());
+}
+export type FindAction = "open" | "next" | "previous";
+export function onMenuFind(cb: (action: FindAction) => void): Promise<UnlistenFn> {
+  return listen<FindAction>("menu-find", (e) => cb(e.payload));
 }
 export function onShowInFinder(cb: () => void): Promise<UnlistenFn> {
   return listen("show-in-finder", () => cb());

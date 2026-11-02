@@ -1,5 +1,5 @@
-import { EditorView, keymap } from "@codemirror/view";
-import { Annotation, Compartment, EditorState, Transaction } from "@codemirror/state";
+import { Decoration, type DecorationSet, EditorView, keymap } from "@codemirror/view";
+import { Annotation, Compartment, EditorState, StateEffect, StateField, Transaction } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, selectAll } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
@@ -40,6 +40,29 @@ const glanceHighlight = HighlightStyle.define([
   { tag: t.comment, color: "var(--faint)" },
 ]);
 
+// Find-in-file matches in source mode. CodeMirror only keeps the visible lines
+// in the DOM, so the page-level highlights can't reach them; decorations can.
+const setFindMarks = StateEffect.define<{ matches: { from: number; to: number }[]; current: number }>();
+const findMark = Decoration.mark({ class: "cm-find-match" });
+const findCurrent = Decoration.mark({ class: "cm-find-match cm-find-current" });
+const findField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(marks, tr) {
+    for (const e of tr.effects) {
+      if (e.is(setFindMarks)) {
+        const len = tr.state.doc.length;
+        return Decoration.set(
+          e.value.matches
+            .filter((m) => m.to <= len)
+            .map((m, i) => (i === e.value.current ? findCurrent : findMark).range(m.from, m.to)),
+        );
+      }
+    }
+    return marks.map(tr.changes);
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
 // Marks a change that came from outside the editor (the file changed on disk),
 // so it isn't reported back through onChange as if the user typed it.
 const external = Annotation.define<boolean>();
@@ -76,6 +99,7 @@ export function mountEditor(
         glanceTheme,
         darkness.of(EditorView.theme({}, { dark })),
         syntaxHighlighting(glanceHighlight),
+        findField,
         EditorView.updateListener.of((u) => {
           if (!u.docChanged) return;
           if (u.transactions.every((tr) => tr.annotation(external))) return;
@@ -115,6 +139,13 @@ export function mountEditor(
       const doc = view.state.doc;
       const target = doc.line(Math.min(Math.max(Math.round(line), 1), doc.lines));
       view.dispatch({ effects: EditorView.scrollIntoView(target.from, { y: "start" }) });
+    },
+    text: () => view.state.doc.toString(),
+    showFind: (matches, current, reveal) => {
+      const effects: StateEffect<unknown>[] = [setFindMarks.of({ matches, current })];
+      const m = matches[current];
+      if (reveal && m) effects.push(EditorView.scrollIntoView(m.from, { y: "center" }));
+      view.dispatch({ effects });
     },
   };
 }
@@ -217,4 +248,7 @@ export interface EditorHandle {
   /** 1-based source line at the top of the visible area. */
   topLine(): number;
   scrollToLine(line: number): void;
+  text(): string;
+  /** Mark find matches, the current one stronger; `reveal` scrolls it into view. */
+  showFind(matches: { from: number; to: number }[], current: number, reveal: boolean): void;
 }

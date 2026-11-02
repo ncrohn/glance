@@ -69,8 +69,8 @@ vi.mock("./ipc", () => ({
   watchAnnotations: async () => {}, onAnnotationsChanged: on("annotations-changed"),
   onShowIntegrationPicker: on("x1"), listIntegrationTargets: async () => [], runIntegration: async () => [],
   onShowAbout: on("x2"), onShowWhatsNew: on("x3"), onShowTheme: on("x4"),
-  onCheckForUpdates: on("x7"), fetchLatestRelease: async () => null,
-  onCloseActiveTab: on("close-active-tab"), onMenuSave: on("menu-save"), onSelectAll: on("x5"),
+  onCheckForUpdates: on("x7"), fetchLatestRelease: async () => null, checkForAppUpdate: async () => null, relaunchApp: async () => {},
+  onCloseActiveTab: on("close-active-tab"), onMenuSave: on("menu-save"), onSelectAll: on("x5"), onMenuFind: on("menu-find"),
   onShowInFinder: on("x6"), onQuitRequested: on("quit-requested"),
   // Used once the core-editor branch is in; harmless before it.
   onFileError: on("file-error"), canonicalizePath: async (p: string) => p,
