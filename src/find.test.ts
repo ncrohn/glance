@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { clampIndex, collectText, findMatches, foldCase, rangesFor, stepIndex } from "./find";
+import { clampIndex, collectText, findMatches, rangesFor, stepIndex } from "./find";
 import { mountFindBar } from "./find-bar";
 
 describe("findMatches", () => {
@@ -12,9 +12,17 @@ describe("findMatches", () => {
     expect(findMatches("text", "")).toEqual([]);
   });
 
-  it("keeps offsets when lowercasing would change a character's length", () => {
-    expect(foldCase("İx")).toHaveLength(2);
+  it("keeps offsets for characters whose lowercase form is longer", () => {
     expect(findMatches("İx X", "x")).toEqual([{ from: 1, to: 2 }, { from: 3, to: 4 }]);
+  });
+
+  it("lets a space in the query match a line break or a run of spaces", () => {
+    expect(findMatches("the quick\nbrown  fox", "quick brown fox")).toEqual([{ from: 4, to: 20 }]);
+  });
+
+  it("treats regex characters in the query literally", () => {
+    expect(findMatches("a.b axb (c)", "a.b")).toEqual([{ from: 0, to: 3 }]);
+    expect(findMatches("a.b axb (c)", "(c)")).toEqual([{ from: 8, to: 11 }]);
   });
 });
 
@@ -57,9 +65,32 @@ describe("collectText and rangesFor", () => {
   });
 
   it("does not match across two paragraphs", () => {
-    const v = view("<p>end</p><p>start</p>");
+    const v = view("<p>end</p>\n<p>start</p>");
     const { text } = collectText(v);
     expect(findMatches(text, "endstart")).toEqual([]);
+    expect(findMatches(text, "end start")).toEqual([]);
+  });
+
+  it("matches a phrase across a soft line break", () => {
+    const v = view("<p>the quick\nbrown fox</p>");
+    const { text, pieces } = collectText(v);
+    const [r] = rangesFor(pieces, findMatches(text, "quick brown"));
+    expect(r.toString()).toBe("quick\nbrown");
+  });
+
+  it("skips a diagram's source before mermaid draws it", () => {
+    const v = view('<pre class="mermaid-block">graph TD; cat</pre><p>cat</p>');
+    const { text } = collectText(v);
+    expect(findMatches(text, "cat")).toHaveLength(1);
+  });
+
+  it("places many matches across many nodes in one pass", () => {
+    const v = view(Array.from({ length: 2000 }, (_, i) => `<p>a<em>b</em>a ${i}</p>`).join(""));
+    const { text, pieces } = collectText(v);
+    const ranges = rangesFor(pieces, findMatches(text, "a"));
+    expect(ranges).toHaveLength(4000);
+    expect(ranges[3999].toString()).toBe("a");
+    expect(ranges[3999].startContainer.parentElement?.tagName).toBe("P");
   });
 
   it("skips gutter markers, buttons and the block editor", () => {

@@ -919,3 +919,35 @@ describe("auto-update", () => {
     expect(modalText()).toContain("You're up to date");
   });
 });
+
+describe("find in file keeps up with changes", () => {
+  const count = () => document.querySelector(".find-count")?.textContent;
+  async function search(q: string) {
+    const input = document.querySelector<HTMLInputElement>(".find-input")!;
+    input.value = q;
+    input.dispatchEvent(new Event("input"));
+    await flush();
+  }
+
+  it("recounts while typing in the ⌘E source view", async () => {
+    env.fs.set("/a.md", "cat\n");
+    env.launch = ["/a.md"];
+    await boot();
+    await editorView();
+    await emit("menu-find", "open");
+    await search("cat");
+    expect(count()).toBe("1 of 1");
+    await type("cat ", "end");
+    await flush();
+    expect(count()).toBe("1 of 2");
+  });
+
+  it("finds a phrase across a soft line break in the formatted view", async () => {
+    env.fs.set("/a.md", "the quick\nbrown fox\n");
+    env.launch = ["/a.md"];
+    await boot();
+    await emit("menu-find", "open");
+    await search("quick brown");
+    expect(count()).toBe("1 of 1");
+  });
+});

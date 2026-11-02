@@ -5,28 +5,20 @@
 
 export interface Match { from: number; to: number }
 
-// Lowercase one character at a time, keeping any character whose lowercase form
-// changes length (e.g. "İ"), so offsets in the folded text line up with the
-// original.
-export function foldCase(text: string): string {
-  let out = "";
-  for (const ch of text) {
-    const lower = ch.toLowerCase();
-    out += lower.length === ch.length ? lower : ch;
-  }
-  return out;
-}
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Case-insensitive, non-overlapping matches of `query` in `text`. */
+/** Case-insensitive, non-overlapping matches of `query` in `text`. Whitespace in
+ *  the query matches any run of whitespace, the way the formatted view shows a
+ *  soft line break or a double space as one space. */
 export function findMatches(text: string, query: string): Match[] {
   if (!query) return [];
-  const hay = foldCase(text);
-  const needle = foldCase(query);
+  const pattern = query
+    .split(/(\s+)/)
+    .map((part) => (/^\s+$/.test(part) ? "\\s+" : escapeRegExp(part)))
+    .join("");
   const out: Match[] = [];
-  let at = hay.indexOf(needle);
-  while (at >= 0) {
-    out.push({ from: at, to: at + needle.length });
-    at = hay.indexOf(needle, at + needle.length);
+  for (const m of text.matchAll(new RegExp(pattern, "gi"))) {
+    out.push({ from: m.index, to: m.index + m[0].length });
   }
   return out;
 }
@@ -45,16 +37,17 @@ export function clampIndex(current: number, count: number): number {
   return Math.min(Math.max(current, 0), count - 1);
 }
 
-// Gutter comment markers, code-block buttons and diagram SVGs aren't part of
-// the document's text.
-const SKIP = "button, svg, .anno-gutter-marker, .block-editor, [aria-hidden='true']";
+// Gutter comment markers, code-block buttons and diagrams aren't part of the
+// document's text. A diagram's source sits in a pre.mermaid-block until
+// mermaid swaps in its SVG.
+const SKIP = "button, svg, pre.mermaid-block, .anno-gutter-marker, .block-editor, [aria-hidden='true']";
 const BLOCK = "p, li, h1, h2, h3, h4, h5, h6, pre, td, th, blockquote, dd, dt, figcaption, div";
 
 interface Piece { node: Text; start: number }
 
 /** The view's searchable text plus where each text node starts in it. Text in
- *  different blocks is joined with a newline so a match can't run from the end
- *  of one paragraph into the next. */
+ *  different blocks is joined with a NUL, which no query matches (not even its
+ *  whitespace), so a match can't run from one paragraph into the next. */
 export function collectText(root: HTMLElement): { text: string; pieces: Piece[] } {
   const pieces: Piece[] = [];
   let text = "";
@@ -65,7 +58,7 @@ export function collectText(root: HTMLElement): { text: string; pieces: Piece[] 
   for (let n = walker.nextNode(); n; n = walker.nextNode()) {
     const node = n as Text;
     const block = node.parentElement?.closest(BLOCK) ?? null;
-    if (text && block !== lastBlock) text += "\n";
+    if (text && block !== lastBlock) text += "\u0000";
     lastBlock = block;
     pieces.push({ node, start: text.length });
     text += node.data;
@@ -73,15 +66,16 @@ export function collectText(root: HTMLElement): { text: string; pieces: Piece[] 
   return { text, pieces };
 }
 
-/** A DOM Range for each match, spanning text nodes where needed. */
+/** A DOM Range for each match, spanning text nodes where needed. Matches come
+ *  in order, so one pass over the pieces places them all. */
 export function rangesFor(pieces: Piece[], matches: Match[]): Range[] {
+  let i = 0;
+  // A match ending exactly where a node ends belongs to that node, not the next.
   const point = (offset: number, end: boolean): [Text, number] | null => {
-    for (const p of pieces) {
-      const len = p.node.data.length;
-      // A match ending exactly where a node ends belongs to that node, not the next.
-      if (offset >= p.start && (end ? offset <= p.start + len : offset < p.start + len)) {
-        return [p.node, offset - p.start];
-      }
+    for (; i < pieces.length; i++) {
+      const p = pieces[i];
+      const stop = p.start + p.node.data.length;
+      if (end ? offset <= stop : offset < stop) return offset >= p.start ? [p.node, offset - p.start] : null;
     }
     return null;
   };

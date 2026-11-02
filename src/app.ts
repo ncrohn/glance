@@ -53,7 +53,7 @@ import { needsSetup } from "./integration";
 import { shouldShowCommentHint } from "./hint";
 import type { ClientInfo, IntegrationAction } from "./ipc";
 import { confirmUnsaved } from "./modal";
-import { clampIndex, collectText, findMatches, rangesFor, stepIndex } from "./find";
+import { clampIndex, collectText, findMatches, rangesFor, stepIndex, type Match } from "./find";
 import { mountFindBar, type FindBar } from "./find-bar";
 import { onMenuFind, type FindAction } from "./ipc";
 import { checkForAppUpdate, relaunchApp, type AppUpdate } from "./ipc";
@@ -664,6 +664,8 @@ function renderContent(): void {
       const eol = state.docs.find((d) => d.id === doc.id)?.eol ?? doc.eol;
       state = updateEditorContent(state, doc.id, withEol(v, eol));
       refreshTabDirty(); // toggle dirty dot in place; don't rebuild tab nodes mid-interaction
+      // CodeMirror can't take a dispatch from inside its own update.
+      if (findBar?.isOpen()) queueMicrotask(() => runFind(false));
     }, currentAppearance() === "dark");
     editorDocId = doc.id;
   } else {
@@ -717,6 +719,8 @@ function redrawComments(id: string): void {
   if (!doc || doc.id !== id || doc.viewMode !== "rendered" || !view) return;
   // Highlighting walks the view's text and would reach into the block editor.
   if (blockEdit?.docId !== id) highlightComments(view, doc);
+  // Redrawing comments replaces the text nodes the find ranges point into.
+  if (findBar?.isOpen()) runFind(false);
   renderRailFor();
 }
 
@@ -792,34 +796,49 @@ function clearFindMarks(): void {
   if (activeEditor) activeEditor.showFind([], -1, false);
 }
 
-// Search the active doc and paint the matches. `reveal` scrolls the current
-// match into view; a re-render passes false so it doesn't fight scroll restore.
-// Returns the match count.
-function runFind(reveal: boolean): number {
-  if (!findBar) return 0;
+// The last search, kept so stepping only repaints the current match. Rebuilt on
+// every render, comment redraw and source-view edit while the bar is open.
+let findHits: Range[] = [];
+let findSpans: Match[] = [];
+const findCount = () => findSpans.length || findHits.length;
+
+// Search the active doc and paint every match.
+function searchFind(): void {
+  findHits = [];
+  findSpans = [];
+  if (!findBar) return;
   const doc = getActive(state);
   if (doc?.id !== findDocId) { findIndex = -1; findDocId = doc?.id ?? null; }
   const query = findBar.query();
   clearFindMarks();
-  if (!doc || !query) { findIndex = -1; findBar.setCount(-1, 0); return 0; }
-  if (doc.viewMode === "source" && activeEditor) {
-    const matches = findMatches(activeEditor.text(), query);
-    findIndex = findIndex < 0 && matches.length ? 0 : clampIndex(findIndex, matches.length);
-    activeEditor.showFind(matches, findIndex, reveal);
-    findBar.setCount(findIndex, matches.length);
-    return matches.length;
+  if (doc && query) {
+    const view = document.querySelector<HTMLElement>("#content .rendered");
+    if (doc.viewMode === "source" && activeEditor) {
+      findSpans = findMatches(activeEditor.text(), query);
+    } else if (view) {
+      const { text, pieces } = collectText(view);
+      findHits = rangesFor(pieces, findMatches(text, query));
+    }
   }
-  const view = document.querySelector<HTMLElement>("#content .rendered");
-  if (!view) { findBar.setCount(-1, 0); return 0; }
-  const { text, pieces } = collectText(view);
-  const ranges = rangesFor(pieces, findMatches(text, query));
-  findIndex = findIndex < 0 && ranges.length ? 0 : clampIndex(findIndex, ranges.length);
-  findBar.setCount(findIndex, ranges.length);
-  if (canHighlight() && ranges.length) {
-    CSS.highlights.set("find-match", new Highlight(...ranges));
-    CSS.highlights.set("find-current", new Highlight(ranges[findIndex]));
+  const count = findCount();
+  findIndex = count === 0 ? -1 : findIndex < 0 ? 0 : clampIndex(findIndex, count);
+  if (canHighlight() && findHits.length) CSS.highlights.set("find-match", new Highlight(...findHits));
+}
+
+// Mark the current match and update the count. `reveal` scrolls it into view;
+// a re-render passes false so it doesn't fight scroll restore.
+function showCurrent(reveal: boolean): void {
+  if (!findBar) return;
+  findBar.setCount(findIndex, findCount());
+  if (activeEditor && getActive(state)?.viewMode === "source") {
+    activeEditor.showFind(findSpans, findIndex, reveal);
+    return;
   }
-  const current = ranges[findIndex];
+  const current = findHits[findIndex];
+  if (canHighlight()) {
+    if (current) CSS.highlights.set("find-current", new Highlight(current));
+    else CSS.highlights.delete("find-current");
+  }
   const content = document.getElementById("content");
   if (reveal && current && content) {
     const box = content.getBoundingClientRect();
@@ -828,7 +847,11 @@ function runFind(reveal: boolean): number {
       content.scrollTop += r.top - box.top - box.height / 3;
     }
   }
-  return ranges.length;
+}
+
+function runFind(reveal: boolean): void {
+  searchFind();
+  showCurrent(reveal);
 }
 
 // The bar sits over #content's top-right corner, clear of the comment rail.
@@ -844,10 +867,15 @@ function handleFind(action: FindAction): void {
   if (!findBar) return;
   if (action === "open") {
     // The block editor's text would be searched as source, so show it formatted.
+    const editing = blockEdit !== null;
     finishBlockEdit();
     placeFindBar();
     findBar.open();
-    runFind(true);
+    searchFind();
+    // Closing the editor re-rendered, and that render restores the scroll
+    // position on the next frame; reveal the match after it.
+    if (editing) requestAnimationFrame(() => showCurrent(true));
+    else showCurrent(true);
     return;
   }
   if (!findBar.isOpen()) { placeFindBar(); findBar.open(); runFind(true); return; }
@@ -855,8 +883,8 @@ function handleFind(action: FindAction): void {
 }
 
 function stepFind(dir: 1 | -1): void {
-  findIndex = stepIndex(findIndex, runFind(false), dir);
-  runFind(true);
+  findIndex = stepIndex(findIndex, findCount(), dir);
+  showCurrent(true);
 }
 
 function mountFind(): void {
@@ -868,6 +896,8 @@ function mountFind(): void {
     onClose: () => {
       findBar?.close();
       clearFindMarks();
+      findHits = [];
+      findSpans = [];
       findIndex = -1;
     },
   });
