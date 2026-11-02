@@ -495,7 +495,9 @@ export function showWhatsNew(version: string, html: string, onClose: () => void)
 
 /** A newer release is on GitHub. Download opens the release page; Homebrew
  *  installs get the upgrade command instead. */
-export function showUpdateAvailable(current: string, latest: string, url: string): void {
+// With `onUpdate` the update installs in place; without it (no signed update
+// for this Mac) the modal links to the release page and the Homebrew command.
+export function showUpdateAvailable(current: string, latest: string, url: string, onUpdate?: () => void): void {
   const m = openModal({ title: "", onEscape: () => m.close() });
   m.card.classList.add("update");
   m.card.querySelector(".modal-title")?.remove();
@@ -525,6 +527,19 @@ export function showUpdateAvailable(current: string, latest: string, url: string
   titles.append(name, versions);
   head.append(icon, titles);
   m.card.insertBefore(head, m.body);
+
+  if (onUpdate) {
+    const msg = document.createElement("p");
+    msg.textContent = "Glance downloads the update and restarts on the new version. Unsaved changes get asked about first.";
+    m.body.appendChild(msg);
+    const later = button("Later");
+    later.onclick = m.close;
+    const install = button("Update and Restart", true);
+    install.onclick = () => { m.close(); onUpdate(); };
+    m.footer.append(later, install);
+    install.focus();
+    return;
+  }
 
   const label = document.createElement("p");
   label.className = "update-label";

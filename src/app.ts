@@ -56,6 +56,7 @@ import { confirmUnsaved } from "./modal";
 import { clampIndex, collectText, findMatches, rangesFor, stepIndex } from "./find";
 import { mountFindBar, type FindBar } from "./find-bar";
 import { onMenuFind, type FindAction } from "./ipc";
+import { checkForAppUpdate, relaunchApp, type AppUpdate } from "./ipc";
 
 const LS_OPEN = "glance.openPaths";
 const LS_RECENT = "glance.recent";
@@ -157,6 +158,8 @@ function el<K extends keyof HTMLElementTagNameMap>(
 const annotationsLoaded = new Set<string>();
 
 const ERROR_TOAST_MS = 12000;
+// Long enough to notice; a missed toast comes back on the next daily check.
+const UPDATE_TOAST_MS = 30000;
 
 async function loadAnnotations(absPath: string): Promise<void> {
   let store;
@@ -1002,14 +1005,21 @@ async function requestQuit(): Promise<void> {
   if (quitting) return;
   quitting = true;
   try {
-    for (const doc of state.docs.filter(isDirty)) {
-      if (state.activeId !== doc.id) { state = setActive(state, doc.id); render(); }
-      if (!(await settleUnsaved(doc.id))) return;
-    }
+    if (!(await settleAllUnsaved())) return;
     await quitApp().catch((err) => showNotice(`Couldn't quit: ${err}`, false));
   } finally {
     quitting = false;
   }
+}
+
+// Walk every tab with unsaved edits through Save / Don't Save / Cancel. False
+// when one was cancelled.
+async function settleAllUnsaved(): Promise<boolean> {
+  for (const doc of state.docs.filter(isDirty)) {
+    if (state.activeId !== doc.id) { state = setActive(state, doc.id); render(); }
+    if (!(await settleUnsaved(doc.id))) return false;
+  }
+  return true;
 }
 
 // A change event whose text we already account for: what we last saw on disk,
@@ -1692,6 +1702,64 @@ export async function start(): Promise<void> {
 // toast replaced by another one shows again next launch.
 async function checkForUpdates(manual: boolean): Promise<void> {
   if (!manual && !isCheckDue(localStorage.getItem(LS_UPDATE_CHECKED), Date.now())) return;
+  let update: AppUpdate | null;
+  try {
+    update = await checkForAppUpdate();
+  } catch {
+    // No signed manifest to update from, so point at the release page instead.
+    return checkForReleasePage(manual);
+  }
+  const markChecked = () => localStorage.setItem(LS_UPDATE_CHECKED, String(Date.now()));
+  if (!update) {
+    markChecked();
+    if (manual) showUpToDate(await appVersion().catch(() => ""));
+    return;
+  }
+  const found = update;
+  if (manual) {
+    markChecked();
+    showUpdateAvailable(found.currentVersion, found.version, "", () => { void installUpdate(found); });
+    return;
+  }
+  // The launch check downloads quietly and only asks once the update is ready.
+  try { await found.download(); } catch { return; }
+  downloadedUpdate = found;
+  showToast(`Glance ${found.version} is ready.`, {
+    actionLabel: "Restart to update",
+    onAction: () => { markChecked(); void installUpdate(found); },
+    onExpire: markChecked,
+    ms: UPDATE_TOAST_MS,
+  });
+}
+
+// The update a launch check already downloaded, so installing skips the fetch.
+let downloadedUpdate: AppUpdate | null = null;
+let installing = false;
+
+// Unsaved edits get the same Save / Don't Save / Cancel as quitting, then the
+// update replaces the app and Glance starts again on the new version.
+async function installUpdate(update: AppUpdate): Promise<void> {
+  if (installing) return;
+  installing = true;
+  try {
+    if (!(await settleAllUnsaved())) return;
+    if (downloadedUpdate !== update) {
+      showToast(`Downloading Glance ${update.version}…`, { ms: UPDATE_TOAST_MS });
+      await update.download();
+      downloadedUpdate = update;
+    }
+    await update.install();
+    await relaunchApp();
+  } catch (err) {
+    showNotice(`Couldn't install the update. ${err instanceof Error ? err.message : err}`, false);
+  } finally {
+    installing = false;
+  }
+}
+
+// The check before auto-update: compare with GitHub's latest release and link
+// to its page.
+async function checkForReleasePage(manual: boolean): Promise<void> {
   let current = "";
   let release = null;
   try {

@@ -4,6 +4,8 @@ import { openUrl, openPath as openWithDefaultApp, revealItemInDir } from "@tauri
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { Annotation, AnnotationPatch, AnnotationStore, Resolution } from "./annotations";
 import { LATEST_RELEASE_URL } from "./update-check";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 
 export function appVersion(): Promise<string> {
   return getVersion();
@@ -205,6 +207,34 @@ export async function fetchLatestRelease(): Promise<unknown> {
   });
   if (!res.ok) throw new Error(`GitHub returned ${res.status}`);
   return res.json();
+}
+
+// A signed update the updater plugin found (lib.rs, tauri.conf.json
+// plugins.updater). `download` fetches and verifies it; `install` swaps the app
+// bundle in place, so the new version runs after `relaunchApp`.
+export interface AppUpdate {
+  version: string;
+  currentVersion: string;
+  download(): Promise<void>;
+  install(): Promise<void>;
+}
+
+// Null when the release manifest names no newer version. Throws when there is
+// no usable manifest: a release from before auto-update, or none built for
+// this Mac's architecture.
+export async function checkForAppUpdate(): Promise<AppUpdate | null> {
+  const u = await check({ timeout: 10_000 });
+  if (!u) return null;
+  return {
+    version: u.version,
+    currentVersion: u.currentVersion,
+    download: () => u.download(),
+    install: () => u.install(),
+  };
+}
+
+export function relaunchApp(): Promise<void> {
+  return relaunch();
 }
 
 export function onShowTheme(cb: () => void): Promise<UnlistenFn> {
