@@ -47,6 +47,9 @@ import { confirmOpenFile, confirmReload, showNotice, showSetupResult, showIntegr
 import { showUpdateAvailable, showUpToDate } from "./modal";
 import { showUpdateProgress } from "./modal";
 import { fetchLatestRelease, onCheckForUpdates } from "./ipc";
+import { onShowReadingWidth } from "./ipc";
+import { showReadingWidthPicker } from "./modal";
+import { applyWidth, loadWidthPref, saveWidthPref } from "./reading-width";
 import {
   applyTheme, loadThemePref, saveThemePref, currentAppearance, currentThemeId, type ThemePref,
 } from "./theme";
@@ -1649,6 +1652,7 @@ export async function start(): Promise<void> {
   // inline bootstrap in index.html already set data-theme to avoid a flash;
   // this re-applies it and, for Auto, keeps it in sync with the OS.
   applyTheme(loadThemePref(), render);
+  applyWidth(loadWidthPref());
   trackPaneWidth();
   applyRailWidth(parseRailWidth(localStorage.getItem(LS_RAIL_W)));
   const grip = document.getElementById("rail-grip");
@@ -1675,6 +1679,12 @@ export async function start(): Promise<void> {
     showThemePicker(loadThemePref(), {
       onPreview: (pref) => applyTheme(pref, render),
       onCommit: changeTheme,
+    });
+  });
+  await onShowReadingWidth(() => {
+    showReadingWidthPicker(loadWidthPref(), {
+      onPreview: applyWidth,
+      onCommit: (id) => { saveWidthPref(id); applyWidth(id); },
     });
   });
   await onCloseActiveTab(() => { const d = getActive(state); if (d) void closeTab(d.id); });

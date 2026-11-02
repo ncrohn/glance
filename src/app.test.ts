@@ -79,7 +79,7 @@ vi.mock("./ipc", () => ({
   ensureAnnotationStore: async (p: string) => { await env.storeGate; return "/store" + p; },
   watchAnnotations: async (s: string) => { env.watched.push(s); }, onAnnotationsChanged: on("annotations-changed"),
   onShowIntegrationPicker: on("x1"), listIntegrationTargets: async () => [], runIntegration: async () => [],
-  onShowAbout: on("x2"), onShowWhatsNew: on("x3"), onShowTheme: on("x4"),
+  onShowAbout: on("x2"), onShowWhatsNew: on("x3"), onShowTheme: on("x4"), onShowReadingWidth: on("x4w"),
   onCheckForUpdates: on("check-for-updates"), fetchLatestRelease: async () => env.latestRelease,
   checkForAppUpdate: async () => {
     if (env.update === "no-manifest") throw new Error("Could not fetch a valid release JSON from the remote");

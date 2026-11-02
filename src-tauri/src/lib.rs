@@ -361,6 +361,9 @@ pub fn run() {
                 "open_theme" => {
                     let _ = app.emit("show-theme", ());
                 }
+                "open_reading_width" => {
+                    let _ = app.emit("show-reading-width", ());
+                }
                 _ => {}
             }
         })
@@ -530,7 +533,15 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
-            let view_menu = Submenu::with_items(handle, "View", true, &[&theme_item])?;
+            let reading_width_item = MenuItem::with_id(
+                handle,
+                "open_reading_width",
+                "Reading Width…",
+                true,
+                None::<&str>,
+            )?;
+            let view_menu =
+                Submenu::with_items(handle, "View", true, &[&theme_item, &reading_width_item])?;
             let menu = Menu::with_items(handle, &[&app_menu, &file_menu, &edit_menu, &view_menu])?;
             app.set_menu(menu)?;
 

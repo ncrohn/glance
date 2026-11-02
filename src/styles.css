@@ -600,7 +600,7 @@ body {
 
 .rendered {
   position: relative; /* anchor for absolutely-placed gutter annotation markers */
-  max-width: 47rem;
+  max-width: var(--reading-w, 47rem); /* View → Reading Width…, see reading-width.ts */
   margin: 0 auto;
   padding: 52px 56px 120px;
   font-family: var(--font-body);
@@ -1071,8 +1071,8 @@ body {
 /* First-run strip above the rendered text: says how to leave a comment */
 .comment-hint {
   display: flex; align-items: center; gap: 10px;
-  /* .rendered is 47rem border-box with 56px side padding; span its text column */
-  width: calc(100% - 112px); max-width: calc(47rem - 112px);
+  /* .rendered is --reading-w border-box with 56px side padding; span its text column */
+  width: calc(100% - 112px); max-width: calc(var(--reading-w, 47rem) - 112px);
   margin: 12px auto 0; padding: 8px 12px;
   border: 1px solid var(--border); border-radius: 8px;
   background: var(--raised); color: var(--muted);
@@ -1318,6 +1318,14 @@ body {
 
 /* Theme picker — radio-style list of themes with a live swatch preview */
 .modal .box.theme-picker { max-width: 400px; }
+
+/* Reading width picker reuses .theme-row; its swatch is a page with a text column. */
+.width-swatch {
+  flex: none; display: flex; flex-direction: column; justify-content: center;
+  align-items: center; gap: 3px; width: 30px; height: 22px;
+  border-radius: 6px; border: 1px solid var(--border); background: var(--bg);
+}
+.width-swatch i { display: block; height: 2px; border-radius: 1px; background: var(--muted); }
 .theme-list { display: flex; flex-direction: column; gap: 2px; }
 .theme-row {
   display: flex; align-items: center; gap: 12px; width: 100%;
