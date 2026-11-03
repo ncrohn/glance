@@ -111,6 +111,99 @@ pub fn canonicalize_path(path: String) -> String {
     crate::cli::canonical(Path::new(&path))
 }
 
+/// What the tab context menu can copy about a document.
+#[derive(serde::Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum CopyKind {
+    Name,
+    Path,
+    Folder,
+    Link,
+}
+
+/// `[name](path)`, the label's inline-markdown characters escaped and each path
+/// segment percent-encoded like `encodeURIComponent` (plus parens), so the link
+/// renders as the literal filename and resolves back to the file.
+fn markdown_link(name: &str, path: &str) -> String {
+    let mut label = String::new();
+    for c in name.chars() {
+        if "\\`*_[]<>&~!".contains(c) {
+            label.push('\\');
+        }
+        label.push(c);
+    }
+    let href = path
+        .split('/')
+        .map(|seg| {
+            let mut out = String::new();
+            for b in seg.bytes() {
+                if b.is_ascii_alphanumeric() || b"-_.!~*'".contains(&b) {
+                    out.push(b as char);
+                } else {
+                    out.push_str(&format!("%{b:02X}"));
+                }
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("[{label}]({href})")
+}
+
+/// The text to copy, built here from an open document's own path so that
+/// script injected into the page can't put text of its choosing on the
+/// clipboard, only the name or location of a document the user opened.
+fn doc_clipboard_text(docs: &OpenDocs, path: &str, kind: CopyKind) -> Result<String, String> {
+    if !docs.contains(path) {
+        return Err(format!("Glance can only copy details of documents it has open: {path}"));
+    }
+    let p = Path::new(path);
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    Ok(match kind {
+        CopyKind::Name => name,
+        CopyKind::Path => path.to_string(),
+        CopyKind::Folder => p
+            .parent()
+            .map(|d| d.to_string_lossy().into_owned())
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| "/".into()),
+        CopyKind::Link => markdown_link(&name, path),
+    })
+}
+
+/// Copy a document's name, path, folder or a markdown link to it, for the tab
+/// context menu. Done here rather than by the webview's Clipboard API because a
+/// native menu pick isn't a user gesture, so WebKit may refuse it.
+#[tauri::command]
+pub fn copy_doc_to_clipboard(
+    path: String,
+    kind: CopyKind,
+    docs: tauri::State<OpenDocs>,
+) -> Result<(), String> {
+    pbcopy(&doc_clipboard_text(&docs, &path, kind)?)
+}
+
+/// `pbcopy` decodes its input by locale. An app launched from Finder has none,
+/// and one launched via `mdview` inherits the shell's, which may be `C`, so
+/// UTF-8 is forced (LC_ALL beats LC_CTYPE and LANG) or non-ASCII is mangled.
+fn pbcopy(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("/usr/bin/pbcopy")
+        .env("LC_ALL", "en_US.UTF-8")
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    child
+        .stdin
+        .take()
+        .ok_or("pbcopy has no stdin")?
+        .write_all(text.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if status.success() { Ok(()) } else { Err(format!("pbcopy exited with {status}")) }
+}
+
 /// Replace a file's contents so a crash or a full disk leaves either the old
 /// text or the new, never a truncated file: write a temp file beside the
 /// target, fsync it, then rename it over. A symlink is followed first so the
@@ -232,6 +325,43 @@ pub fn resolve_open_target(path: String) -> Result<OpenTarget, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_links_match_the_shared_fixture() {
+        // The frontend test renders each of these links and checks it shows
+        // the filename and resolves back to the path.
+        #[derive(serde::Deserialize)]
+        struct Case {
+            path: String,
+            link: String,
+        }
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("../../src/fixtures/markdown-links.json")).unwrap();
+        assert!(!cases.is_empty());
+        for c in cases {
+            let name = c.path.rsplit('/').next().unwrap();
+            assert_eq!(markdown_link(name, &c.path), c.link, "{}", c.path);
+        }
+    }
+
+    #[test]
+    fn copies_only_details_of_open_documents() {
+        let dir = scratch("copy-details");
+        let doc = dir.join("Notes [v2].md");
+        fs::write(&doc, "x").unwrap();
+        let doc = doc.to_str().unwrap();
+        let docs = OpenDocs::default();
+        let text = |kind| doc_clipboard_text(&docs, doc, kind);
+
+        assert!(text(CopyKind::Path).unwrap_err().contains("documents it has open"));
+
+        read_document(&docs, doc).unwrap();
+        assert_eq!(text(CopyKind::Name).unwrap(), "Notes [v2].md");
+        assert_eq!(text(CopyKind::Path).unwrap(), doc);
+        assert_eq!(text(CopyKind::Folder).unwrap(), dir.to_str().unwrap());
+        assert!(text(CopyKind::Link).unwrap().starts_with("[Notes \\[v2\\].md]("));
+        assert!(doc_clipboard_text(&docs, "/etc/passwd", CopyKind::Path).is_err());
+    }
     use std::os::unix::fs::symlink;
 
     fn scratch(name: &str) -> std::path::PathBuf {

@@ -16,7 +16,7 @@ import {
   readAnnotations, addStoredAnnotation, removeStoredAnnotation, updateStoredAnnotation, addStoredReply, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
   onShowAbout, onShowWhatsNew, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
-  onShowInFinder, revealInFinder, setShowInFinderEnabled, onQuitRequested, quitApp,
+  onShowInFinder, revealInFinder, copyDocToClipboard, popupContextMenu, setShowInFinderEnabled, onQuitRequested, quitApp,
   readReviewed, writeReviewed, openExternal, openFileExternal, localFileUrl, resolveWikilink,
   canonicalizePath, onFileError,
 } from "./ipc";
@@ -41,6 +41,7 @@ import { annotationIdSelector } from "./annotation-ui";
 import { mountBlockEditor, mountEditor, type BlockEditorHandle, type EditorHandle } from "./editor";
 import { appendTarget, caretInSource, fenceBody, sliceLines, spliceLines, splicedCount, trimBlankTail } from "./block-edit";
 import { decideReload } from "./reload";
+import { parentDir, tabMenuEntries, tabsToClose, type TabMenuAction } from "./tab-menu";
 import { restoreTarget, lineAtOffset, offsetForLine, type LineBlock } from "./scroll-restore";
 import { confirmOpenFile, confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker, showWhatsNew } from "./modal";
 import { showUpdateAvailable, showUpToDate } from "./modal";
@@ -51,7 +52,7 @@ import {
 import { openPaths, pushRecent } from "./session";
 import { needsSetup } from "./integration";
 import { shouldShowCommentHint } from "./hint";
-import type { ClientInfo, IntegrationAction } from "./ipc";
+import type { ClientInfo, CopyKind, IntegrationAction } from "./ipc";
 import { confirmUnsaved } from "./modal";
 
 const LS_OPEN = "glance.openPaths";
@@ -402,7 +403,47 @@ function bindTabBar(bar: HTMLElement): void {
     if (target.closest(".close")) { void closeTab(id); return; }
     if (id !== state.activeId) { state = setActive(state, id); render(); }
   });
+  bar.addEventListener("contextmenu", (ev) => {
+    const id = (ev.target as HTMLElement).closest<HTMLElement>(".tab")?.dataset.id;
+    if (!id) return;
+    ev.preventDefault();
+    hideTabPreview();
+    const entries = tabMenuEntries(state, id).map((e) => e === "separator" ? e : { id: e.action, text: e.text, enabled: e.enabled });
+    void popupContextMenu(entries, (action) => { void runTabMenuAction(id, action as TabMenuAction); });
+  });
   bindTabHover(bar);
+}
+
+async function copyForTab(path: string, kind: CopyKind, what: string): Promise<void> {
+  try {
+    await copyDocToClipboard(path, kind);
+    showToast(`Copied ${what}`);
+  } catch {
+    showNotice(`Couldn't copy the ${what}.`, false);
+  }
+}
+
+async function runTabMenuAction(id: string, action: TabMenuAction): Promise<void> {
+  const d = state.docs.find((x) => x.id === id);
+  if (!d) return; // closed while the menu was open
+  switch (action) {
+    case "copy-name": return copyForTab(d.absPath, "name", "filename");
+    case "copy-path": return copyForTab(d.absPath, "path", "path");
+    case "copy-dir": return copyForTab(d.absPath, "folder", "folder path");
+    case "copy-link": return copyForTab(d.absPath, "link", "link");
+    case "reveal":
+      return revealInFinder(d.absPath).catch(() => showNotice(`Couldn't show ${d.absPath} in Finder.`, false));
+    case "close": case "close-others": case "close-left": case "close-right":
+      // One at a time, so each unsaved tab gets its own prompt; a Cancel on one
+      // (the tab is still open afterwards) stops the rest.
+      for (const t of tabsToClose(state, id, action)) {
+        // Bring a dirty tab forward first so its prompt sits over its edits.
+        const doc = state.docs.find((x) => x.id === t);
+        if (doc && isDirty(doc) && state.activeId !== t) { state = setActive(state, t); render(); }
+        await closeTab(t);
+        if (state.docs.some((x) => x.id === t)) return;
+      }
+  }
 }
 
 function renderTabBar(): void {
@@ -474,9 +515,7 @@ function metaRow(key: string, value: string): HTMLElement {
 // preview so same-named files across folders (e.g. many index.md) are tellable
 // apart at a glance.
 function dirLabel(absPath: string): string {
-  const slash = absPath.lastIndexOf("/");
-  const dir = slash > 0 ? absPath.slice(0, slash) : absPath;
-  return dir.replace(/^\/Users\/[^/]+/, "~");
+  return parentDir(absPath).replace(/^\/Users\/[^/]+/, "~");
 }
 
 function buildTabPreview(host: HTMLElement, d: Doc): void {

@@ -1,0 +1,58 @@
+[
+  {
+    "path": "/x/a.md",
+    "link": "[a.md](/x/a.md)"
+  },
+  {
+    "path": "/My Notes/x (1).md",
+    "link": "[x (1).md](/My%20Notes/x%20%281%29.md)"
+  },
+  {
+    "path": "/notes/review#1.md",
+    "link": "[review#1.md](/notes/review%231.md)"
+  },
+  {
+    "path": "/notes/why?.md",
+    "link": "[why?.md](/notes/why%3F.md)"
+  },
+  {
+    "path": "/notes/a%20b.md",
+    "link": "[a%20b.md](/notes/a%2520b.md)"
+  },
+  {
+    "path": "/notes/#draft?/a%20b (1)[v2].md",
+    "link": "[a%20b (1)\\[v2\\].md](/notes/%23draft%3F/a%2520b%20%281%29%5Bv2%5D.md)"
+  },
+  {
+    "path": "/My Notes/café [draft] (1).md",
+    "link": "[café \\[draft\\] (1).md](/My%20Notes/caf%C3%A9%20%5Bdraft%5D%20%281%29.md)"
+  },
+  {
+    "path": "/notes/*draft*.md",
+    "link": "[\\*draft\\*.md](/notes/*draft*.md)"
+  },
+  {
+    "path": "/notes/__init__.md",
+    "link": "[\\_\\_init\\_\\_.md](/notes/__init__.md)"
+  },
+  {
+    "path": "/notes/_wip_.md",
+    "link": "[\\_wip\\_.md](/notes/_wip_.md)"
+  },
+  {
+    "path": "/notes/`x`.md",
+    "link": "[\\`x\\`.md](/notes/%60x%60.md)"
+  },
+  {
+    "path": "/notes/~~old~~.md",
+    "link": "[\\~\\~old\\~\\~.md](/notes/~~old~~.md)"
+  },
+  {
+    "path": "/notes/a <b> & c!.md",
+    "link": "[a \\<b\\> \\& c\\!.md](/notes/a%20%3Cb%3E%20%26%20c!.md)"
+  },
+  {
+    "path": "/notes/it's-a+b=c.md",
+    "link": "[it's-a+b=c.md](/notes/it's-a%2Bb%3Dc.md)"
+  }
+]

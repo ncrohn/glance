@@ -13,6 +13,7 @@
     "allow-write-file",
     "allow-resolve-open-target",
     "allow-canonicalize-path",
+    "allow-copy-doc-to-clipboard",
     "allow-watch-file",
     "allow-unwatch-file",
     "allow-watch-annotations",
