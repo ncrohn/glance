@@ -46,8 +46,12 @@ impl OpenDocs {
     }
 
     fn contains(&self, path: &str) -> bool {
+        self.key(path).is_some()
+    }
+
+    fn key(&self, path: &str) -> Option<String> {
         let key = crate::annotations::doc_key(path);
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).contains(&key)
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).get(&key).cloned()
     }
 }
 
@@ -154,10 +158,9 @@ fn markdown_link(name: &str, path: &str) -> String {
 /// script injected into the page can't put text of its choosing on the
 /// clipboard, only the name or location of a document the user opened.
 fn doc_clipboard_text(docs: &OpenDocs, path: &str, kind: CopyKind) -> Result<String, String> {
-    if !docs.contains(path) {
-        return Err(format!("Glance can only copy details of documents it has open: {path}"));
-    }
-    let p = Path::new(path);
+    let path = docs.key(path)
+        .ok_or_else(|| format!("Glance can only copy details of documents it has open: {path}"))?;
+    let p = Path::new(&path);
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     Ok(match kind {
         CopyKind::Name => name,
@@ -167,7 +170,7 @@ fn doc_clipboard_text(docs: &OpenDocs, path: &str, kind: CopyKind) -> Result<Str
             .map(|d| d.to_string_lossy().into_owned())
             .filter(|d| !d.is_empty())
             .unwrap_or_else(|| "/".into()),
-        CopyKind::Link => markdown_link(&name, path),
+        CopyKind::Link => markdown_link(&name, &path),
     })
 }
 
@@ -346,7 +349,7 @@ mod tests {
 
     #[test]
     fn copies_only_details_of_open_documents() {
-        let dir = scratch("copy-details");
+        let dir = fs::canonicalize(scratch("copy-details")).unwrap();
         let doc = dir.join("Notes [v2].md");
         fs::write(&doc, "x").unwrap();
         let doc = doc.to_str().unwrap();
@@ -361,6 +364,30 @@ mod tests {
         assert_eq!(text(CopyKind::Folder).unwrap(), dir.to_str().unwrap());
         assert!(text(CopyKind::Link).unwrap().starts_with("[Notes \\[v2\\].md]("));
         assert!(doc_clipboard_text(&docs, "/etc/passwd", CopyKind::Path).is_err());
+    }
+
+    #[test]
+    fn clipboard_details_use_the_open_document_path_for_aliases() {
+        let dir = fs::canonicalize(scratch("copy-aliases")).unwrap();
+        let doc = dir.join("open.md");
+        fs::write(&doc, "x").unwrap();
+        let docs = opened(&doc);
+        let alias = dir.join("alias.md");
+        symlink(&doc, &alias).unwrap();
+        let fabricated = dir.join("\nINJECTED_TEXT\n/../open.md");
+        assert!(!fabricated.exists());
+
+        for kind in [CopyKind::Path, CopyKind::Folder, CopyKind::Link, CopyKind::Name] {
+            let expected = doc_clipboard_text(&docs, s(&doc), kind).unwrap();
+            for path in [&fabricated, &alias] {
+                assert_eq!(doc_clipboard_text(&docs, s(path), kind).unwrap(), expected);
+            }
+        }
+
+        fs::remove_file(&doc).unwrap();
+        assert_eq!(doc_clipboard_text(&docs, s(&fabricated), CopyKind::Path).unwrap(), s(&doc));
+        assert!(doc_clipboard_text(&docs, s(&dir.join("unopened.md")), CopyKind::Path).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
     use std::os::unix::fs::symlink;
 
