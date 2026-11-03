@@ -32,6 +32,7 @@ Pure-reducer pattern. `app.ts` holds a single `State` and fully re-renders the D
 - `store.ts` — `State` reducers (`openDoc`, `closeDoc`, `toggleViewMode`, `applyDiskChange`, `markSaved`, …). Each returns a new state; never mutate. A `Doc`'s `id` is its `absPath`, so opening a duplicate path dedupes/focuses.
 - `document.ts` — `Doc` shape; `isDirty` = `editorContent !== diskContent`.
 - `reload.ts` — clean tab → `auto-reload`, dirty tab → `prompt`.
+- `tab-menu.ts` — the tab right-click menu: `tabMenuEntries` (items + enabled state), `tabsToClose` (Close / Close Others / Close to the Left / Close to the Right), and `parentDir`. `app.ts` pops it as a native menu via `popupContextMenu` and runs the pick in `runTabMenuAction`; bulk closes go one tab at a time through `closeTab` and stop at the first Cancel on an unsaved prompt.
 - `session.ts` — open-paths / recent-files lists (persisted to `localStorage`).
 - `renderer.ts` — markdown-it + highlight.js (`html: false`).
 - `editor.ts` — CodeMirror 6 editors; themes read CSS custom properties so they track the active theme. `mountEditor` is the whole-file source view (⌘E); `mountBlockEditor` is the in-place editor for click-to-edit, which inherits the clicked element's typography and dims markdown marks. The `dark` flag is passed in by `app.ts` from the active theme's appearance (CodeMirror's own default only).
@@ -47,7 +48,7 @@ Pure-reducer pattern. `app.ts` holds a single `State` and fully re-renders the D
 ### Backend (`src-tauri/src/`)
 
 - `lib.rs` — `run()`: registers the `tauri-plugin-single-instance` handler, builds the native macOS menu (incl. "Set up AI Integration…" / "Remove AI Integration…"), and seeds first-launch CLI args.
-- `commands.rs` — `read_file` / `write_file`.
+- `commands.rs` — `read_file` / `write_file`, plus `copy_doc_to_clipboard(path, kind)` for the tab menu: it builds the name / path / folder / markdown link in Rust from a path that must be in `OpenDocs` (so injected script can't plant arbitrary clipboard text) and pipes it to `pbcopy` with `LC_ALL=en_US.UTF-8`. `src/fixtures/markdown-links.json` is the shared contract: Rust asserts it builds those links, vitest asserts they render and resolve.
 - `watcher.rs` — `notify`-based per-path file watching; emits `file-changed` (Modify/Create) and `file-removed` (Remove).
 - `cli.rs` — `md_paths_from_argv` (drops flags), `to_abs`/`normalize` (resolve relative paths against cwd). Pure, with the Rust tests.
 - `cli_install.rs` — writes the `~/.local/bin/mdview` wrapper.

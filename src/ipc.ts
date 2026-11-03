@@ -2,6 +2,7 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl, openPath as openWithDefaultApp, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { Menu } from "@tauri-apps/api/menu";
 import type { Annotation, AnnotationPatch, AnnotationStore, Resolution } from "./annotations";
 import { LATEST_RELEASE_URL } from "./update-check";
 import { check } from "@tauri-apps/plugin-updater";
@@ -50,6 +51,30 @@ export function canonicalizePath(path: string): Promise<string> {
 // the active tab has a file to reveal, so it pushes the state to the native menu.
 export function setShowInFinderEnabled(enabled: boolean): Promise<void> {
   return invoke<void>("set_show_in_finder_enabled", { enabled });
+}
+
+// Copy an open document's name, path, folder or a markdown link to it. Rust
+// builds the text from the path, so the page can't put arbitrary text on the
+// clipboard; it also sidesteps the webview Clipboard API, which wants a user
+// gesture a native menu pick isn't.
+export type CopyKind = "name" | "path" | "folder" | "link";
+export function copyDocToClipboard(path: string, kind: CopyKind): Promise<void> {
+  return invoke<void>("copy_doc_to_clipboard", { path, kind });
+}
+
+// Pop a native context menu at the cursor; `onPick` gets the chosen item's id.
+export type ContextMenuEntry = { id: string; text: string; enabled: boolean } | "separator";
+export async function popupContextMenu(entries: ContextMenuEntry[], onPick: (id: string) => void): Promise<void> {
+  const menu = await Menu.new({
+    items: entries.map((e) =>
+      e === "separator" ? { item: "Separator" as const } : { ...e, action: () => onPick(e.id) },
+    ),
+  });
+  try {
+    await menu.popup();
+  } finally {
+    await menu.close();
+  }
 }
 
 // Reveal a file in Finder (opens its folder with the file selected).

@@ -263,6 +263,7 @@ pub fn run() {
             commands::write_file,
             commands::resolve_open_target,
             commands::canonicalize_path,
+            commands::copy_doc_to_clipboard,
             watcher::watch_file,
             watcher::unwatch_file,
             watcher::watch_annotations,
@@ -649,7 +650,7 @@ mod tests {
         // Every command the app registers gets past the ACL; none is
         // registered in this mock app, so each then fails only as unknown.
         let commands = registered_commands();
-        assert_eq!(commands.len(), 23);
+        assert_eq!(commands.len(), 24);
         for cmd in commands {
             assert_eq!(invoke(&webview, cmd), Err(format!("Command {cmd} not found")));
         }
