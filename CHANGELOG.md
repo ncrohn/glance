@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.14.0
+
+Right-click a tab for more.
+
+- Copy the file's name, path, folder, or a Markdown link to it.
+- Show the file in Finder.
+- Close the tab, the other tabs, or the tabs to its left or right. Each tab with unsaved changes asks first.
+
 ## 0.13.0
 
 Choose how wide the text column is.
