@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.14.1
+
+Security fixes for updates.
+
+- Glance now only installs an update if its signature names the same version the update claims to be. An update can no longer be passed off as a newer release than it is.
+- The components Glance uses to download and install updates are up to date.
+
 ## 0.14.0
 
 Right-click a tab for more.
