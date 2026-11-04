@@ -72,7 +72,7 @@ OUT="src-tauri/target/release/bundle/updater"
 TARBALL="Glance_${VERSION}_${ARCH}.app.tar.gz"
 rm -rf "$OUT" && mkdir -p "$OUT"
 COPYFILE_DISABLE=1 tar -czf "$OUT/$TARBALL" -C "$(dirname "$APP")" Glance.app
-pnpm tauri signer sign --private-key-path "$UPDATER_KEY" --password "" "$OUT/$TARBALL"
+pnpm tauri signer sign --private-key-path "$UPDATER_KEY" --password "" --app-version "$VERSION" "$OUT/$TARBALL"
 SIG="$(cat "$OUT/$TARBALL.sig")" \
 URL="https://github.com/ncrohn/glance/releases/download/v$VERSION/$TARBALL" \
 VERSION="$VERSION" TARGET="darwin-$ARCH" \
