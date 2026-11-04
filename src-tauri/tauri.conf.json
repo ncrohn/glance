@@ -36,7 +36,8 @@
     "opener": { "requireLiteralLeadingDot": false },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFDQkUxNEQzMkQ5OTE0NDkKUldSSkZKa3QweFMrSEtEWUpLUGg2aUp0K3VGVmxVQmZuNmJxYm5GV2kzZmZtd1hxUmd1aHB5dk0K",
-      "endpoints": ["https://github.com/ncrohn/glance/releases/latest/download/latest.json"]
+      "endpoints": ["https://github.com/ncrohn/glance/releases/latest/download/latest.json"],
+      "requireSignedVersion": true
     }
   },
   "bundle": {

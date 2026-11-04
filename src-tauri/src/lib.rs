@@ -589,6 +589,15 @@ mod tests {
     }
 
     #[test]
+    fn the_updater_only_accepts_updates_signed_for_their_version() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let updater: tauri_plugin_updater::Config =
+            serde_json::from_value(conf["plugins"]["updater"].clone()).unwrap();
+        assert!(updater.require_signed_version);
+    }
+
+    #[test]
     fn a_page_load_makes_open_files_buffer_again() {
         use tauri::webview::PageLoadEvent;
         let ready = FrontendReady(AtomicBool::new(true));
