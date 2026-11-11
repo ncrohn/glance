@@ -24,6 +24,7 @@ const env = {
   },
   latestRelease: null as unknown,
   version: "0.0.0-test",
+  unsaved: new Map<string, boolean>(),
 };
 
 function resetEnv(): void {
@@ -42,6 +43,7 @@ function resetEnv(): void {
   env.calls = [];
   env.update = null;
   env.latestRelease = null;
+  env.unsaved = new Map();
   env.version = "0.0.0-test";
 }
 
@@ -52,7 +54,7 @@ vi.mock("./ipc", () => ({
   appVersion: async () => env.version,
   openExternal: async () => {}, openFileExternal: async () => {},
   localFileUrl: (p: string) => p, resolveWikilink: async () => null,
-  setShowInFinderEnabled: async () => {}, revealInFinder: async () => {},
+  setShowInFinderEnabled: async () => {}, setDocUnsaved: async (p: string, u: boolean) => { env.unsaved.set(p, u); }, revealInFinder: async () => {},
   readFile: async (p: string) => {
     await env.readGates.get(p);
     if (!env.fs.has(p)) throw new Error("No such file or directory (os error 2)");
@@ -224,6 +226,29 @@ describe("unsaved edits on close and quit", () => {
     await type("UNSAVED ");
     expect(isDirtyTab("/a.md")).toBe(true);
   }
+
+  it("an unsaved-changes marker follows the tab's dirty state: edit sets it, save and close clear it", async () => {
+    env.fs.set("/a.md", "hello\n");
+    env.launch = ["/a.md"];
+    await boot();
+    expect(env.unsaved.get("/a.md")).toBe(false);
+    await type("UNSAVED ");
+    await flush();
+    expect(env.unsaved.get("/a.md")).toBe(true);
+    await emit("menu-save");
+    expect(env.unsaved.get("/a.md")).toBe(false);
+    await type("AGAIN ");
+    await flush();
+    expect(env.unsaved.get("/a.md")).toBe(true);
+    // The file vanishing on disk doesn't make the edits saved.
+    env.fs.delete("/a.md");
+    await emit("file-removed", "/a.md");
+    expect(env.unsaved.get("/a.md")).toBe(true);
+    await emit("close-active-tab");
+    await click("Don't Save");
+    expect(tabs()).toEqual([]);
+    expect(env.unsaved.get("/a.md")).toBe(false);
+  });
 
   it("Cmd+W on a dirty tab asks first; Cancel keeps the tab and the edits", async () => {
     await bootWithEdit();

@@ -386,7 +386,16 @@ pub fn read_annotations(path: String) -> Result<AnnotationStore, String> {
 /// from glance-mcp can't be lost.
 #[tauri::command]
 pub fn add_annotation(doc_path: String, annotation: Annotation) -> Result<(), String> {
-    mutate_store(&doc_path, move |s| push_annotation(s, annotation.clone()))
+    // An Undo re-add keeps its number and isn't a new comment.
+    let new_user_comment = annotation.author == "user" && annotation.number == 0;
+    let number = mutate_store(&doc_path, move |s| {
+        push_annotation(s, annotation.clone());
+        s.annotations.last().map(|a| a.number)
+    })?;
+    if new_user_comment {
+        crate::wake::note_event(&doc_path, crate::wake::EventKind::Comment, number);
+    }
+    Ok(())
 }
 
 /// Body of `add_annotation`, shared with glance-mcp: backfill, assign the
@@ -510,14 +519,16 @@ pub fn add_reply(doc_path: String, id: String, text: String) -> Result<(), Strin
     let found = mutate_store(&doc_path, |s| match s.annotations.iter_mut().find(|a| a.id == id) {
         Some(a) => {
             apply_reply(a, "user", &text, &now);
-            true
+            Some(a.number)
         }
-        None => false,
+        None => None,
     })?;
-    if found {
-        Ok(())
-    } else {
-        Err(format!("no annotation '{id}'"))
+    match found {
+        Some(number) => {
+            crate::wake::note_event(&doc_path, crate::wake::EventKind::Reply, Some(number));
+            Ok(())
+        }
+        None => Err(format!("no annotation '{id}'")),
     }
 }
 
@@ -627,6 +638,42 @@ mod tests {
             replies: Vec::new(),
             extra: Default::default(),
         }
+    }
+
+    #[test]
+    #[serial]
+    fn user_comments_and_replies_wake_the_owner_but_claude_and_mcp_writes_do_not() {
+        let home = std::env::temp_dir().join(format!("glance-test-wake-events-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        let doc_file = home.join("plan.md");
+        std::fs::write(&doc_file, "q\n").unwrap();
+        let doc = doc_file.to_string_lossy().into_owned();
+        let events = home.join(".glance/events/sess-1.jsonl");
+        let lines = || std::fs::read_to_string(&events).unwrap_or_default().lines().map(str::to_string).collect::<Vec<_>>();
+
+        add_annotation(doc.clone(), ann("before-owner")).unwrap();
+        assert!(lines().is_empty());
+
+        crate::wake::record_owner(&doc, "sess-1").unwrap();
+        add_annotation(doc.clone(), ann("a")).unwrap();
+        add_reply(doc.clone(), "a".into(), "more".into()).unwrap();
+        let mut claude = ann("c");
+        claude.author = "claude".into();
+        add_annotation(doc.clone(), claude).unwrap();
+        // An Undo re-add arrives with its number already set.
+        let mut readd = ann("r");
+        readd.number = 9;
+        add_annotation(doc.clone(), readd).unwrap();
+        // glance-mcp writes through push_annotation / apply_reply, never the commands.
+        mutate_store(&doc, |s| push_annotation(s, ann("m"))).unwrap();
+
+        let got = lines();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got[0].contains(r#""kind":"comment""#) && got[0].contains(r#""number":2"#), "{}", got[0]);
+        assert!(got[1].contains(r#""kind":"reply""#) && got[1].contains(r#""number":2"#), "{}", got[1]);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     fn store_of(annotations: Vec<Annotation>) -> AnnotationStore {

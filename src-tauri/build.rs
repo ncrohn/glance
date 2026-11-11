@@ -7,6 +7,7 @@ const COMMANDS: &[&str] = &[
     "resolve_open_target",
     "canonicalize_path",
     "copy_doc_to_clipboard",
+    "set_doc_unsaved",
     "watch_file",
     "unwatch_file",
     "watch_annotations",

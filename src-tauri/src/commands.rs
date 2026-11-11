@@ -106,7 +106,19 @@ pub fn write_file(
     contents: String,
     docs: tauri::State<OpenDocs>,
 ) -> Result<(), String> {
-    write_document(&docs, &path, &contents)
+    write_document(&docs, &path, &contents)?;
+    crate::wake::note_event(&path, crate::wake::EventKind::Save, None);
+    Ok(())
+}
+
+/// Mark an open doc as having unsaved edits, or clear the mark. The frontend
+/// sends it when a tab's dirty state flips, and `false` when the tab closes.
+#[tauri::command]
+pub fn set_doc_unsaved(path: String, unsaved: bool, docs: tauri::State<OpenDocs>) -> Result<(), String> {
+    if !docs.contains(&path) {
+        return Err(format!("Glance can only mark documents it has open: {path}"));
+    }
+    crate::wake::set_unsaved(&path, unsaved)
 }
 
 /// The path the frontend keys tabs on: see `cli::canonical`.

@@ -16,7 +16,7 @@ import {
   readAnnotations, addStoredAnnotation, removeStoredAnnotation, updateStoredAnnotation, addStoredReply, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
   onShowAbout, onShowWhatsNew, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
-  onShowInFinder, revealInFinder, copyDocToClipboard, popupContextMenu, setShowInFinderEnabled, onQuitRequested, quitApp,
+  onShowInFinder, revealInFinder, copyDocToClipboard, popupContextMenu, setShowInFinderEnabled, setDocUnsaved, onQuitRequested, quitApp,
   readReviewed, writeReviewed, openExternal, openFileExternal, localFileUrl, resolveWikilink,
   canonicalizePath, onFileError,
 } from "./ipc";
@@ -494,6 +494,7 @@ function refreshTabDirty(): void {
     const d = state.docs.find((x) => x.id === tab.dataset.id);
     if (d) tab.classList.toggle("dirty", isDirty(d));
   }
+  syncUnsavedMarkers();
 }
 
 // ---- Tab hover preview --------------------------------------------------
@@ -787,6 +788,29 @@ function syncShowInFinderMenu(): void {
   void setShowInFinderEnabled(enabled).catch(() => { showInFinderEnabled = null; });
 }
 
+// absPath → the unsaved state we last told Rust. Like the Show in Finder item,
+// only cross the IPC boundary when a doc's answer flips. A doc missing from
+// state.docs was closed: clear its marker and forget it. A doc deleted on disk
+// keeps its marker while it has unsaved edits.
+const unsavedSent = new Map<string, boolean>();
+
+function syncUnsavedMarkers(): void {
+  const open = new Set<string>();
+  for (const doc of state.docs) {
+    open.add(doc.absPath);
+    const dirty = isDirty(doc);
+    if (unsavedSent.get(doc.absPath) === dirty) continue;
+    unsavedSent.set(doc.absPath, dirty);
+    void setDocUnsaved(doc.absPath, dirty).catch(() => { unsavedSent.delete(doc.absPath); });
+  }
+  for (const [path, sent] of unsavedSent) {
+    if (open.has(path)) continue;
+    unsavedSent.delete(path);
+    // Keep a failed clear in the map so the next sync tries again.
+    if (sent) void setDocUnsaved(path, false).catch(() => { if (!unsavedSent.has(path)) unsavedSent.set(path, true); });
+  }
+}
+
 export function render(): void {
   // The mermaid zoom overlay lives on document.body, outside the rendered view,
   // so it would otherwise survive a tab switch / re-render on top of the new
@@ -820,6 +844,7 @@ export function render(): void {
   lastRenderedId = next.id;
   lastRenderedMode = next.mode;
   syncShowInFinderMenu();
+  syncUnsavedMarkers();
   if (findBar?.isOpen()) runFind(false);
   if (teardownHovers) { teardownHovers(); teardownHovers = null; }
   const renderedView = document.querySelector<HTMLElement>(".rendered");
@@ -1142,6 +1167,7 @@ async function handleDiskChange(path: string, contents: string): Promise<void> {
     state = setDiskContent(state, doc.id, latest);
     renderTabBar();
     renderActions();
+    syncUnsavedMarkers();
   }
 }
 

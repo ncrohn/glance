@@ -78,7 +78,8 @@ for a in "$@"; do
   fi
   set -- "$@" "$a"
 done
-exec '/usr/bin/open' -n -a "${GLANCE_APP%/Contents/MacOS/*}" --args "$@" >/dev/null
+# From a Claude Code session, Glance records which session opened the doc.
+exec '/usr/bin/open' -n -a "${GLANCE_APP%/Contents/MacOS/*}" --args ${CLAUDE_CODE_SESSION_ID:+"--session=$CLAUDE_CODE_SESSION_ID"} "$@" >/dev/null
 EOF
 } > "$TMP"
 chmod 755 "$TMP"

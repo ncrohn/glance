@@ -72,6 +72,19 @@ pub fn md_paths_from_argv(argv: &[String], cwd: &Path) -> Vec<String> {
     paths
 }
 
+/// The Claude Code session a launch came from: one `--session=<id>` token, as
+/// `mdview` and the auto-open hook pass it, before any `--`. An id that isn't
+/// `[A-Za-z0-9-]{1,64}` is ignored. [`md_paths_from_argv`] drops the token as a
+/// flag.
+pub fn session_from_argv(argv: &[String]) -> Option<String> {
+    argv.iter()
+        .skip(1)
+        .take_while(|a| *a != "--")
+        .find_map(|a| a.strip_prefix("--session="))
+        .filter(|id| crate::wake::valid_session_id(id))
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +120,24 @@ mod tests {
             "b.md".to_string(),
         ];
         assert_eq!(md_paths_from_argv(&argv, Path::new("/nonexistent")), vec!["/a.md", "b.md"]);
+    }
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn session_comes_from_one_token_before_double_dash() {
+        let argv = args(&["glance", "--session=e7f9-81f3", "/a.md"]);
+        assert_eq!(session_from_argv(&argv).as_deref(), Some("e7f9-81f3"));
+        assert_eq!(md_paths_from_argv(&argv, Path::new("/nonexistent")), vec!["/a.md"]);
+        assert_eq!(session_from_argv(&args(&["glance", "/a.md"])), None);
+        // A separate id token would be a doc path, so only the `=` form counts.
+        assert_eq!(session_from_argv(&args(&["glance", "--session", "abc", "/a.md"])), None);
+        assert_eq!(session_from_argv(&args(&["glance", "--", "--session=abc"])), None);
+        assert_eq!(session_from_argv(&args(&["glance", "--session=../x", "/a.md"])), None);
+        assert_eq!(session_from_argv(&args(&["glance", "--session=", "/a.md"])), None);
+        assert_eq!(session_from_argv(&args(&["glance", &format!("--session={}", "a".repeat(65))])), None);
     }
 
     fn scratch(name: &str) -> PathBuf {
