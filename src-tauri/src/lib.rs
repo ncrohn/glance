@@ -282,6 +282,7 @@ pub fn run() {
             commands::canonicalize_path,
             commands::copy_doc_to_clipboard,
             commands::set_doc_unsaved,
+            commands::release_doc_owner,
             watcher::watch_file,
             watcher::unwatch_file,
             watcher::watch_annotations,
@@ -317,6 +318,7 @@ pub fn run() {
                                 // Create the empty file so the open flow (which reads
                                 // from disk) has something to open, then reuse it.
                                 if std::fs::write(&p, "").is_ok() {
+                                    wake::clear_owner(&p);
                                     let _ = app2.emit("open-file", p);
                                 }
                             }
@@ -330,8 +332,11 @@ pub fn run() {
                         .add_filter("Markdown", &["md", "markdown"])
                         .pick_file(move |path| {
                             if let Some(path) = path {
-                                // Reuse the existing open-file flow (onOpenFile → openPath).
-                                let _ = app2.emit("open-file", path.to_string());
+                                // Opened by hand: no session owns it. Then reuse the
+                                // existing open-file flow (onOpenFile → openPath).
+                                let p = path.to_string();
+                                wake::clear_owner(&p);
+                                let _ = app2.emit("open-file", p);
                             }
                         });
                 }
@@ -686,7 +691,7 @@ mod tests {
         // Every command the app registers gets past the ACL; none is
         // registered in this mock app, so each then fails only as unknown.
         let commands = registered_commands();
-        assert_eq!(commands.len(), 25);
+        assert_eq!(commands.len(), 26);
         for cmd in commands {
             assert_eq!(invoke(&webview, cmd), Err(format!("Command {cmd} not found")));
         }

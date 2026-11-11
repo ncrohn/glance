@@ -110,7 +110,7 @@ vi.mock("./ipc", () => ({
     if (env.canonicalizeFails) throw new Error("canonicalize_path unavailable");
     return cliCanonical(p);
   },
-  setShowInFinderEnabled: async () => {}, setDocUnsaved: async () => {}, revealInFinder: async () => {},
+  setShowInFinderEnabled: async () => {}, setDocUnsaved: async () => {}, releaseDocOwner: async () => {}, revealInFinder: async () => {},
   readFile: async (p: string) => {
     ensureText("read_file", p);
     if (!exists(p)) throw new Error("No such file or directory (os error 2)");

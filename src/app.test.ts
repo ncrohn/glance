@@ -25,6 +25,7 @@ const env = {
   latestRelease: null as unknown,
   version: "0.0.0-test",
   unsaved: new Map<string, boolean>(),
+  released: [] as string[],
 };
 
 function resetEnv(): void {
@@ -44,6 +45,7 @@ function resetEnv(): void {
   env.update = null;
   env.latestRelease = null;
   env.unsaved = new Map();
+  env.released = [];
   env.version = "0.0.0-test";
 }
 
@@ -54,7 +56,7 @@ vi.mock("./ipc", () => ({
   appVersion: async () => env.version,
   openExternal: async () => {}, openFileExternal: async () => {},
   localFileUrl: (p: string) => p, resolveWikilink: async () => null,
-  setShowInFinderEnabled: async () => {}, setDocUnsaved: async (p: string, u: boolean) => { env.unsaved.set(p, u); }, revealInFinder: async () => {},
+  setShowInFinderEnabled: async () => {}, setDocUnsaved: async (p: string, u: boolean) => { env.unsaved.set(p, u); }, releaseDocOwner: async (p: string) => { env.released.push(p); }, revealInFinder: async () => {},
   readFile: async (p: string) => {
     await env.readGates.get(p);
     if (!env.fs.has(p)) throw new Error("No such file or directory (os error 2)");
@@ -579,6 +581,20 @@ describe("opening files", () => {
     await flush();
     expect(tabs()).toEqual([]);
     for (const w of env.watched) expect(env.unwatched).toContain(w);
+  });
+
+  it("opening from Recent releases the doc's Claude owner; a launch or restore does not", async () => {
+    env.fs.set("/a.md", "a\n");
+    env.fs.set("/b.md", "b\n");
+    env.launch = ["/a.md"];
+    localStorage.setItem("glance.recent", JSON.stringify(["/b.md"]));
+    await boot();
+    expect(env.released).toEqual([]);
+    await emit("close-active-tab");
+    Array.from(document.querySelectorAll<HTMLElement>("#content .recent li")).find((li) => li.textContent?.includes("b.md"))!.click();
+    await flush();
+    expect(tabs()).toEqual(["/b.md"]);
+    expect(env.released).toEqual(["/b.md"]);
   });
 
   it("a recent file that no longer exists says so and leaves the list", async () => {
