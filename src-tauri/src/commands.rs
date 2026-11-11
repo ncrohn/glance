@@ -62,12 +62,15 @@ fn read_document(docs: &OpenDocs, path: &str) -> Result<String, String> {
     Ok(text)
 }
 
-fn write_document(docs: &OpenDocs, path: &str, contents: &str) -> Result<(), String> {
+/// Save an open doc. `Ok(true)` when the text differs from what the file held.
+fn write_document(docs: &OpenDocs, path: &str, contents: &str) -> Result<bool, String> {
     ensure_text_document(path)?;
     if !docs.contains(path) {
         return Err(format!("Glance can only save documents it has open: {path}"));
     }
-    write_atomic(Path::new(path), contents.as_bytes()).map_err(|e| e.to_string())
+    let changed = differs_from_disk(path, contents);
+    write_atomic(Path::new(path), contents.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(changed)
 }
 
 pub fn ensure_watchable(docs: &OpenDocs, path: &str) -> Result<(), String> {
@@ -106,9 +109,7 @@ pub fn write_file(
     contents: String,
     docs: tauri::State<OpenDocs>,
 ) -> Result<(), String> {
-    let changed = differs_from_disk(&path, &contents);
-    write_document(&docs, &path, &contents)?;
-    if changed {
+    if write_document(&docs, &path, &contents)? {
         crate::wake::note_event(&path, crate::wake::EventKind::Save, None);
     }
     Ok(())
