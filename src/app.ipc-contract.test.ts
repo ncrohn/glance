@@ -34,6 +34,7 @@ const env = {
   writes: [] as Array<[string, string]>,
   violations: [] as Violation[],
   quit: 0,
+  released: [] as string[],
 };
 
 const TEXT = ["md", "markdown", "mdown", "mkd", "mkdn", "mdx", "txt"];
@@ -110,7 +111,7 @@ vi.mock("./ipc", () => ({
     if (env.canonicalizeFails) throw new Error("canonicalize_path unavailable");
     return cliCanonical(p);
   },
-  setShowInFinderEnabled: async () => {}, setDocUnsaved: async () => {}, releaseDocOwner: async () => {}, revealInFinder: async () => {},
+  setShowInFinderEnabled: async () => {}, setDocUnsaved: async () => {}, releaseDocOwner: async (p: string) => { env.released.push(p); }, revealInFinder: async () => {},
   readFile: async (p: string) => {
     ensureText("read_file", p);
     if (!exists(p)) throw new Error("No such file or directory (os error 2)");
@@ -252,6 +253,7 @@ beforeEach(() => {
   env.writes = [];
   env.violations = [];
   env.quit = 0;
+  env.released = [];
   localStorage.clear();
   localStorage.setItem("glance.seenVersion", "0.0.0-test");
   localStorage.setItem("glance.commentHintSeen", "1");
@@ -358,6 +360,24 @@ describe("every open/save/watch/reload flow stays inside the backend's rules", (
     await flush();
     expect(tabs()).toEqual(["/docs/r.md"]);
     expectFullyOpen("/docs/r.md");
+  });
+
+  it("a link opening a new tab releases its owner; a link to a doc already open does not", async () => {
+    env.files.set("/docs/a.md", "[self](a.md#top) [next](b.md)\n");
+    env.files.set("/docs/b.md", "b\n");
+    env.launch = ["/docs/a.md"];
+    await boot();
+    linkNamed("self").click();
+    await flush();
+    expect(env.released).toEqual([]);
+    linkNamed("next").click();
+    await flush();
+    expect(activeTab()).toBe("/docs/b.md");
+    expect(env.released).toEqual(["/docs/b.md"]);
+    await selectTab("/docs/a.md");
+    linkNamed("next").click();
+    await flush();
+    expect(env.released).toEqual(["/docs/b.md"]);
   });
 
   it("a markdown link to another .md, through a symlinked folder", async () => {

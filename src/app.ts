@@ -1184,14 +1184,14 @@ function forgetRecent(path: string): void {
 }
 
 // `byHand`: the user opened it from inside Glance (Recent, a link), so no Claude
-// session owns it any more. Rust handles argv, Finder and File menu opens.
+// session owns it any more. Switching to a doc that's already in a tab isn't an
+// open and keeps its owner. Rust handles argv, Finder and File menu opens.
 export async function openPath(requested: string, opts: { byHand?: boolean } = {}): Promise<void> {
   const absPath = await canonical(requested);
   const already = state.docs.find((d) => d.absPath === absPath);
-  const release = () => { if (opts.byHand) void releaseDocOwner(absPath).catch(() => {}); };
-  if (already) { release(); state = setActive(state, already.id); render(); return; }
+  if (already) { state = setActive(state, already.id); render(); return; }
   const contents = await readFile(absPath);
-  release();
+  if (opts.byHand) void releaseDocOwner(absPath).catch(() => {});
   state = openDoc(state, absPath, contents);
   // The tab can be closed while any of the awaits below is pending. closeTab
   // can only release watchers that exist by then, so each step checks and
