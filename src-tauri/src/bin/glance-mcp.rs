@@ -292,6 +292,50 @@ fn run_pending(argv: &[String]) {
     let _ = stdout.flush();
 }
 
+/// Whether a process with this pid is running. `EPERM` means it exists but
+/// belongs to another user, which still counts. Pid 0 and anything that isn't
+/// a positive `pid_t` are never alive: `kill(0, 0)` would test our own group.
+fn pid_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 only checks that the pid exists; nothing is sent.
+    let found = unsafe { libc::kill(pid, 0) } == 0;
+    found || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// The refusal for a `PreToolUse` event whose `tool_input.file_path` is a doc
+/// with unsaved changes in a running Glance, or `None` to let the edit through.
+/// `base` is `~/.glance`. A marker whose pid isn't running is ignored.
+fn guard_message(base: &Path, input: &str, alive: impl Fn(u32) -> bool) -> Option<String> {
+    let event: Value = serde_json::from_str(input).ok()?;
+    let file = event.get("tool_input")?.get("file_path")?.as_str().filter(|f| !f.is_empty())?;
+    let pid = glance_lib::wake::unsaved_pid_in(base, file)?;
+    alive(pid).then(|| {
+        format!(
+            "The user has unsaved changes to {file} in Glance. Don't edit it now: reply on the comment card with list_annotations / reply_annotation, and make the edit after they save."
+        )
+    })
+}
+
+/// `glance-mcp --guard`: read the `PreToolUse` hook JSON on stdin. Exit 2 with
+/// the refusal on stderr when the edit targets a doc with unsaved changes in
+/// Glance; exit 0 in every other case, errors included, so it never blocks
+/// unrelated work.
+fn run_guard() -> i32 {
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    let Some(base) = glance_lib::wake::glance_dir() else { return 0 };
+    match guard_message(&base, &input, pid_alive) {
+        Some(msg) => {
+            eprintln!("{msg}");
+            2
+        }
+        None => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +358,50 @@ mod tests {
             replies: Vec::new(),
             extra: Default::default(),
         }
+    }
+
+    fn guard_event(file: &str) -> String {
+        json!({ "hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_input": { "file_path": file } }).to_string()
+    }
+
+    #[test]
+    fn guard_refuses_only_a_marked_doc_with_a_live_pid() {
+        let base = std::env::temp_dir().join(format!("glance-test-mcp-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let doc = base.join("plan.md");
+        std::fs::write(&doc, "x").unwrap();
+        let doc = doc.to_string_lossy().into_owned();
+        let other = base.join("other.md").to_string_lossy().into_owned();
+
+        assert_eq!(guard_message(&base, &guard_event(&doc), pid_alive), None, "unmarked doc");
+        glance_lib::wake::set_unsaved_in(&base, &doc, true).unwrap();
+        let msg = guard_message(&base, &guard_event(&doc), pid_alive).expect("marked doc, live pid");
+        assert_eq!(
+            msg,
+            format!("The user has unsaved changes to {doc} in Glance. Don't edit it now: reply on the comment card with list_annotations / reply_annotation, and make the edit after they save.")
+        );
+        assert_eq!(guard_message(&base, &guard_event(&other), pid_alive), None, "other doc");
+        assert_eq!(guard_message(&base, &guard_event(&doc), |_| false), None, "dead pid");
+        assert_eq!(guard_message(&base, "not json", pid_alive), None);
+        assert_eq!(guard_message(&base, r#"{"tool_input":{}}"#, pid_alive), None, "no file_path");
+        assert_eq!(guard_message(&base, r#"{"tool_input":{"file_path":""}}"#, pid_alive), None);
+        assert_eq!(guard_message(&base, r#"{"tool_input":{"file_path":7}}"#, pid_alive), None);
+        assert_eq!(guard_message(&base, "", pid_alive), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn pid_alive_sees_this_process_and_rejects_impossible_pids() {
+        assert!(pid_alive(std::process::id()));
+        assert!(!pid_alive(0), "kill(0, 0) would test the process group");
+        assert!(!pid_alive(u32::MAX));
+        assert!(!pid_alive(i32::MAX as u32));
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(!pid_alive(pid), "a reaped child is gone");
     }
 
     fn store_of(anns: Vec<Annotation>) -> AnnotationStore {
@@ -1704,6 +1792,9 @@ fn main() {
     if argv.get(1).map(String::as_str) == Some("--pending") {
         run_pending(&argv);
         return;
+    }
+    if argv.get(1).map(String::as_str) == Some("--guard") {
+        std::process::exit(run_guard());
     }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let root = std::env::current_dir().ok().and_then(|cwd| project_root(&cwd, home.as_deref()));
