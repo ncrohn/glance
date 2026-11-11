@@ -1009,13 +1009,15 @@ fn manifest_write(skill_dir: &Path, writes: &[&FileWrite]) -> FileWrite {
     }
 }
 
-/// Whether `contents` is a file Glance ≤ 0.8.5 wrote (no manifest then): each
+/// Whether `contents` is a file Glance wrote, for a skill dir with no readable
+/// manifest (Glance ≤ 0.8.5 wrote none; a later one may have been lost): each
 /// starts with a fixed header no user file would.
 fn legacy_skill_file(name: &str, contents: &str) -> bool {
     match name {
         "SKILL.md" => contents.starts_with("---\nname: glance\n") && contents.contains("\n# Using Glance\n"),
         "open-md-hook.sh" => contents.starts_with("#!/bin/sh\n# Glance auto-open hook (PostToolUse)."),
         "pending-hook.sh" => contents.starts_with("#!/bin/sh\n# Glance pending-comments hook (UserPromptSubmit)."),
+        "guard-hook.sh" => contents.starts_with("#!/bin/sh\n# Glance unsaved-edit guard (PreToolUse)."),
         _ => false,
     }
 }
@@ -1836,6 +1838,21 @@ mod tests {
         assert_eq!(pre.len(), 1);
         assert_eq!(pre[0]["hooks"][0]["command"], "/mine.sh");
         assert!(!skill_dir.exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn remove_deletes_the_guard_script_when_the_manifest_is_gone() {
+        let home = tmp_home("claude-guard-no-manifest");
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        for r in setup_adapter(&ClaudeAdapter, &bins, &home) {
+            assert!(r.ok, "install step failed: {}", r.message);
+        }
+        let skill_dir = home.join(".claude").join("skills").join("glance");
+        std::fs::remove_file(skill_dir.join(SKILL_MANIFEST)).unwrap();
+        let (_, deletes) = plan_removes(ClaudeAdapter.skill_uninstall(&home).unwrap());
+        assert!(deletes.contains(&skill_dir.join("guard-hook.sh")), "{deletes:?}");
+        assert!(deletes.contains(&skill_dir));
         let _ = std::fs::remove_dir_all(&home);
     }
 
