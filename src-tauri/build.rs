@@ -8,6 +8,7 @@ const COMMANDS: &[&str] = &[
     "canonicalize_path",
     "copy_doc_to_clipboard",
     "set_doc_unsaved",
+    "release_doc_owner",
     "watch_file",
     "unwatch_file",
     "watch_annotations",

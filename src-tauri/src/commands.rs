@@ -106,8 +106,26 @@ pub fn write_file(
     contents: String,
     docs: tauri::State<OpenDocs>,
 ) -> Result<(), String> {
+    let changed = differs_from_disk(&path, &contents);
     write_document(&docs, &path, &contents)?;
-    crate::wake::note_event(&path, crate::wake::EventKind::Save, None);
+    if changed {
+        crate::wake::note_event(&path, crate::wake::EventKind::Save, None);
+    }
+    Ok(())
+}
+
+/// ⌘S on an unchanged doc rewrites the same text; that isn't news for Claude.
+fn differs_from_disk(path: &str, contents: &str) -> bool {
+    fs::read_to_string(path).map_or(true, |disk| disk != contents)
+}
+
+/// The user opened an open doc by hand (Recent, a link): no session owns it.
+#[tauri::command]
+pub fn release_doc_owner(path: String, docs: tauri::State<OpenDocs>) -> Result<(), String> {
+    if !docs.contains(&path) {
+        return Err(format!("Glance can only release documents it has open: {path}"));
+    }
+    crate::wake::clear_owner(&path);
     Ok(())
 }
 
@@ -339,6 +357,19 @@ pub fn resolve_open_target(path: String) -> Result<OpenTarget, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_unchanged_save_is_not_a_change() {
+        let dir = std::env::temp_dir().join(format!("glance-cmd-differs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("a.md");
+        std::fs::write(&doc, "same\n").unwrap();
+        let doc = doc.to_string_lossy();
+        assert!(!super::differs_from_disk(&doc, "same\n"));
+        assert!(super::differs_from_disk(&doc, "new\n"));
+        assert!(super::differs_from_disk(&dir.join("missing.md").to_string_lossy(), ""));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
 
     #[test]

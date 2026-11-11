@@ -16,7 +16,7 @@ import {
   readAnnotations, addStoredAnnotation, removeStoredAnnotation, updateStoredAnnotation, addStoredReply, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
   onShowAbout, onShowWhatsNew, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
-  onShowInFinder, revealInFinder, copyDocToClipboard, popupContextMenu, setShowInFinderEnabled, setDocUnsaved, onQuitRequested, quitApp,
+  onShowInFinder, revealInFinder, copyDocToClipboard, popupContextMenu, setShowInFinderEnabled, setDocUnsaved, releaseDocOwner, onQuitRequested, quitApp,
   readReviewed, writeReviewed, openExternal, openFileExternal, localFileUrl, resolveWikilink,
   canonicalizePath, onFileError,
 } from "./ipc";
@@ -670,7 +670,7 @@ function renderContent(): void {
         li.appendChild(el("span", "name", basename(p)));
         li.appendChild(el("span", "path", p));
         li.onclick = () => {
-          void openPath(p).catch((err) => {
+          void openPath(p, { byHand: true }).catch((err) => {
             if (isNotFound(err)) { forgetRecent(p); render(); }
             showNotice(`Couldn't open ${p}: ${err}`, false);
           });
@@ -1183,11 +1183,15 @@ function forgetRecent(path: string): void {
   localStorage.setItem(LS_RECENT, JSON.stringify(loadRecent().filter((p) => p !== path)));
 }
 
-export async function openPath(requested: string): Promise<void> {
+// `byHand`: the user opened it from inside Glance (Recent, a link), so no Claude
+// session owns it any more. Rust handles argv, Finder and File menu opens.
+export async function openPath(requested: string, opts: { byHand?: boolean } = {}): Promise<void> {
   const absPath = await canonical(requested);
   const already = state.docs.find((d) => d.absPath === absPath);
-  if (already) { state = setActive(state, already.id); render(); return; }
+  const release = () => { if (opts.byHand) void releaseDocOwner(absPath).catch(() => {}); };
+  if (already) { release(); state = setActive(state, already.id); render(); return; }
   const contents = await readFile(absPath);
+  release();
   state = openDoc(state, absPath, contents);
   // The tab can be closed while any of the awaits below is pending. closeTab
   // can only release watchers that exist by then, so each step checks and
@@ -1250,7 +1254,7 @@ function handleLinkClick(ev: MouseEvent): void {
       void openExternal(target.url).catch(() => showNotice(`Couldn't open ${target.url}.`, false));
       break;
     case "markdown":
-      void openPath(target.path).catch(() => showNotice(`Couldn't open ${target.path}.`, false));
+      void openPath(target.path, { byHand: true }).catch(() => showNotice(`Couldn't open ${target.path}.`, false));
       break;
     case "file":
       void openLinkedFile(target.path);
@@ -1299,7 +1303,7 @@ async function followWikilink(docPath: string, raw: string): Promise<void> {
     void openLinkedFile(path);
     return;
   }
-  await openPath(path).catch(() => showNotice(`Couldn't open ${path}.`, false));
+  await openPath(path, { byHand: true }).catch(() => showNotice(`Couldn't open ${path}.`, false));
   // render() restores scroll in a frame; land on the heading after that.
   if (link.heading) requestAnimationFrame(() => requestAnimationFrame(() => scrollToHeading(link.heading)));
 }
