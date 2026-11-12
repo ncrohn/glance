@@ -600,6 +600,8 @@ pub fn run() {
             let paths: Vec<String> = cli::md_paths_from_argv(&argv, &cwd).iter().map(|raw| cli::to_abs(raw, &cwd)).collect();
             record_owners(&argv, &paths);
             stored.extend(paths);
+            let version = app.package_info().version.to_string();
+            std::thread::spawn(move || setup::refresh_integration_at_launch(&version));
             Ok(())
         })
         .build(context)

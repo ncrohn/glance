@@ -85,7 +85,7 @@ When creating or updating a markdown file that the user should review, open it w
 
 Codex CLI gets the same four pieces in its own locations: `[mcp_servers.glance]` in `~/.codex/config.toml` (merged with `toml_edit`, so your comments and formatting survive), the guidance block in `~/.codex/AGENTS.md`, the skill at `~/.codex/skills/glance/SKILL.md`, and both hooks in `~/.codex/hooks.json`. Codex reports file edits as `apply_patch`, so the auto-open hook is registered with matcher `apply_patch` and the shared script reads `*** Add File:` lines from the patch text. Codex holds new or changed hooks behind a trust prompt on its next start; accept it or the two hooks will not run. Symlinked config files (a dotfiles-managed `AGENTS.md`, say) are written through, and file modes are preserved.
 
-All paths are derived from the running app's binary location, not this source checkout. Re-running setup is idempotent, so it doubles as the upgrade path — no migration needed. **Glance ▸ Remove AI Integration…** reverses the per-client connectors (leaving the shared `mdview` CLI in place).
+All paths are derived from the running app's binary location, not this source checkout. Re-running setup is idempotent, so it doubles as the upgrade path — no migration needed. Glance does this itself for Claude Code on the first launch of a new version, when the Glance skill is installed. That automatic run leaves alone any skill file you edited; re-running setup replaces it. **Glance ▸ Remove AI Integration…** reverses the per-client connectors (leaving the shared `mdview` CLI in place).
 
 ### Review loop
 
