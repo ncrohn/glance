@@ -211,6 +211,10 @@ Use `get_annotation(path, id)` when you need to see the lines around a comment; 
 
 When a prompt is prefixed with a `Glance:` line naming open comments, call `list_annotations` on that file before doing anything else.
 
+## When Glance wakes you
+
+A `Glance:` line that arrives while you are idle, or with a prompt, saying the user saved a doc or added comments or replies, means the user acted in Glance and is waiting there. Read the comments with `list_annotations` and answer in Glance: reply on the cards, add your own comments, or edit the doc. If an edit is refused because the doc has unsaved changes in Glance, reply on the card instead and make the edit after they save. Keep anything you say in chat to a line.
+
 ## Act, then close the loop
 
 1. If the comment is `drifted`, `orphaned`, or you cannot tell what it asks for, call `reply_annotation(path: "<absolute-path>", id: "<id>", text: "<question or reason>")` with your question, or the reason you are not making the change. Do not ask in chat what you can ask on the card. A replied-to comment stays open until the user answers there; move on to the next one.
@@ -473,6 +477,25 @@ exit 0
     TEMPLATE.replace("__MCP_BIN__", &sh_quote(mcp_bin))
 }
 
+/// The `Stop` hook script (Claude Code only), run with `asyncRewake`. It
+/// `exec`s `glance-mcp --wait`, so the waiter is the hook process itself and
+/// dies with it when Claude Code stops the hook. glance-mcp writes to stderr
+/// only when it exits 2, which wakes the session with that text. A missing
+/// binary exits 0.
+pub fn wait_hook_script(mcp_bin: &str) -> String {
+    const TEMPLATE: &str = r#"#!/bin/sh
+# Glance wake waiter (Stop, asyncRewake). Waits for the user to save or comment
+# in Glance on a doc this session opened, then exits 2 so Claude Code wakes the
+# idle session with what happened. stdin (the hook event JSON) is passed
+# straight through to glance-mcp. Exits 0 when there is nothing to wait for.
+if [ -x __MCP_BIN__ ]; then
+  exec __MCP_BIN__ --wait
+fi
+exit 0
+"#;
+    TEMPLATE.replace("__MCP_BIN__", &sh_quote(mcp_bin))
+}
+
 /// The `command` strings of a hooks entry's inner `hooks[]` list. Only those
 /// strings are decoded: a field `serde_json::Value` can't hold (`1e400`, a lone
 /// surrogate) must not hide our entry, or setup would add a second one.
@@ -512,6 +535,22 @@ pub fn merge_settings_hook_in(
     command: &str,
     legacy: &[&str],
 ) -> Result<String, String> {
+    merge_settings_hook_with(existing, file, event, matcher, command, legacy, &[])
+}
+
+/// [`merge_settings_hook_in`] with extra fields on the inner hook, such as
+/// `asyncRewake` and `timeout`, as `(key, JSON text)`. They are written on a
+/// new hook and on a legacy one being updated, and corrected in place on a hook
+/// already running `command`, so re-running setup never adds a second entry.
+pub fn merge_settings_hook_with(
+    existing: &str,
+    file: &str,
+    event: &str,
+    matcher: Option<&str>,
+    command: &str,
+    legacy: &[&str],
+    extra: &[(&str, &str)],
+) -> Result<String, String> {
     let mut doc = Doc::parse(existing, file)?;
     let hooks = obj_entry(&mut doc.root, "hooks", file, "hooks")?;
     let path = format!("hooks.{event}");
@@ -519,8 +558,37 @@ pub fn merge_settings_hook_in(
         hooks.push((event.to_string(), Node::Arr(Vec::new())));
     }
     let list = json_edit::get(hooks, event).unwrap().arr()?.ok_or_else(|| wrong_shape(file, &path, "an array"))?;
+    let set_extra = |h: &mut Node| -> Result<bool, String> {
+        let current = h.value();
+        let h = h.obj()?.unwrap();
+        let mut changed = false;
+        for (k, raw) in extra {
+            let want: serde_json::Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+            if current.as_ref().and_then(|v| v.get(*k)) != Some(&want) {
+                json_edit::set(h, k, Node::Raw(raw.to_string()));
+                changed = true;
+            }
+        }
+        Ok(changed)
+    };
     if list.iter().any(|e| entry_commands(e).iter().any(|c| c == command)) {
-        return Ok(existing.to_string());
+        if extra.is_empty() {
+            return Ok(existing.to_string());
+        }
+        let mut changed = false;
+        for e in list.iter_mut() {
+            if !entry_commands(e).iter().any(|c| c == command) {
+                continue;
+            }
+            let entry = e.obj()?.ok_or_else(|| wrong_shape(file, &path, "a list of objects"))?;
+            let inner = json_edit::get(entry, "hooks").unwrap().arr()?.unwrap();
+            for h in inner.iter_mut() {
+                if h.value().and_then(|v| v.get("command")?.as_str().map(|c| c == command)).unwrap_or(false) {
+                    changed |= set_extra(h)?;
+                }
+            }
+        }
+        return Ok(if changed { doc.render() } else { existing.to_string() });
     }
     let old = list.iter().position(|e| entry_commands(e).iter().any(|c| legacy.contains(&c.as_str())));
     match old {
@@ -530,6 +598,7 @@ pub fn merge_settings_hook_in(
             for h in inner.iter_mut() {
                 let is_old = h.value().and_then(|v| v.get("command")?.as_str().map(|c| legacy.contains(&c))).unwrap_or(false);
                 if is_old {
+                    set_extra(h)?;
                     let h = h.obj()?.unwrap();
                     json_edit::set(h, "command", Node::string(command));
                 }
@@ -540,10 +609,12 @@ pub fn merge_settings_hook_in(
             if let Some(m) = matcher {
                 entry.push(("matcher".to_string(), Node::string(m)));
             }
-            let hook = Node::Obj(vec![
+            let mut fields = vec![
                 ("type".to_string(), Node::string("command")),
                 ("command".to_string(), Node::string(command)),
-            ]);
+            ];
+            fields.extend(extra.iter().map(|(k, raw)| (k.to_string(), Node::Raw(raw.to_string()))));
+            let hook = Node::Obj(fields);
             entry.push(("hooks".to_string(), Node::Arr(vec![hook])));
             list.push(Node::Obj(entry));
         }
@@ -967,7 +1038,7 @@ fn guidance_uninstall_plan(path: PathBuf) -> Result<Plan, String> {
 }
 
 /// The files Glance writes into a client's skill dir.
-const SKILL_FILES: [&str; 4] = ["SKILL.md", "open-md-hook.sh", "pending-hook.sh", "guard-hook.sh"];
+const SKILL_FILES: [&str; 5] = ["SKILL.md", "open-md-hook.sh", "pending-hook.sh", "guard-hook.sh", "wait-hook.sh"];
 /// Records the SHA-1 of each file Glance wrote into the skill dir, so remove
 /// deletes only those files, and only while they are unchanged.
 const SKILL_MANIFEST: &str = ".glance-manifest.json";
@@ -1018,6 +1089,7 @@ fn legacy_skill_file(name: &str, contents: &str) -> bool {
         "open-md-hook.sh" => contents.starts_with("#!/bin/sh\n# Glance auto-open hook (PostToolUse)."),
         "pending-hook.sh" => contents.starts_with("#!/bin/sh\n# Glance pending-comments hook (UserPromptSubmit)."),
         "guard-hook.sh" => contents.starts_with("#!/bin/sh\n# Glance unsaved-edit guard (PreToolUse)."),
+        "wait-hook.sh" => contents.starts_with("#!/bin/sh\n# Glance wake waiter (Stop, asyncRewake)."),
         _ => false,
     }
 }
@@ -1137,10 +1209,14 @@ fn hooks_uninstall_contents(skill_dir: &Path, hooks_path: &Path, file: &str) -> 
 
 const CLAUDE_SETTINGS_FILE: &str = "~/.claude/settings.json";
 
-/// Add the unsaved-edit guard to Claude's hooks install `plan`: the
-/// `guard-hook.sh` script, a `PreToolUse` entry for `Write|Edit` in
-/// settings.json, and the script in the skill manifest. Claude only; Codex
-/// keeps the shared plan as is.
+/// The `Stop` waiter's hook `timeout`, in seconds: under the desktop app's
+/// 1,800 s idle disconnect, and 30 s over the waiter's own 1,740 s limit.
+const WAIT_HOOK_TIMEOUT: &str = "1770";
+
+/// Add the Claude-only hooks to Claude's hooks install `plan`: the unsaved-edit
+/// guard (`guard-hook.sh`, a `PreToolUse` entry for `Write|Edit`) and the wake
+/// waiter (`wait-hook.sh`, a `Stop` entry with `asyncRewake`), both scripts in
+/// the skill manifest. Codex keeps the shared plan as is.
 fn with_claude_guard(plan: Plan, skill_dir: &Path, settings_path: &Path, bins: &Binaries) -> Result<Plan, String> {
     let Plan::Write(mut writes) = plan else { return Ok(plan) };
     let guard_path = skill_dir.join("guard-hook.sh");
@@ -1157,16 +1233,30 @@ fn with_claude_guard(plan: Plan, skill_dir: &Path, settings_path: &Path, bins: &
         &guard_cmds[0],
         &as_strs(&guard_cmds[1..]),
     )?;
+    let wait_path = skill_dir.join("wait-hook.sh");
+    let wait_cmds = hook_commands(&wait_path);
+    settings.contents = merge_settings_hook_with(
+        &settings.contents,
+        CLAUDE_SETTINGS_FILE,
+        "Stop",
+        None,
+        &wait_cmds[0],
+        &as_strs(&wait_cmds[1..]),
+        &[("asyncRewake", "true"), ("timeout", WAIT_HOOK_TIMEOUT)],
+    )?;
     let guard = FileWrite { path: guard_path, contents: guard_hook_script(&bins.mcp_bin), executable: true };
+    let wait = FileWrite { path: wait_path, contents: wait_hook_script(&bins.mcp_bin), executable: true };
     let manifest_path = skill_dir.join(SKILL_MANIFEST);
     writes.retain(|w| w.path != manifest_path);
     let manifest = {
         let mut ours: Vec<&FileWrite> = writes.iter().filter(|w| w.path.parent() == Some(skill_dir)).collect();
         ours.push(&guard);
+        ours.push(&wait);
         manifest_write(skill_dir, &ours)
     };
     let at = writes.iter().position(|w| w.path == settings_path).unwrap_or(writes.len());
     writes.insert(at, manifest);
+    writes.insert(at, wait);
     writes.insert(at, guard);
     Ok(Plan::Write(writes))
 }
@@ -1247,7 +1337,10 @@ impl ClientAdapter for ClaudeAdapter {
         };
         let guard_cmds = hook_commands(&skill_dir.join("guard-hook.sh"));
         let after_guard = remove_settings_hook_for(&base, "PreToolUse", &as_strs(&guard_cmds), CLAUDE_SETTINGS_FILE)?;
-        match after_guard.or(shared) {
+        let base = after_guard.clone().unwrap_or(base);
+        let wait_cmds = hook_commands(&skill_dir.join("wait-hook.sh"));
+        let after_wait = remove_settings_hook_for(&base, "Stop", &as_strs(&wait_cmds), CLAUDE_SETTINGS_FILE)?;
+        match after_wait.or(after_guard).or(shared) {
             None => Ok(Plan::AlreadyDone("No Glance hook entries to remove.".to_string())),
             Some(next) => Ok(rewrite(settings_path, next, "Removed Glance's hooks from ~/.claude/settings.json.".to_string())),
         }
@@ -1777,13 +1870,16 @@ mod tests {
             app_bin: "/Applications/Glance.app/Contents/MacOS/glance".to_string(),
         };
         let writes = plan_writes(ClaudeAdapter.open_hook(&home, &bins).unwrap());
-        assert_eq!(writes.len(), 5);
+        assert_eq!(writes.len(), 6);
+        let wait = writes.iter().find(|w| w.path.ends_with("wait-hook.sh")).expect("wait-hook.sh write");
+        assert!(wait.executable);
+        assert!(wait.contents.contains("exec '/Applications/Glance.app/Contents/MacOS/glance-mcp' --wait"));
         let guard = writes.iter().find(|w| w.path.ends_with("guard-hook.sh")).expect("guard-hook.sh write");
         assert!(guard.executable);
         assert!(guard.contents.contains("'/Applications/Glance.app/Contents/MacOS/glance-mcp' --guard"));
         let manifest = writes.iter().find(|w| w.path.ends_with(SKILL_MANIFEST)).expect("a manifest write");
         let files: serde_json::Value = serde_json::from_str(&manifest.contents).unwrap();
-        for name in ["open-md-hook.sh", "pending-hook.sh", "guard-hook.sh"] {
+        for name in ["open-md-hook.sh", "pending-hook.sh", "guard-hook.sh", "wait-hook.sh"] {
             assert!(files["files"][name].is_string(), "{name} in manifest");
         }
         let open = writes.iter().find(|w| w.path.ends_with("open-md-hook.sh")).expect("open-md-hook.sh write");
@@ -1839,6 +1935,126 @@ mod tests {
         assert_eq!(pre[0]["hooks"][0]["command"], "/mine.sh");
         assert!(!skill_dir.exists());
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn claude_wait_hook_installs_once_with_async_rewake_and_remove_takes_it_out() {
+        let home = tmp_home("claude-wait");
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        let settings_path = home.join(".claude").join("settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        std::fs::write(&settings_path, r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/badge.sh"}]}]}}"#).unwrap();
+        for _ in 0..2 {
+            for r in setup_adapter(&ClaudeAdapter, &bins, &home) {
+                assert!(r.ok, "install step failed: {}", r.message);
+            }
+        }
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let stop = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 2, "the user's entry and exactly one of ours");
+        assert_eq!(stop[0]["hooks"][0]["command"], "/badge.sh");
+        assert!(stop[1].get("matcher").is_none());
+        let ours = &stop[1]["hooks"][0];
+        assert!(ours["command"].as_str().unwrap().ends_with("wait-hook.sh"));
+        assert_eq!(ours["asyncRewake"], true);
+        assert_eq!(ours["timeout"], 1770);
+        let skill_dir = home.join(".claude").join("skills").join("glance");
+        assert!(skill_dir.join("wait-hook.sh").exists());
+
+        for r in remove_adapter(&ClaudeAdapter, &home) {
+            assert!(r.ok, "uninstall step failed: {}", r.message);
+        }
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let stop = v["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(stop.len(), 1);
+        assert_eq!(stop[0]["hooks"][0]["command"], "/badge.sh");
+        assert!(!skill_dir.exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn remove_deletes_the_wait_script_when_the_manifest_is_gone() {
+        let home = tmp_home("claude-wait-no-manifest");
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        for r in setup_adapter(&ClaudeAdapter, &bins, &home) {
+            assert!(r.ok, "install step failed: {}", r.message);
+        }
+        let skill_dir = home.join(".claude").join("skills").join("glance");
+        std::fs::remove_file(skill_dir.join(SKILL_MANIFEST)).unwrap();
+        let (_, deletes) = plan_removes(ClaudeAdapter.skill_uninstall(&home).unwrap());
+        assert!(deletes.contains(&skill_dir.join("wait-hook.sh")), "{deletes:?}");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn merge_with_extra_fields_corrects_our_hook_in_place() {
+        let f = "~/.claude/settings.json";
+        let extra = [("asyncRewake", "true"), ("timeout", "1770")];
+        let out = merge_settings_hook_with("", f, "Stop", None, "/w.sh", &[], &extra).unwrap();
+        let again = merge_settings_hook_with(&out, f, "Stop", None, "/w.sh", &[], &extra).unwrap();
+        assert_eq!(again, out, "re-running changes nothing");
+        // An older install with a different timeout and no asyncRewake is fixed, not duplicated.
+        let old = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/w.sh","timeout":870}]}]}}"#;
+        let fixed = merge_settings_hook_with(old, f, "Stop", None, "/w.sh", &[], &extra).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fixed).unwrap();
+        assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["timeout"], 1770);
+        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["asyncRewake"], true);
+        // A legacy spelling of the command is updated in place with the extras.
+        let legacy = r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/old w.sh"}]}]}}"#;
+        let moved = merge_settings_hook_with(legacy, f, "Stop", None, "/w.sh", &["/old w.sh"], &extra).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&moved).unwrap();
+        let h = &v["hooks"]["Stop"][0]["hooks"][0];
+        assert_eq!((h["command"].as_str(), h["timeout"].as_u64(), h["asyncRewake"].as_bool()), (Some("/w.sh"), Some(1770), Some(true)));
+    }
+
+    #[test]
+    fn codex_gets_no_wait_hook() {
+        let home = tmp_home("codex-wait");
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        let writes = plan_writes(CodexAdapter.open_hook(&home, &bins).unwrap());
+        assert!(!writes.iter().any(|w| w.path.ends_with("wait-hook.sh")));
+        let hooks = writes.iter().find(|w| w.path.ends_with("hooks.json")).expect("a hooks.json write");
+        let v: serde_json::Value = serde_json::from_str(&hooks.contents).unwrap();
+        assert!(v["hooks"].get("Stop").is_none());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn wait_hook_script_execs_the_waiter() {
+        let s = wait_hook_script("/Applications/Glance.app/Contents/MacOS/glance-mcp");
+        assert!(s.starts_with("#!/bin/sh\n# Glance wake waiter (Stop, asyncRewake)."));
+        let dir = tmp_home("wait-script");
+        let run = |mcp_body: Option<&str>| {
+            let mcp = dir.join("fake-mcp");
+            let _ = std::fs::remove_file(&mcp);
+            if let Some(body) = mcp_body {
+                std::fs::write(&mcp, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::set_permissions(&mcp, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            }
+            let script = dir.join("wait-hook.sh");
+            std::fs::write(&script, wait_hook_script(&mcp.to_string_lossy())).unwrap();
+            let mut child = std::process::Command::new("sh")
+                .arg(&script)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            std::io::Write::write_all(child.stdin.as_mut().unwrap(), b"{\"session_id\":\"s\"}").unwrap();
+            let pid = child.id();
+            let out = child.wait_with_output().unwrap();
+            (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned(), String::from_utf8_lossy(&out.stdout).into_owned(), pid)
+        };
+        // stdin reaches glance-mcp; the wake text and exit 2 reach Claude Code.
+        let (code, err, _, _) = run(Some(r#"[ "$1" = --wait ] && grep -q session_id && echo "Glance: saved" >&2 && exit 2; exit 9"#));
+        assert_eq!((code, err.as_str()), (Some(2), "Glance: saved\n"));
+        // The waiter runs as the hook process itself.
+        let (_, _, out, pid) = run(Some("echo $$"));
+        assert_eq!(out.trim(), pid.to_string());
+        let (code, err, _, _) = run(None);
+        assert_eq!((code, err.as_str()), (Some(0), ""), "missing binary");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

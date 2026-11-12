@@ -11,7 +11,7 @@ mod wikilink;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{Emitter, Manager};
 
 #[derive(Default)]
@@ -36,6 +36,10 @@ fn reset_on_page_load(ready: &FrontendReady, event: tauri::webview::PageLoadEven
 /// no revealable document (HIG: disable, don't silently no-op). Only the
 /// frontend knows which tab is active, hence the round trip.
 struct ShowInFinderItem(MenuItem<tauri::Wry>);
+
+/// Handle to Glance → Wake Claude on save and comment, so a click can set its
+/// check from what `~/.glance/settings.json` holds after the write.
+struct WakeClaudeItem(CheckMenuItem<tauri::Wry>);
 
 #[tauri::command]
 fn set_show_in_finder_enabled(
@@ -283,6 +287,7 @@ pub fn run() {
             commands::copy_doc_to_clipboard,
             commands::set_doc_unsaved,
             commands::release_doc_owner,
+            commands::wake_status,
             watcher::watch_file,
             watcher::unwatch_file,
             watcher::watch_annotations,
@@ -373,6 +378,12 @@ pub fn run() {
                 "remove_integration" => {
                     let _ = app.emit("show-integration-picker", "remove");
                 }
+                "wake_claude" => {
+                    let _ = wake::set_wake_enabled(!wake::wake_enabled());
+                    if let Some(item) = app.try_state::<WakeClaudeItem>() {
+                        let _ = item.0.set_checked(wake::wake_enabled());
+                    }
+                }
                 "about_glance" => {
                     let _ = app.emit("show-about", ());
                 }
@@ -429,6 +440,15 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
+            let wake_claude_item = CheckMenuItem::with_id(
+                handle,
+                "wake_claude",
+                "Wake Claude on save and comment",
+                true,
+                wake::wake_enabled(),
+                None::<&str>,
+            )?;
+            app.manage(WakeClaudeItem(wake_claude_item.clone()));
             // Custom, not PredefinedMenuItem::quit: the predefined item sends
             // terminate: straight to NSApp, which nothing here can intercept,
             // so unsaved edits would be dropped without a prompt.
@@ -450,6 +470,7 @@ pub fn run() {
                     &PredefinedMenuItem::separator(handle)?,
                     &install_cli_item,
                     &remove_cli_item,
+                    &wake_claude_item,
                     &PredefinedMenuItem::separator(handle)?,
                     &PredefinedMenuItem::hide(handle, None)?,
                     &quit_item,
@@ -691,7 +712,7 @@ mod tests {
         // Every command the app registers gets past the ACL; none is
         // registered in this mock app, so each then fails only as unknown.
         let commands = registered_commands();
-        assert_eq!(commands.len(), 26);
+        assert_eq!(commands.len(), 27);
         for cmd in commands {
             assert_eq!(invoke(&webview, cmd), Err(format!("Command {cmd} not found")));
         }

@@ -16,7 +16,7 @@ import {
   readAnnotations, addStoredAnnotation, removeStoredAnnotation, updateStoredAnnotation, addStoredReply, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
   onShowAbout, onShowWhatsNew, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
-  onShowInFinder, revealInFinder, copyDocToClipboard, popupContextMenu, setShowInFinderEnabled, setDocUnsaved, releaseDocOwner, onQuitRequested, quitApp,
+  onShowInFinder, revealInFinder, copyDocToClipboard, popupContextMenu, setShowInFinderEnabled, setDocUnsaved, releaseDocOwner, wakeStatus, onQuitRequested, quitApp,
   readReviewed, writeReviewed, openExternal, openFileExternal, localFileUrl, resolveWikilink,
   canonicalizePath, onFileError,
 } from "./ipc";
@@ -200,6 +200,22 @@ async function loadAnnotations(absPath: string): Promise<void> {
   }
 }
 
+// absPath of open docs whose Claude session isn't listening: its waiter timed
+// out or the app stopped the session. Set and cleared by checkWake.
+const notListening = new Set<string>();
+const NOT_LISTENING = "Claude isn't listening — this will reach it on your next prompt";
+
+// Ask, after the user saves, comments or replies, whether that reached Claude.
+function checkWake(absPath: string): void {
+  void wakeStatus(absPath).then((status) => {
+    const was = notListening.has(absPath);
+    const open = state.docs.some((d) => d.absPath === absPath);
+    if (status === "not_listening" && open) notListening.add(absPath);
+    else notListening.delete(absPath);
+    if (was !== notListening.has(absPath)) render();
+  }, () => {});
+}
+
 // Land an optimistic comment change: on success reconcile with the merged
 // on-disk truth; on failure put back the list from before the change and say
 // why. Resolves true when the store accepted the write.
@@ -279,7 +295,7 @@ function startComment(absPath: string): void {
       const cur = state.docs.find((d) => d.absPath === absPath)?.annotations ?? doc.annotations;
       state = setDocAnnotations(state, absPath, addAnnotation(cur, annotation));
       render();
-      void persistComments(absPath, cur, addStoredAnnotation(absPath, annotation));
+      void persistComments(absPath, cur, addStoredAnnotation(absPath, annotation)).then((ok) => { if (ok) checkWake(absPath); });
     },
     onCancel: () => {},
   });
@@ -349,7 +365,7 @@ function renderRailFor(): void {
       const reply = { author: "user" as const, text, createdAt: new Date().toISOString() };
       state = setDocAnnotations(state, doc.absPath, appendReply(cur, a.id, reply));
       render();
-      void persistComments(doc.absPath, cur, addStoredReply(doc.absPath, a.id, text));
+      void persistComments(doc.absPath, cur, addStoredReply(doc.absPath, a.id, text)).then((ok) => { if (ok) checkWake(doc.absPath); });
     },
     onRemove: (a) => {
       // Optimistic local remove (fresh from state), then the locked server-side
@@ -618,6 +634,13 @@ function renderActions(): void {
     back.onclick = () => switchViewMode(doc.id);
     seg.appendChild(back);
     host.appendChild(seg);
+  }
+  if (notListening.has(doc.absPath)) {
+    const notice = el("span", "wake-notice");
+    notice.appendChild(el("span", "wake-notice-text", NOT_LISTENING));
+    notice.setAttribute("role", "status");
+    notice.title = NOT_LISTENING;
+    host.appendChild(notice);
   }
   if (hasUnreviewedChanges(doc)) {
     const review = el("button", "review-btn", "Mark reviewed");
@@ -1041,6 +1064,7 @@ async function closeTab(id: string): Promise<void> {
     const storePath = annotationStorePaths.get(doc.absPath);
     if (storePath) { void unwatchFile(storePath); annotationStorePaths.delete(doc.absPath); }
     annotationsLoaded.delete(doc.absPath);
+    notListening.delete(doc.absPath);
     latestResolve.delete(doc.absPath);
     resolvedText.delete(doc.absPath);
   }
@@ -1087,6 +1111,7 @@ async function saveDoc(id: string): Promise<boolean> {
   state = markSaved(state, id, written);
   const saved = state.docs.find((d) => d.id === id);
   if (saved) void writeReviewed(saved.absPath, saved.reviewedContent);
+  if (saved) checkWake(saved.absPath);
   render();
   if (saved) void catchUpResolutions(saved.absPath).then((fresh) => { if (fresh) redrawComments(id); });
   return true;

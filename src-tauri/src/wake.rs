@@ -7,6 +7,11 @@
 //!   in Glance on a doc that session owns.
 //! - `unsaved/<sha1(doc_key)>`: Glance's pid, while the doc has unsaved edits.
 //!   Cleared at launch, so a crash can't leave a doc marked forever.
+//! - `events/<session>.cursor`: byte offset of the first event not yet
+//!   delivered to the session.
+//! - `waiters/<session>`: `<token> <pid>` of the waiter the `Stop` hook started
+//!   (`glance-mcp --wait`), or `busy` while a turn runs.
+//! - `settings.json`: `{"wakeClaude": bool}`, absent meaning on.
 //!
 //! Every write here is best effort: callers ignore errors, so a failure never
 //! fails the save or comment that triggered it.
@@ -49,7 +54,13 @@ pub fn record_owner_in(base: &Path, doc: &str, session: &str) -> Result<(), Stri
     if !valid_session_id(session) {
         return Err(format!("invalid session id: {session}"));
     }
-    write_atomic(&doc_file(base, "owners", doc), session.as_bytes())
+    write_atomic(&doc_file(base, "owners", doc), session.as_bytes())?;
+    // `mdview` runs from the session's own shell, so the session is mid-turn.
+    // Until its first `Stop` starts a waiter, events reach it at turn end.
+    if !waiter_path(base, session).exists() {
+        let _ = write_waiter_in(base, session, &Waiter::Busy);
+    }
+    Ok(())
 }
 
 pub fn clear_owner_in(base: &Path, doc: &str) -> Result<(), String> {
@@ -116,6 +127,199 @@ pub fn clear_unsaved_in(base: &Path) -> Result<(), String> {
     }
 }
 
+/// Whether a process with this pid is running. `EPERM` means it exists but
+/// belongs to another user, which still counts. Pid 0 and anything that isn't
+/// a positive `pid_t` are never alive: `kill(0, 0)` would test our own group.
+pub fn pid_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 only checks that the pid exists; nothing is sent.
+    let found = unsafe { libc::kill(pid, 0) } == 0;
+    found || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// `~/.glance/settings.json` `wakeClaude`. Absent, unreadable or not a bool
+/// means on.
+pub fn wake_enabled_in(base: &Path) -> bool {
+    std::fs::read_to_string(base.join("settings.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("wakeClaude")?.as_bool())
+        .unwrap_or(true)
+}
+
+/// Set `wakeClaude`, keeping any other keys. A file that isn't a JSON object
+/// is replaced.
+pub fn set_wake_enabled_in(base: &Path, on: bool) -> Result<(), String> {
+    let path = base.join("settings.json");
+    let mut v = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    v["wakeClaude"] = on.into();
+    write_atomic(&path, format!("{}\n", serde_json::to_string_pretty(&v).unwrap()).as_bytes())
+}
+
+/// What `waiters/<session>` says about the session's waiter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Waiter {
+    /// A turn is running: the waiter woke it, or the user typed a prompt.
+    /// Events now are delivered when the turn ends.
+    Busy,
+    /// A waiter started by the `Stop` hook: `<token> <pid>`.
+    Waiting { token: String, pid: u32 },
+}
+
+const BUSY: &str = "busy";
+
+fn waiter_path(base: &Path, session: &str) -> PathBuf {
+    base.join("waiters").join(session)
+}
+
+pub fn read_waiter_in(base: &Path, session: &str) -> Option<Waiter> {
+    let text = std::fs::read_to_string(waiter_path(base, session)).ok()?;
+    let text = text.trim();
+    if text == BUSY {
+        return Some(Waiter::Busy);
+    }
+    let (token, pid) = text.split_once(' ')?;
+    let pid = pid.trim().parse::<u32>().ok()?;
+    (!token.is_empty()).then(|| Waiter::Waiting { token: token.to_string(), pid })
+}
+
+pub fn write_waiter_in(base: &Path, session: &str, waiter: &Waiter) -> Result<(), String> {
+    if !valid_session_id(session) {
+        return Err(format!("invalid session id: {session}"));
+    }
+    let text = match waiter {
+        Waiter::Busy => BUSY.to_string(),
+        Waiter::Waiting { token, pid } => format!("{token} {pid}"),
+    };
+    write_atomic(&waiter_path(base, session), text.as_bytes())
+}
+
+/// Whether `token` is still the session's waiter. A newer waiter, or a prompt
+/// that marked the session busy, ends it.
+pub fn waiter_token_is(base: &Path, session: &str, token: &str) -> bool {
+    matches!(read_waiter_in(base, session), Some(Waiter::Waiting { token: t, .. }) if t == token)
+}
+
+fn events_path(base: &Path, session: &str) -> PathBuf {
+    base.join("events").join(format!("{session}.jsonl"))
+}
+
+fn cursor_path(base: &Path, session: &str) -> PathBuf {
+    base.join("events").join(format!("{session}.cursor"))
+}
+
+/// Byte offset into `events/<session>.jsonl` of the first event not yet
+/// delivered. 0 when there is no cursor yet.
+fn read_cursor(base: &Path, session: &str) -> u64 {
+    std::fs::read_to_string(cursor_path(base, session))
+        .ok()
+        .and_then(|t| t.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Whether the session's events file has bytes past its cursor.
+pub fn has_unread_in(base: &Path, session: &str) -> bool {
+    let len = std::fs::metadata(events_path(base, session)).map(|m| m.len()).unwrap_or(0);
+    let cursor = read_cursor(base, session);
+    // A file shorter than the cursor was replaced; everything in it is new.
+    len > cursor || (len > 0 && len < cursor)
+}
+
+/// The session's complete event lines past its cursor, with the cursor moved
+/// past them. A trailing line with no newline yet is left for next time.
+/// Call it under [`with_session_lock`] so each event is taken once.
+pub fn take_unread_in(base: &Path, session: &str) -> Result<Vec<serde_json::Value>, String> {
+    let bytes = match std::fs::read(events_path(base, session)) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut start = read_cursor(base, session) as usize;
+    if start > bytes.len() {
+        start = 0;
+    }
+    let Some(end) = bytes[start..].iter().rposition(|&b| b == b'\n').map(|i| start + i + 1) else {
+        return Ok(Vec::new());
+    };
+    let events = String::from_utf8_lossy(&bytes[start..end])
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    write_atomic(&cursor_path(base, session), end.to_string().as_bytes())?;
+    Ok(events)
+}
+
+/// Run `f` holding the session's cross-process lock, so the waiter and the
+/// pending hook never both take the same events or race on the waiter file.
+pub fn with_session_lock<T>(base: &Path, session: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    use fs2::FileExt;
+    if !valid_session_id(session) {
+        return Err(format!("invalid session id: {session}"));
+    }
+    let dir = base.join("waiters");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join(format!("{session}.lock")))
+        .map_err(|e| e.to_string())?;
+    // Holders keep it for milliseconds; give up rather than hang a hook.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let contended = fs2::lock_contended_error().raw_os_error();
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(e) if e.raw_os_error() == contended && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let out = f();
+    let _ = lock.unlock();
+    out
+}
+
+/// Whether any doc's owner file names this session.
+pub fn owns_any_doc_in(base: &Path, session: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(base.join("owners")) else { return false };
+    entries.flatten().any(|e| std::fs::read_to_string(e.path()).is_ok_and(|s| s.trim() == session))
+}
+
+/// Whether a save or comment on a doc will reach Claude now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeStatus {
+    /// A waiter is running, or a turn is, so the event is delivered.
+    Listening,
+    /// The owner's waiter is gone: it timed out, or the app evicted the session.
+    NotListening,
+    /// No session owns the doc.
+    Unowned,
+    /// The user turned waking off.
+    Off,
+}
+
+pub fn wake_status_in(base: &Path, doc: &str, alive: impl Fn(u32) -> bool) -> WakeStatus {
+    if !wake_enabled_in(base) {
+        return WakeStatus::Off;
+    }
+    let Some(session) = owner_in(base, doc) else { return WakeStatus::Unowned };
+    match read_waiter_in(base, &session) {
+        Some(Waiter::Busy) => WakeStatus::Listening,
+        Some(Waiter::Waiting { pid, .. }) if alive(pid) => WakeStatus::Listening,
+        _ => WakeStatus::NotListening,
+    }
+}
+
 fn with_base<T>(f: impl FnOnce(&Path) -> Result<T, String>) -> Result<T, String> {
     f(&glance_dir().ok_or_else(|| "Could not determine $HOME".to_string())?)
 }
@@ -140,6 +344,21 @@ pub fn set_unsaved(doc: &str, unsaved: bool) -> Result<(), String> {
 
 pub fn clear_unsaved() {
     let _ = with_base(clear_unsaved_in);
+}
+
+pub fn wake_enabled() -> bool {
+    glance_dir().is_none_or(|b| wake_enabled_in(&b))
+}
+
+pub fn set_wake_enabled(on: bool) -> Result<(), String> {
+    with_base(|b| set_wake_enabled_in(b, on))
+}
+
+pub fn wake_status(doc: &str) -> WakeStatus {
+    match glance_dir() {
+        Some(b) => wake_status_in(&b, doc, pid_alive),
+        None => WakeStatus::Unowned,
+    }
 }
 
 #[cfg(test)]
@@ -258,6 +477,132 @@ mod tests {
             std::fs::write(&marker, junk).unwrap();
             assert_eq!(unsaved_pid_in(&base, &doc), None, "{junk:?}");
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn settings_default_on_and_keep_other_keys() {
+        let base = scratch("settings");
+        assert!(wake_enabled_in(&base));
+        std::fs::write(base.join("settings.json"), r#"{"other": 1}"#).unwrap();
+        assert!(wake_enabled_in(&base));
+        set_wake_enabled_in(&base, false).unwrap();
+        assert!(!wake_enabled_in(&base));
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(base.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(v["other"], 1);
+        set_wake_enabled_in(&base, true).unwrap();
+        assert!(wake_enabled_in(&base));
+        std::fs::write(base.join("settings.json"), "[1]").unwrap();
+        assert!(wake_enabled_in(&base), "junk means on");
+        set_wake_enabled_in(&base, false).unwrap();
+        assert!(!wake_enabled_in(&base));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn waiter_file_round_trips_token_pid_and_busy() {
+        let base = scratch("waiter");
+        assert_eq!(read_waiter_in(&base, "s1"), None);
+        let w = Waiter::Waiting { token: "abc".into(), pid: 42 };
+        write_waiter_in(&base, "s1", &w).unwrap();
+        assert_eq!(std::fs::read_to_string(base.join("waiters").join("s1")).unwrap(), "abc 42");
+        assert_eq!(read_waiter_in(&base, "s1"), Some(w));
+        assert!(waiter_token_is(&base, "s1", "abc"));
+        assert!(!waiter_token_is(&base, "s1", "abd"));
+        write_waiter_in(&base, "s1", &Waiter::Busy).unwrap();
+        assert_eq!(read_waiter_in(&base, "s1"), Some(Waiter::Busy));
+        assert!(!waiter_token_is(&base, "s1", "abc"));
+        assert!(write_waiter_in(&base, "../x", &Waiter::Busy).is_err());
+        for junk in ["", "abc", "abc x", " 5"] {
+            std::fs::write(base.join("waiters").join("s1"), junk).unwrap();
+            assert_eq!(read_waiter_in(&base, "s1"), None, "{junk:?}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn take_unread_delivers_each_complete_event_once() {
+        let base = scratch("cursor");
+        let doc = base.join("d.md");
+        std::fs::write(&doc, "x").unwrap();
+        let doc = doc.to_string_lossy().into_owned();
+        assert!(!has_unread_in(&base, "s1"));
+        assert!(take_unread_in(&base, "s1").unwrap().is_empty());
+        record_owner_in(&base, &doc, "s1").unwrap();
+        append_event_in(&base, &doc, EventKind::Save, None).unwrap();
+        append_event_in(&base, &doc, EventKind::Comment, Some(2)).unwrap();
+        assert!(has_unread_in(&base, "s1"));
+        let got = take_unread_in(&base, "s1").unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[1]["number"], 2);
+        assert!(!has_unread_in(&base, "s1"));
+        assert!(take_unread_in(&base, "s1").unwrap().is_empty());
+
+        // Added while nobody waits: the next reader gets it.
+        append_event_in(&base, &doc, EventKind::Reply, Some(2)).unwrap();
+        // A half-written line is left for later.
+        let path = base.join("events").join("s1.jsonl");
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"{\"kind\":\"sa").unwrap();
+        let got = take_unread_in(&base, "s1").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["kind"], "reply");
+        assert!(take_unread_in(&base, "s1").unwrap().is_empty());
+        f.write_all(b"ve\"}\n").unwrap();
+        assert_eq!(take_unread_in(&base, "s1").unwrap()[0]["kind"], "save");
+
+        // A replaced (shorter) file is read from the start.
+        std::fs::write(&path, "{\"kind\":\"comment\"}\n").unwrap();
+        assert!(has_unread_in(&base, "s1"));
+        assert_eq!(take_unread_in(&base, "s1").unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn session_lock_serializes_holders() {
+        let base = scratch("lock");
+        let held = with_session_lock(&base, "s1", || with_session_lock(&base, "s2", || Ok(7))).unwrap();
+        assert_eq!(held, 7);
+        assert!(with_session_lock(&base, "../x", || Ok(())).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn mdview_open_marks_a_new_session_busy_but_keeps_a_waiter() {
+        let base = scratch("owner-busy");
+        let doc = base.join("d.md");
+        std::fs::write(&doc, "x").unwrap();
+        let doc = doc.to_string_lossy().into_owned();
+        assert!(!owns_any_doc_in(&base, "s1"));
+        record_owner_in(&base, &doc, "s1").unwrap();
+        assert!(owns_any_doc_in(&base, "s1"));
+        assert!(!owns_any_doc_in(&base, "s2"));
+        assert_eq!(read_waiter_in(&base, "s1"), Some(Waiter::Busy));
+        let w = Waiter::Waiting { token: "t".into(), pid: 9 };
+        write_waiter_in(&base, "s1", &w).unwrap();
+        record_owner_in(&base, &doc, "s1").unwrap();
+        assert_eq!(read_waiter_in(&base, "s1"), Some(w));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn wake_status_follows_owner_waiter_and_toggle() {
+        let base = scratch("status");
+        let doc = base.join("d.md");
+        std::fs::write(&doc, "x").unwrap();
+        let doc = doc.to_string_lossy().into_owned();
+        let alive = |pid: u32| pid == 1;
+        assert_eq!(wake_status_in(&base, &doc, alive), WakeStatus::Unowned);
+        record_owner_in(&base, &doc, "s1").unwrap();
+        assert_eq!(wake_status_in(&base, &doc, alive), WakeStatus::Listening, "busy mid-turn");
+        write_waiter_in(&base, "s1", &Waiter::Waiting { token: "t".into(), pid: 1 }).unwrap();
+        assert_eq!(wake_status_in(&base, &doc, alive), WakeStatus::Listening);
+        write_waiter_in(&base, "s1", &Waiter::Waiting { token: "t".into(), pid: 2 }).unwrap();
+        assert_eq!(wake_status_in(&base, &doc, alive), WakeStatus::NotListening, "dead pid");
+        std::fs::remove_file(base.join("waiters").join("s1")).unwrap();
+        assert_eq!(wake_status_in(&base, &doc, alive), WakeStatus::NotListening, "no waiter file");
+        set_wake_enabled_in(&base, false).unwrap();
+        assert_eq!(wake_status_in(&base, &doc, alive), WakeStatus::Off);
         let _ = std::fs::remove_dir_all(&base);
     }
 }
