@@ -200,9 +200,6 @@ async function loadAnnotations(absPath: string): Promise<void> {
   }
 }
 
-// Land an optimistic comment change: on success reconcile with the merged
-// on-disk truth; on failure put back the list from before the change and say
-// why. Resolves true when the store accepted the write.
 // absPath of open docs whose Claude session isn't listening: its waiter timed
 // out or the app stopped the session. Set and cleared by checkWake.
 const notListening = new Set<string>();
@@ -219,6 +216,9 @@ function checkWake(absPath: string): void {
   }, () => {});
 }
 
+// Land an optimistic comment change: on success reconcile with the merged
+// on-disk truth; on failure put back the list from before the change and say
+// why. Resolves true when the store accepted the write.
 function persistComments(absPath: string, before: Annotation[], write: Promise<unknown>): Promise<boolean> {
   return write.then(
     () => loadAnnotations(absPath).then(() => true),
@@ -638,6 +638,7 @@ function renderActions(): void {
   if (notListening.has(doc.absPath)) {
     const notice = el("span", "wake-notice", NOT_LISTENING);
     notice.setAttribute("role", "status");
+    notice.title = NOT_LISTENING;
     host.appendChild(notice);
   }
   if (hasUnreviewedChanges(doc)) {
