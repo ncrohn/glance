@@ -451,6 +451,28 @@ exit 0
     TEMPLATE.replace("__MCP_BIN__", &sh_quote(mcp_bin))
 }
 
+/// The PreToolUse hook script (Claude Code only). Runs `glance-mcp --guard`
+/// with the hook event JSON on stdin. Exit 2 blocks the edit and sends the
+/// refusal to the agent; only then is glance-mcp's stderr passed on. Any other
+/// outcome, including a missing or broken binary, exits 0 so the edit goes ahead.
+pub fn guard_hook_script(mcp_bin: &str) -> String {
+    const TEMPLATE: &str = r#"#!/bin/sh
+# Glance unsaved-edit guard (PreToolUse). Refuses a Write or Edit to a doc that
+# has unsaved changes in Glance, so the agent replies on the comment card
+# instead of overwriting the user's typing. stdin (the hook event JSON) is
+# passed straight through to glance-mcp. Exits 2 only on a refusal.
+if [ -x __MCP_BIN__ ]; then
+  msg=$(__MCP_BIN__ --guard 2>&1 >/dev/null)
+  if [ $? -eq 2 ]; then
+    printf '%s\n' "$msg" >&2
+    exit 2
+  fi
+fi
+exit 0
+"#;
+    TEMPLATE.replace("__MCP_BIN__", &sh_quote(mcp_bin))
+}
+
 /// The `command` strings of a hooks entry's inner `hooks[]` list. Only those
 /// strings are decoded: a field `serde_json::Value` can't hold (`1e400`, a lone
 /// surrogate) must not hide our entry, or setup would add a second one.
@@ -945,7 +967,7 @@ fn guidance_uninstall_plan(path: PathBuf) -> Result<Plan, String> {
 }
 
 /// The files Glance writes into a client's skill dir.
-const SKILL_FILES: [&str; 3] = ["SKILL.md", "open-md-hook.sh", "pending-hook.sh"];
+const SKILL_FILES: [&str; 4] = ["SKILL.md", "open-md-hook.sh", "pending-hook.sh", "guard-hook.sh"];
 /// Records the SHA-1 of each file Glance wrote into the skill dir, so remove
 /// deletes only those files, and only while they are unchanged.
 const SKILL_MANIFEST: &str = ".glance-manifest.json";
@@ -987,13 +1009,15 @@ fn manifest_write(skill_dir: &Path, writes: &[&FileWrite]) -> FileWrite {
     }
 }
 
-/// Whether `contents` is a file Glance ≤ 0.8.5 wrote (no manifest then): each
+/// Whether `contents` is a file Glance wrote, for a skill dir with no readable
+/// manifest (Glance ≤ 0.8.5 wrote none; a later one may have been lost): each
 /// starts with a fixed header no user file would.
 fn legacy_skill_file(name: &str, contents: &str) -> bool {
     match name {
         "SKILL.md" => contents.starts_with("---\nname: glance\n") && contents.contains("\n# Using Glance\n"),
         "open-md-hook.sh" => contents.starts_with("#!/bin/sh\n# Glance auto-open hook (PostToolUse)."),
         "pending-hook.sh" => contents.starts_with("#!/bin/sh\n# Glance pending-comments hook (UserPromptSubmit)."),
+        "guard-hook.sh" => contents.starts_with("#!/bin/sh\n# Glance unsaved-edit guard (PreToolUse)."),
         _ => false,
     }
 }
@@ -1111,6 +1135,42 @@ fn hooks_uninstall_contents(skill_dir: &Path, hooks_path: &Path, file: &str) -> 
     Ok(after_pending.or(after_open))
 }
 
+const CLAUDE_SETTINGS_FILE: &str = "~/.claude/settings.json";
+
+/// Add the unsaved-edit guard to Claude's hooks install `plan`: the
+/// `guard-hook.sh` script, a `PreToolUse` entry for `Write|Edit` in
+/// settings.json, and the script in the skill manifest. Claude only; Codex
+/// keeps the shared plan as is.
+fn with_claude_guard(plan: Plan, skill_dir: &Path, settings_path: &Path, bins: &Binaries) -> Result<Plan, String> {
+    let Plan::Write(mut writes) = plan else { return Ok(plan) };
+    let guard_path = skill_dir.join("guard-hook.sh");
+    let guard_cmds = hook_commands(&guard_path);
+    let settings = writes
+        .iter_mut()
+        .find(|w| w.path == settings_path)
+        .ok_or_else(|| format!("No {CLAUDE_SETTINGS_FILE} write in the hooks plan"))?;
+    settings.contents = merge_settings_hook_in(
+        &settings.contents,
+        CLAUDE_SETTINGS_FILE,
+        "PreToolUse",
+        Some("Write|Edit"),
+        &guard_cmds[0],
+        &as_strs(&guard_cmds[1..]),
+    )?;
+    let guard = FileWrite { path: guard_path, contents: guard_hook_script(&bins.mcp_bin), executable: true };
+    let manifest_path = skill_dir.join(SKILL_MANIFEST);
+    writes.retain(|w| w.path != manifest_path);
+    let manifest = {
+        let mut ours: Vec<&FileWrite> = writes.iter().filter(|w| w.path.parent() == Some(skill_dir)).collect();
+        ours.push(&guard);
+        manifest_write(skill_dir, &ours)
+    };
+    let at = writes.iter().position(|w| w.path == settings_path).unwrap_or(writes.len());
+    writes.insert(at, manifest);
+    writes.insert(at, guard);
+    Ok(Plan::Write(writes))
+}
+
 /// Claude Code — the original integration, now expressed as an adapter. Wraps
 /// the pure merge helpers above unchanged.
 pub struct ClaudeAdapter;
@@ -1154,7 +1214,8 @@ impl ClientAdapter for ClaudeAdapter {
     fn open_hook(&self, home: &Path, bins: &Binaries) -> Result<Plan, String> {
         let skill_dir = home.join(".claude").join("skills").join("glance");
         let settings_path = home.join(".claude").join("settings.json");
-        hooks_install_plan(&skill_dir, settings_path, "~/.claude/settings.json", "Write", bins)
+        let plan = hooks_install_plan(&skill_dir, settings_path.clone(), CLAUDE_SETTINGS_FILE, "Write", bins)?;
+        with_claude_guard(plan, &skill_dir, &settings_path, bins)
     }
 
     fn mcp_uninstall(&self, home: &Path) -> Result<Plan, String> {
@@ -1179,7 +1240,14 @@ impl ClientAdapter for ClaudeAdapter {
         // withdraw their references from settings.json.
         let skill_dir = home.join(".claude").join("skills").join("glance");
         let settings_path = home.join(".claude").join("settings.json");
-        match hooks_uninstall_contents(&skill_dir, &settings_path, "~/.claude/settings.json")? {
+        let shared = hooks_uninstall_contents(&skill_dir, &settings_path, CLAUDE_SETTINGS_FILE)?;
+        let base = match &shared {
+            Some(next) => next.clone(),
+            None => read_existing(&settings_path)?,
+        };
+        let guard_cmds = hook_commands(&skill_dir.join("guard-hook.sh"));
+        let after_guard = remove_settings_hook_for(&base, "PreToolUse", &as_strs(&guard_cmds), CLAUDE_SETTINGS_FILE)?;
+        match after_guard.or(shared) {
             None => Ok(Plan::AlreadyDone("No Glance hook entries to remove.".to_string())),
             Some(next) => Ok(rewrite(settings_path, next, "Removed Glance's hooks from ~/.claude/settings.json.".to_string())),
         }
@@ -1709,7 +1777,15 @@ mod tests {
             app_bin: "/Applications/Glance.app/Contents/MacOS/glance".to_string(),
         };
         let writes = plan_writes(ClaudeAdapter.open_hook(&home, &bins).unwrap());
-        assert_eq!(writes.len(), 4);
+        assert_eq!(writes.len(), 5);
+        let guard = writes.iter().find(|w| w.path.ends_with("guard-hook.sh")).expect("guard-hook.sh write");
+        assert!(guard.executable);
+        assert!(guard.contents.contains("'/Applications/Glance.app/Contents/MacOS/glance-mcp' --guard"));
+        let manifest = writes.iter().find(|w| w.path.ends_with(SKILL_MANIFEST)).expect("a manifest write");
+        let files: serde_json::Value = serde_json::from_str(&manifest.contents).unwrap();
+        for name in ["open-md-hook.sh", "pending-hook.sh", "guard-hook.sh"] {
+            assert!(files["files"][name].is_string(), "{name} in manifest");
+        }
         let open = writes.iter().find(|w| w.path.ends_with("open-md-hook.sh")).expect("open-md-hook.sh write");
         assert!(open.executable);
         assert!(open.contents.contains("GLANCE_APP='/Applications/Glance.app/Contents/MacOS/glance'"));
@@ -1723,7 +1799,111 @@ mod tests {
         let ups = &v["hooks"]["UserPromptSubmit"][0];
         assert!(ups.get("matcher").is_none(), "UserPromptSubmit entries carry no matcher");
         assert!(ups["hooks"][0]["command"].as_str().unwrap().ends_with("pending-hook.sh"));
+        let pre = v["hooks"]["PreToolUse"].as_array().expect("a PreToolUse list");
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0]["matcher"], "Write|Edit");
+        assert!(pre[0]["hooks"][0]["command"].as_str().unwrap().ends_with("guard-hook.sh"));
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn claude_guard_installs_once_and_remove_takes_it_out() {
+        let home = tmp_home("claude-guard");
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        let settings_path = home.join(".claude").join("settings.json");
+        std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings_path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/mine.sh"}]}]}}"#,
+        )
+        .unwrap();
+        for _ in 0..2 {
+            for r in setup_adapter(&ClaudeAdapter, &bins, &home) {
+                assert!(r.ok, "install step failed: {}", r.message);
+            }
+        }
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 2, "the user's entry and exactly one of ours");
+        assert_eq!(pre[0]["hooks"][0]["command"], "/mine.sh");
+        assert_eq!(pre[1]["matcher"], "Write|Edit");
+        let skill_dir = home.join(".claude").join("skills").join("glance");
+        assert!(skill_dir.join("guard-hook.sh").exists());
+
+        for r in remove_adapter(&ClaudeAdapter, &home) {
+            assert!(r.ok, "uninstall step failed: {}", r.message);
+        }
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+        let pre = v["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0]["hooks"][0]["command"], "/mine.sh");
+        assert!(!skill_dir.exists());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn remove_deletes_the_guard_script_when_the_manifest_is_gone() {
+        let home = tmp_home("claude-guard-no-manifest");
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        for r in setup_adapter(&ClaudeAdapter, &bins, &home) {
+            assert!(r.ok, "install step failed: {}", r.message);
+        }
+        let skill_dir = home.join(".claude").join("skills").join("glance");
+        std::fs::remove_file(skill_dir.join(SKILL_MANIFEST)).unwrap();
+        let (_, deletes) = plan_removes(ClaudeAdapter.skill_uninstall(&home).unwrap());
+        assert!(deletes.contains(&skill_dir.join("guard-hook.sh")), "{deletes:?}");
+        assert!(deletes.contains(&skill_dir));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn codex_gets_no_guard() {
+        let home = tmp_home("codex-guard");
+        let bins = Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() };
+        let writes = plan_writes(CodexAdapter.open_hook(&home, &bins).unwrap());
+        assert!(!writes.iter().any(|w| w.path.ends_with("guard-hook.sh")));
+        let hooks = writes.iter().find(|w| w.path.ends_with("hooks.json")).expect("a hooks.json write");
+        let v: serde_json::Value = serde_json::from_str(&hooks.contents).unwrap();
+        assert!(v["hooks"].get("PreToolUse").is_none());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn guard_hook_script_passes_on_only_a_refusal() {
+        let s = guard_hook_script("/Applications/Glance.app/Contents/MacOS/glance-mcp");
+        assert!(s.starts_with("#!/bin/sh\n# Glance unsaved-edit guard (PreToolUse)."));
+        let dir = tmp_home("guard-script");
+        let run = |mcp_body: Option<&str>| {
+            let mcp = dir.join("fake-mcp");
+            let _ = std::fs::remove_file(&mcp);
+            if let Some(body) = mcp_body {
+                std::fs::write(&mcp, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::set_permissions(&mcp, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            }
+            let script = dir.join("guard-hook.sh");
+            std::fs::write(&script, guard_hook_script(&mcp.to_string_lossy())).unwrap();
+            let mut child = std::process::Command::new("sh")
+                .arg(&script)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            std::io::Write::write_all(child.stdin.as_mut().unwrap(), b"{\"tool_input\":{}}").unwrap();
+            let out = child.wait_with_output().unwrap();
+            (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+        };
+        // stdin reaches glance-mcp, and a refusal's stderr reaches the agent.
+        let (code, err) = run(Some(r#"[ "$1" = --guard ] && grep -q tool_input && echo "no edit" >&2 && exit 2; exit 9"#));
+        assert_eq!(code, Some(2));
+        assert_eq!(err, "no edit\n");
+        let (code, err) = run(Some(r#"echo "panic" >&2; exit 101"#));
+        assert_eq!((code, err.as_str()), (Some(0), ""), "a crash lets the edit through, quietly");
+        let (code, err) = run(Some("exit 0"));
+        assert_eq!((code, err.as_str()), (Some(0), ""));
+        let (code, err) = run(None);
+        assert_eq!((code, err.as_str()), (Some(0), ""), "missing binary");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

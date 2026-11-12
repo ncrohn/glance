@@ -102,6 +102,13 @@ pub fn set_unsaved_in(base: &Path, doc: &str, unsaved: bool) -> Result<(), Strin
     }
 }
 
+/// The pid in the doc's `unsaved/` marker. `None` when there is no marker or
+/// it doesn't hold a positive pid.
+pub fn unsaved_pid_in(base: &Path, doc: &str) -> Option<u32> {
+    let text = std::fs::read_to_string(doc_file(base, "unsaved", doc)).ok()?;
+    text.trim().parse::<u32>().ok().filter(|&pid| pid > 0)
+}
+
 pub fn clear_unsaved_in(base: &Path) -> Result<(), String> {
     match std::fs::remove_dir_all(base.join("unsaved")) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
@@ -231,6 +238,26 @@ mod tests {
         clear_unsaved_in(&base).unwrap();
         assert!(!base.join("unsaved").exists());
         clear_unsaved_in(&base).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn unsaved_pid_reads_the_marker_under_any_spelling_of_the_doc() {
+        let base = scratch("unsaved-pid");
+        let doc = base.join("draft.md");
+        std::fs::write(&doc, "x").unwrap();
+        let doc = doc.to_string_lossy().into_owned();
+        assert_eq!(unsaved_pid_in(&base, &doc), None);
+        set_unsaved_in(&base, &doc, true).unwrap();
+        assert_eq!(unsaved_pid_in(&base, &doc), Some(std::process::id()));
+        let dotted = base.join(".").join("draft.md").to_string_lossy().into_owned();
+        assert_eq!(unsaved_pid_in(&base, &dotted), Some(std::process::id()));
+
+        let marker = doc_file(&base, "unsaved", &doc);
+        for junk in ["0", "-5", "abc", ""] {
+            std::fs::write(&marker, junk).unwrap();
+            assert_eq!(unsaved_pid_in(&base, &doc), None, "{junk:?}");
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 }
