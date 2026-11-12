@@ -1603,12 +1603,17 @@ fn uninstall_plan(adapter: &dyn ClientAdapter, c: Capability, home: &Path) -> Re
 /// Unsupported capabilities are skipped, so results carry no "Not applicable"
 /// noise. Rows are grouped under the client's display name.
 pub fn setup_adapter(adapter: &dyn ClientAdapter, bins: &Binaries, home: &Path) -> Vec<StepResult> {
+    setup_adapter_with(adapter, bins, home, |p| p)
+}
+
+/// [`setup_adapter`], with each plan passed through `filter` before it runs.
+fn setup_adapter_with(adapter: &dyn ClientAdapter, bins: &Binaries, home: &Path, filter: impl Fn(Plan) -> Plan) -> Vec<StepResult> {
     let name = adapter.display_name();
     Capability::ALL
         .into_iter()
         .filter(|&c| adapter.supports(c))
         .map(|c| {
-            let mut r = run_step(name, c.label(), install_plan(adapter, c, bins, home));
+            let mut r = run_step(name, c.label(), install_plan(adapter, c, bins, home).map(&filter));
             if r.ok {
                 if let Some(note) = adapter.install_note(c) {
                     r.message = format!("{} {note}", r.message);
@@ -1696,10 +1701,64 @@ pub enum UpdateRefresh {
     /// The binaries could not be located, so nothing ran and no version was
     /// recorded: a later launch from `/Applications` tries again.
     Skipped(String),
-    /// The version was recorded. Holds every step that ran, the version write
-    /// last; that write is the only step when Claude Code's Glance skill has no
-    /// manifest.
-    Done(Vec<StepResult>),
+    /// The version was recorded. `steps` holds every step that ran, the
+    /// version write last; that write is the only step when Claude Code's
+    /// Glance skill has no manifest. `kept` lists skill files the user edited,
+    /// which the refresh left alone.
+    Done { steps: Vec<StepResult>, kept: Vec<PathBuf> },
+}
+
+/// Files in `skill_dir` the user changed since Glance wrote them, each with
+/// the hash the manifest holds for it. A file is edited when its SHA-1 differs
+/// from its manifest entry, or when the manifest has no entry and it lacks
+/// Glance's header ([`legacy_skill_file`]). Missing files are not edited.
+fn edited_skill_files(skill_dir: &Path) -> std::collections::BTreeMap<PathBuf, Option<String>> {
+    let manifest = read_manifest(skill_dir).unwrap_or_default();
+    SKILL_FILES
+        .iter()
+        .filter_map(|&name| {
+            let path = skill_dir.join(name);
+            let bytes = std::fs::read(&path).ok()?;
+            let edited = match manifest.get(name) {
+                Some(hash) => *hash != sha1_hex(&bytes),
+                None => !legacy_skill_file(name, &String::from_utf8_lossy(&bytes)),
+            };
+            edited.then(|| (path, manifest.get(name).cloned()))
+        })
+        .collect()
+}
+
+/// `plan` without its writes to the files in `keep`. The skill manifest it
+/// writes keeps each kept file's old entry, or none, so Remove still leaves a
+/// file the user changed.
+fn without_writes_to(plan: Plan, keep: &std::collections::BTreeMap<PathBuf, Option<String>>) -> Plan {
+    let Plan::Write(writes) = plan else { return plan };
+    if !writes.iter().any(|w| keep.contains_key(&w.path)) {
+        return Plan::Write(writes);
+    }
+    let writes = writes
+        .into_iter()
+        .filter(|w| !keep.contains_key(&w.path))
+        .map(|mut w| {
+            if !w.path.ends_with(SKILL_MANIFEST) {
+                return w;
+            }
+            let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&w.contents) else { return w };
+            if let Some(files) = doc.get_mut("files").and_then(|f| f.as_object_mut()) {
+                for (path, old) in keep {
+                    let Some(name) = path.file_name() else { continue };
+                    let name = name.to_string_lossy().into_owned();
+                    match old {
+                        Some(hash) => files.insert(name, hash.clone().into()),
+                        None => files.remove(&name),
+                    };
+                }
+            }
+            w.contents = format!("{}\n", serde_json::to_string_pretty(&doc).unwrap());
+            w
+        })
+        .collect();
+    Plan::Write(writes)
 }
 
 /// `~/.glance/integration-version`: the Glance version that last checked the
@@ -1713,7 +1772,8 @@ fn integration_version_path(home: &Path) -> PathBuf {
 /// [`setup_adapter`]) so existing installs get new hooks and skill text. Runs
 /// only when Claude Code's Glance skill manifest exists: anyone who never set
 /// up the integration, or removed it, is left alone. Codex and Cursor are
-/// never touched.
+/// never touched. Skill files the user edited are kept: only the menu's Set up
+/// replaces them.
 pub fn refresh_on_update(home: &Path, version: &str, resolve: impl FnOnce(&Path) -> Result<Binaries, String>) -> UpdateRefresh {
     let marker = integration_version_path(home);
     if std::fs::read_to_string(&marker).is_ok_and(|v| v.trim() == version) {
@@ -1721,6 +1781,7 @@ pub fn refresh_on_update(home: &Path, version: &str, resolve: impl FnOnce(&Path)
     }
     let skill_dir = home.join(".claude").join("skills").join("glance");
     let mut steps = Vec::new();
+    let mut kept = Vec::new();
     if skill_dir.join(SKILL_MANIFEST).is_file() {
         let bins = match resolve(home) {
             Ok(b) => b,
@@ -1728,7 +1789,9 @@ pub fn refresh_on_update(home: &Path, version: &str, resolve: impl FnOnce(&Path)
         };
         let cli = install_cli_tool(home, Path::new(&bins.app_bin));
         steps.push(StepResult { ok: cli.ok, label: "Install mdview CLI".to_string(), message: cli.message, group: "Shared".to_string() });
-        steps.extend(setup_adapter(&ClaudeAdapter, &bins, home));
+        let edited = edited_skill_files(&skill_dir);
+        steps.extend(setup_adapter_with(&ClaudeAdapter, &bins, home, |p| without_writes_to(p, &edited)));
+        kept = edited.into_keys().collect();
     }
     let recorded = marker
         .parent()
@@ -1743,7 +1806,7 @@ pub fn refresh_on_update(home: &Path, version: &str, resolve: impl FnOnce(&Path)
         },
         group: "Shared".to_string(),
     });
-    UpdateRefresh::Done(steps)
+    UpdateRefresh::Done { steps, kept }
 }
 
 /// The launch-time call of [`refresh_on_update`] for the running Glance.
@@ -1753,7 +1816,10 @@ pub fn refresh_integration_at_launch(version: &str) {
     match refresh_on_update(&home, version, resolve_binaries) {
         UpdateRefresh::Current => {}
         UpdateRefresh::Skipped(e) => eprintln!("glance: AI integration not refreshed for {version}: {e}"),
-        UpdateRefresh::Done(steps) => {
+        UpdateRefresh::Done { steps, kept } => {
+            for p in &kept {
+                eprintln!("glance: AI integration refresh kept your edited {}; Set up AI Integration… replaces it.", p.display());
+            }
             for s in steps.iter().filter(|s| !s.ok) {
                 eprintln!("glance: AI integration refresh, {} — {}: {}", s.group, s.label, s.message);
             }
@@ -2550,6 +2616,15 @@ mod tests {
         out
     }
 
+    /// Write `contents` to `name` in `skill_dir` and record it in the manifest,
+    /// as an older Glance would have.
+    fn write_as_glance(skill_dir: &Path, name: &str, contents: &str) {
+        let w = FileWrite { path: skill_dir.join(name), contents: contents.to_string(), executable: false };
+        std::fs::write(&w.path, contents).unwrap();
+        let m = manifest_write(skill_dir, &[&w]);
+        std::fs::write(&m.path, m.contents).unwrap();
+    }
+
     #[test]
     fn update_refreshes_an_older_claude_install_once_then_records_the_version() {
         let home = tmp_home("refresh-older");
@@ -2561,7 +2636,7 @@ mod tests {
         let skill = home.join(".claude").join("skills").join("glance").join("SKILL.md");
         let mdview = home.join(".local").join("bin").join("mdview");
         std::fs::write(&settings, "{}\n").unwrap();
-        std::fs::write(&skill, "---\nname: glance\n---\nold\n").unwrap();
+        write_as_glance(skill.parent().unwrap(), "SKILL.md", "---\nname: glance\n---\nold\n");
         std::fs::write(&mdview, "#!/bin/sh\n# Glance CLI: old\n").unwrap();
         std::fs::create_dir_all(home.join(".glance")).unwrap();
         std::fs::write(home.join(".glance").join("integration-version"), "0.14.0\n").unwrap();
@@ -2570,9 +2645,10 @@ mod tests {
         std::fs::create_dir_all(home.join(".cursor")).unwrap();
         assert!(CodexAdapter.is_present(&home) && CursorAdapter.is_present(&home));
 
-        let UpdateRefresh::Done(steps) = refresh_on_update(&home, "0.14.1", fake_bins) else {
+        let UpdateRefresh::Done { steps, kept } = refresh_on_update(&home, "0.14.1", fake_bins) else {
             panic!("expected Done")
         };
+        assert!(kept.is_empty());
         assert!(steps.len() > 1);
         assert!(steps.iter().all(|s| s.ok), "{:?}", steps);
         assert!(steps.iter().all(|s| s.group == "Shared" || s.group == "Claude Code"));
@@ -2595,6 +2671,47 @@ mod tests {
     }
 
     #[test]
+    fn update_keeps_skill_files_the_user_edited_and_their_manifest_entries() {
+        let home = tmp_home("refresh-edited");
+        let bins = fake_bins(&home).unwrap();
+        setup_adapter(&ClaudeAdapter, &bins, &home);
+        let skill_dir = home.join(".claude").join("skills").join("glance");
+        // An older Glance's open hook, then the user's edits to SKILL.md and the
+        // wait hook, and a guard-hook.sh of their own that the manifest doesn't list.
+        write_as_glance(&skill_dir, "open-md-hook.sh", "#!/bin/sh\n# Glance auto-open hook (PostToolUse). old\n");
+        std::fs::write(skill_dir.join("SKILL.md"), "my skill\n").unwrap();
+        std::fs::write(skill_dir.join("wait-hook.sh"), "#!/bin/sh\n# mine\n").unwrap();
+        let mut m: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(skill_dir.join(SKILL_MANIFEST)).unwrap()).unwrap();
+        m["files"].as_object_mut().unwrap().remove("guard-hook.sh");
+        std::fs::write(skill_dir.join(SKILL_MANIFEST), m.to_string()).unwrap();
+        std::fs::write(skill_dir.join("guard-hook.sh"), "#!/bin/sh\n# my guard\n").unwrap();
+        let before = read_manifest(&skill_dir).unwrap();
+
+        let UpdateRefresh::Done { steps, kept } = refresh_on_update(&home, "0.14.1", fake_bins) else {
+            panic!("expected Done")
+        };
+        assert!(steps.iter().all(|s| s.ok), "{:?}", steps);
+        let names: Vec<_> = kept.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["SKILL.md", "guard-hook.sh", "wait-hook.sh"]);
+        assert_eq!(std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(), "my skill\n");
+        assert_eq!(std::fs::read_to_string(skill_dir.join("wait-hook.sh")).unwrap(), "#!/bin/sh\n# mine\n");
+        assert_eq!(std::fs::read_to_string(skill_dir.join("guard-hook.sh")).unwrap(), "#!/bin/sh\n# my guard\n");
+        // Glance's own old file is refreshed.
+        assert!(!std::fs::read_to_string(skill_dir.join("open-md-hook.sh")).unwrap().ends_with("old\n"));
+        // The manifest still holds the hashes Glance wrote, so Remove keeps the edits.
+        let after = read_manifest(&skill_dir).unwrap();
+        assert_eq!(after.get("SKILL.md"), before.get("SKILL.md"));
+        assert_eq!(after.get("wait-hook.sh"), before.get("wait-hook.sh"));
+        assert_eq!(after.get("guard-hook.sh"), None);
+        assert_ne!(after.get("open-md-hook.sh"), before.get("open-md-hook.sh"));
+
+        // The menu's Set up still replaces them.
+        setup_adapter(&ClaudeAdapter, &bins, &home);
+        assert_eq!(std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(), skill_doc());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn update_without_a_skill_manifest_only_records_the_version() {
         let home = tmp_home("refresh-no-manifest");
         // Claude Code is installed, and a pre-manifest skill dir exists, but no manifest.
@@ -2604,9 +2721,10 @@ mod tests {
         std::fs::write(home.join(".claude.json"), "{}\n").unwrap();
         let before = snapshot(&home);
 
-        let UpdateRefresh::Done(steps) = refresh_on_update(&home, "0.14.1", unreachable_bins) else {
+        let UpdateRefresh::Done { steps, kept } = refresh_on_update(&home, "0.14.1", unreachable_bins) else {
             panic!("expected Done")
         };
+        assert!(kept.is_empty());
         assert_eq!(steps.len(), 1);
         assert!(steps[0].ok);
         assert!(!home.join(".local").exists());
