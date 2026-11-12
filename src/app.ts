@@ -45,6 +45,7 @@ import { appendTarget, caretInSource, fenceBody, sliceLines, spliceLines, splice
 import { decideReload } from "./reload";
 import { parentDir, tabMenuEntries, tabsToClose, type TabMenuAction } from "./tab-menu";
 import { restoreTarget, lineAtOffset, offsetForLine, type LineBlock } from "./scroll-restore";
+import { isTabVisible, mergeReveal, revealDecision, revealScrollLeft, type PendingReveal, type StripView, type TabSpan } from "./tab-strip";
 import { confirmOpenFile, confirmReload, showNotice, showSetupResult, showIntegrationPicker, showAbout, showThemePicker, showWhatsNew } from "./modal";
 import { showUpdateAvailable, showUpToDate } from "./modal";
 import { showUpdateProgress } from "./modal";
@@ -440,6 +441,58 @@ function bindTabBar(bar: HTMLElement): void {
     void popupContextMenu(entries, (action) => { void runTabMenuAction(id, action as TabMenuAction); });
   });
   bindTabHover(bar);
+  bar.addEventListener("wheel", () => {
+    stripScrollUntil = performance.now() + STRIP_SCROLL_IDLE_MS;
+    if (stripRevealPending) scheduleStripReveal(bar);
+  }, { passive: true });
+}
+
+// ---- Tab strip scroll ---------------------------------------------------
+// The active tab stays in view: a newly active tab is scrolled to, and a render
+// that shifts the same active tab out of view scrolls it back. Wheel and
+// trackpad scrolling on the strip is left alone; a reveal that arrives
+// mid-scroll waits until the strip has been still for STRIP_SCROLL_IDLE_MS.
+// The check runs a frame after renderTabBar, once renderActions has settled
+// how much of the titlebar the strip gets.
+
+const STRIP_SCROLL_IDLE_MS = 250;
+let tabBarActiveId: string | null = null;
+let stripScrollUntil = 0;
+let stripRevealPending = false;
+let stripRevealTimer: number | null = null;
+let stripCheck: PendingReveal | null = null;
+let stripCheckFrame: number | null = null;
+
+function stripView(bar: HTMLElement): StripView {
+  return { scrollLeft: bar.scrollLeft, clientWidth: bar.clientWidth, scrollWidth: bar.scrollWidth };
+}
+
+function tabSpan(bar: HTMLElement, tab: HTMLElement): TabSpan {
+  const b = bar.getBoundingClientRect();
+  const t = tab.getBoundingClientRect();
+  const left = t.left - b.left + bar.scrollLeft;
+  return { left, right: left + t.width };
+}
+
+function tabNode(bar: HTMLElement, id: string | null): HTMLElement | null {
+  if (!id) return null;
+  return (Array.from(bar.children) as HTMLElement[]).find((t) => t.dataset.id === id) ?? null;
+}
+
+function revealActiveTab(bar: HTMLElement): void {
+  stripRevealPending = false;
+  const node = tabNode(bar, state.activeId);
+  if (!node || bar.clientWidth === 0) return;
+  bar.scrollLeft = revealScrollLeft(stripView(bar), tabSpan(bar, node));
+}
+
+function scheduleStripReveal(bar: HTMLElement): void {
+  stripRevealPending = true;
+  if (stripRevealTimer) clearTimeout(stripRevealTimer);
+  stripRevealTimer = window.setTimeout(() => {
+    stripRevealTimer = null;
+    if (stripRevealPending) revealActiveTab(bar);
+  }, STRIP_SCROLL_IDLE_MS);
 }
 
 async function copyForTab(path: string, kind: CopyKind, what: string): Promise<void> {
@@ -478,6 +531,10 @@ function renderTabBar(): void {
   const bar = document.getElementById("tabs")!;
   bindTabBar(bar);
   hideTabPreview(); // rebuilding the nodes invalidates any open preview's anchor
+  const activeChanged = state.activeId !== tabBarActiveId;
+  const oldActive = activeChanged ? null : tabNode(bar, state.activeId);
+  const wasVisible = !!oldActive && isTabVisible(stripView(bar), tabSpan(bar, oldActive));
+  const scrollLeft = bar.scrollLeft;
   bar.innerHTML = "";
   for (const d of state.docs) {
     const tab = el("div", "tab");
@@ -498,6 +555,22 @@ function renderTabBar(): void {
     tab.appendChild(el("span", "close", "×"));
     bar.appendChild(tab);
   }
+  bar.scrollLeft = scrollLeft; // emptying the strip can clamp it to 0
+  tabBarActiveId = state.activeId;
+  stripCheck = mergeReveal(stripCheck, { activeChanged, wasVisible });
+  stripCheckFrame ??= requestAnimationFrame(() => {
+    stripCheckFrame = null;
+    const check = stripCheck!;
+    stripCheck = null;
+    const node = tabNode(bar, state.activeId);
+    const decision = revealDecision({
+      ...check,
+      isVisible: !!node && isTabVisible(stripView(bar), tabSpan(bar, node)),
+      userScrolling: performance.now() < stripScrollUntil,
+    });
+    if (decision === "reveal") revealActiveTab(bar);
+    else if (decision === "defer") scheduleStripReveal(bar);
+  });
 }
 
 // Lightweight update for the typing path: only the dirty dot changes while the

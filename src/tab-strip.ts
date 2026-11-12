@@ -1,0 +1,56 @@
+/** The tab strip's horizontal scroll state. */
+export interface StripView {
+  scrollLeft: number;
+  clientWidth: number;
+  scrollWidth: number;
+}
+
+/** A tab's horizontal extent in the strip's scrolled content (not the viewport). */
+export interface TabSpan {
+  left: number;
+  right: number;
+}
+
+/** Room left beside a revealed tab so the neighbour's edge still shows. */
+export const REVEAL_MARGIN = 12;
+
+export function isTabVisible(view: StripView, tab: TabSpan): boolean {
+  return tab.left >= view.scrollLeft && tab.right <= view.scrollLeft + view.clientWidth;
+}
+
+/** The smallest scroll that brings `tab` fully into view. A tab wider than the
+ *  strip lines up its left edge. */
+export function revealScrollLeft(view: StripView, tab: TabSpan, margin = REVEAL_MARGIN): number {
+  const max = Math.max(0, view.scrollWidth - view.clientWidth);
+  let next = view.scrollLeft;
+  if (tab.right + margin > next + view.clientWidth) next = tab.right + margin - view.clientWidth;
+  if (tab.left - margin < next) next = tab.left - margin;
+  return Math.min(Math.max(next, 0), max);
+}
+
+export type RevealDecision = "reveal" | "defer" | "keep";
+
+/** What a render saw before it rebuilt the strip, held until the frame's check. */
+export interface PendingReveal {
+  activeChanged: boolean;
+  wasVisible: boolean;
+}
+
+/** Folds several renders in one frame into one check. Visibility comes from
+ *  the first render, since later ones measure a strip not yet scrolled. */
+export function mergeReveal(prev: PendingReveal | null, next: PendingReveal): PendingReveal {
+  if (!prev) return next;
+  return { activeChanged: prev.activeChanged || next.activeChanged, wasVisible: prev.wasVisible };
+}
+
+/** Whether a re-render should scroll the active tab into view.
+ *  - A new active tab is always revealed, but not under the user's fingers:
+ *    mid-scroll it waits until the scroll settles.
+ *  - The same active tab is scrolled back only if it was in view before the
+ *    render and is not now, so a tab the user scrolled away from stays where
+ *    they left it and a visible one is not nudged. */
+export function revealDecision(input: { activeChanged: boolean; wasVisible: boolean; isVisible: boolean; userScrolling: boolean }): RevealDecision {
+  if (input.activeChanged) return input.userScrolling ? "defer" : "reveal";
+  if (input.userScrolling) return "keep";
+  return input.wasVisible && !input.isVisible ? "reveal" : "keep";
+}
