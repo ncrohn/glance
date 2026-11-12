@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isTabVisible, revealScrollLeft, revealDecision } from "./tab-strip";
+import { isTabVisible, mergeReveal, revealScrollLeft, revealDecision } from "./tab-strip";
 
 const view = { scrollLeft: 200, clientWidth: 400, scrollWidth: 1500 };
 
@@ -53,5 +53,19 @@ describe("revealDecision", () => {
 
   it("never moves the strip for the same tab mid-scroll", () => {
     expect(revealDecision({ activeChanged: false, wasVisible: true, userScrolling: true })).toBe("keep");
+  });
+});
+
+describe("mergeReveal", () => {
+  it("takes the first render as is", () => {
+    expect(mergeReveal(null, { activeChanged: false, wasVisible: true })).toEqual({ activeChanged: false, wasVisible: true });
+  });
+
+  it("keeps a tab change from any render in the frame", () => {
+    expect(mergeReveal({ activeChanged: true, wasVisible: false }, { activeChanged: false, wasVisible: false }).activeChanged).toBe(true);
+  });
+
+  it("keeps visibility from the first render", () => {
+    expect(mergeReveal({ activeChanged: false, wasVisible: true }, { activeChanged: false, wasVisible: false }).wasVisible).toBe(true);
   });
 });

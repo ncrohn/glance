@@ -30,6 +30,19 @@ export function revealScrollLeft(view: StripView, tab: TabSpan, margin = REVEAL_
 
 export type RevealDecision = "reveal" | "defer" | "keep";
 
+/** What a render saw before it rebuilt the strip, held until the frame's check. */
+export interface PendingReveal {
+  activeChanged: boolean;
+  wasVisible: boolean;
+}
+
+/** Folds several renders in one frame into one check. Visibility comes from
+ *  the first render, since later ones measure a strip not yet scrolled. */
+export function mergeReveal(prev: PendingReveal | null, next: PendingReveal): PendingReveal {
+  if (!prev) return next;
+  return { activeChanged: prev.activeChanged || next.activeChanged, wasVisible: prev.wasVisible };
+}
+
 /** Whether a re-render should scroll the active tab into view.
  *  - A new active tab is always revealed, but not under the user's fingers:
  *    mid-scroll it waits until the scroll settles.
