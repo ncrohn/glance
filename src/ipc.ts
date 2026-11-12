@@ -64,6 +64,13 @@ export function releaseDocOwner(path: string): Promise<void> {
   return invoke<void>("release_doc_owner", { path });
 }
 
+// Whether a save or comment on this doc reaches a Claude session now:
+// "not_listening" when the doc's session has no live waiter.
+export type WakeStatus = "listening" | "not_listening" | "unowned" | "off";
+export function wakeStatus(path: string): Promise<WakeStatus> {
+  return invoke<WakeStatus>("wake_status", { path });
+}
+
 // Copy an open document's name, path, folder or a markdown link to it. Rust
 // builds the text from the path, so the page can't put arbitrary text on the
 // clipboard; it also sidesteps the webview Clipboard API, which wants a user

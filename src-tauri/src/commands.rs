@@ -130,6 +130,14 @@ pub fn release_doc_owner(path: String, docs: tauri::State<OpenDocs>) -> Result<(
     Ok(())
 }
 
+/// Whether a save or comment on this doc reaches a Claude session now. The
+/// frontend asks after each save, comment or reply, to show "Claude isn't
+/// listening" when the doc's session has no live waiter.
+#[tauri::command]
+pub fn wake_status(path: String) -> crate::wake::WakeStatus {
+    crate::wake::wake_status(&path)
+}
+
 /// Mark an open doc as having unsaved edits, or clear the mark. The frontend
 /// sends it when a tab's dirty state flips, and `false` when the tab closes.
 #[tauri::command]

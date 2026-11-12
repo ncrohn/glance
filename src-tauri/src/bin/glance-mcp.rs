@@ -7,6 +7,7 @@ use glance_lib::annotations::{
     adopt_alias_store, apply_reply, has_annotations, mutate_store_with_key, now_iso8601, push_annotation, read_store_with_key,
     store_dir, unique_id, AnnotationStore,
 };
+use glance_lib::wake::pid_alive;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, Read, Write};
@@ -274,35 +275,207 @@ fn load_stores() -> Vec<(PathBuf, AnnotationStore)> {
 /// `glance-mcp --pending [cwd]`: print the pending-comment context lines and
 /// exit 0 whatever happens. `cwd` comes from argv, else the hook event JSON on
 /// stdin. stdin is only read when argv lacks a cwd, so a manual `--pending
-/// /path` never waits on a terminal.
+/// /path` never waits on a terminal. When the event names a session, its
+/// waiter is cancelled and its undelivered Glance events are printed first.
 fn run_pending(argv: &[String]) {
+    let mut wake = Vec::new();
     let cwd = match argv.get(2) {
         Some(c) => Some(c.clone()),
         None => {
             let mut input = String::new();
             let _ = std::io::stdin().read_to_string(&mut input);
+            if let (Some(session), Some(base)) = (event_session(&input), glance_lib::wake::glance_dir()) {
+                wake = pending_wake_lines(&base, &session);
+            }
             pending_event_cwd(&input)
         }
     };
-    let Some(cwd) = cwd.filter(|c| !c.is_empty()).map(PathBuf::from) else { return };
     let mut stdout = std::io::stdout();
-    for line in pending_lines(&cwd, load_stores(), |p| std::fs::read_to_string(p).ok()) {
+    for line in wake {
         let _ = writeln!(stdout, "{line}");
+    }
+    if let Some(cwd) = cwd.filter(|c| !c.is_empty()).map(PathBuf::from) {
+        for line in pending_lines(&cwd, load_stores(), |p| std::fs::read_to_string(p).ok()) {
+            let _ = writeln!(stdout, "{line}");
+        }
     }
     let _ = stdout.flush();
 }
 
-/// Whether a process with this pid is running. `EPERM` means it exists but
-/// belongs to another user, which still counts. Pid 0 and anything that isn't
-/// a positive `pid_t` are never alive: `kill(0, 0)` would test our own group.
-fn pid_alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
-    if pid <= 0 {
-        return false;
+/// The hook event's `session_id`, when it is a valid one.
+fn event_session(input: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(input).ok()?;
+    let id = v.get("session_id")?.as_str()?;
+    glance_lib::wake::valid_session_id(id).then(|| id.to_string())
+}
+
+/// A prompt arrived: the session is busy, so its waiter (if any) stops, and
+/// the events it hadn't delivered go into this prompt's context instead.
+fn pending_wake_lines(base: &Path, session: &str) -> Vec<String> {
+    use glance_lib::wake::{read_waiter_in, take_unread_in, with_session_lock, write_waiter_in, Waiter};
+    let taken = with_session_lock(base, session, || {
+        if read_waiter_in(base, session).is_some() {
+            write_waiter_in(base, session, &Waiter::Busy)?;
+        }
+        take_unread_in(base, session)
+    });
+    taken.map(|events| wake_lines(&events)).unwrap_or_default()
+}
+
+/// One line per doc for a batch of Glance events, in the order docs first
+/// appear: what the user saved, commented and replied to, and what to do.
+fn wake_lines(events: &[Value]) -> Vec<String> {
+    #[derive(Default)]
+    struct Acts {
+        saved: bool,
+        comments: Vec<u64>,
+        comment_count: usize,
+        replies: Vec<u64>,
     }
-    // SAFETY: signal 0 only checks that the pid exists; nothing is sent.
-    let found = unsafe { libc::kill(pid, 0) } == 0;
-    found || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    let mut docs: Vec<(String, Acts)> = Vec::new();
+    for e in events {
+        let Some(doc) = e.get("doc").and_then(Value::as_str) else { continue };
+        let number = e.get("number").and_then(Value::as_u64);
+        let i = match docs.iter().position(|(d, _)| d == doc) {
+            Some(i) => i,
+            None => {
+                docs.push((doc.to_string(), Acts::default()));
+                docs.len() - 1
+            }
+        };
+        let acts = &mut docs[i].1;
+        match e.get("kind").and_then(Value::as_str) {
+            Some("save") => acts.saved = true,
+            Some("comment") => {
+                acts.comment_count += 1;
+                if let Some(n) = number.filter(|n| !acts.comments.contains(n)) {
+                    acts.comments.push(n);
+                }
+            }
+            Some("reply") => {
+                if let Some(n) = number.filter(|n| !acts.replies.contains(n)) {
+                    acts.replies.push(n);
+                }
+            }
+            _ => {}
+        }
+    }
+    let list = |ns: &[u64]| ns.iter().map(u64::to_string).collect::<Vec<_>>().join(", ");
+    let plural = |n: usize, one: &'static str, many: &'static str| if n == 1 { one } else { many };
+    docs.into_iter()
+        .filter_map(|(doc, a)| {
+            let name = Path::new(&doc).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| doc.clone());
+            let mut parts = Vec::new();
+            if a.saved {
+                parts.push(format!("the user saved {name}"));
+            }
+            if a.comment_count > 0 {
+                parts.push(if a.comments.len() == a.comment_count {
+                    format!("new {} {} on {name}", plural(a.comments.len(), "comment", "comments"), list(&a.comments))
+                } else {
+                    format!("new {} on {name}", plural(a.comment_count, "comment", "comments"))
+                });
+            }
+            if !a.replies.is_empty() {
+                parts.push(format!("new replies on {} {} on {name}", plural(a.replies.len(), "comment", "comments"), list(&a.replies)));
+            }
+            if parts.is_empty() {
+                return None;
+            }
+            let ask = if a.comment_count > 0 || !a.replies.is_empty() {
+                "Read them with list_annotations and answer in Glance."
+            } else {
+                "Check what changed and answer in Glance."
+            };
+            Some(format!("Glance: {} ({doc}). {ask}", parts.join("; ")))
+        })
+        .collect()
+}
+
+/// The waiter gives up after 29 minutes, 30 s inside the hook's 1,770 s
+/// `timeout`, which sits under the desktop app's 1,800 s idle disconnect.
+const WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(1740);
+const WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+/// After the first new event, how long to wait for the rest of a burst.
+const WAIT_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A token no other waiter of this session will have.
+fn new_token() -> String {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    format!("{nanos:x}-{:x}", std::process::id())
+}
+
+/// Wait for the user's Glance events for `session`. `Some(lines)` when there
+/// is something to wake the session with; `None` when waking is off, the
+/// session owns no doc and has nothing undelivered, a newer waiter or a
+/// prompt took over, `limit` passed, or `parented` turns false (the hook's
+/// parent died and left this process running). Events stay on disk in every
+/// `None` case, so the next waiter or the next prompt delivers them.
+fn wait_for_events(
+    base: &Path,
+    session: &str,
+    pid: u32,
+    parented: &dyn Fn() -> bool,
+    limit: std::time::Duration,
+    poll: std::time::Duration,
+    settle: std::time::Duration,
+) -> Option<Vec<String>> {
+    use glance_lib::wake::{
+        has_unread_in, owns_any_doc_in, take_unread_in, waiter_token_is, wake_enabled_in, with_session_lock, write_waiter_in, Waiter,
+    };
+    if !wake_enabled_in(base) || (!owns_any_doc_in(base, session) && !has_unread_in(base, session)) {
+        return None;
+    }
+    let token = new_token();
+    let me = Waiter::Waiting { token: token.clone(), pid };
+    with_session_lock(base, session, || write_waiter_in(base, session, &me)).ok()?;
+    let start = std::time::Instant::now();
+    loop {
+        if !waiter_token_is(base, session, &token) || !wake_enabled_in(base) || !parented() || start.elapsed() >= limit {
+            return None;
+        }
+        if has_unread_in(base, session) {
+            std::thread::sleep(settle);
+            let taken = with_session_lock(base, session, || {
+                if !waiter_token_is(base, session, &token) || !parented() {
+                    return Ok(None);
+                }
+                let events = take_unread_in(base, session)?;
+                let lines = wake_lines(&events);
+                if !lines.is_empty() {
+                    write_waiter_in(base, session, &Waiter::Busy)?;
+                }
+                Ok(Some(lines))
+            });
+            match taken {
+                Ok(None) => return None,
+                Ok(Some(lines)) if !lines.is_empty() => return Some(lines),
+                _ => {}
+            }
+        }
+        std::thread::sleep(poll);
+    }
+}
+
+/// `glance-mcp --wait`: run by the `Stop` hook with `asyncRewake`. Reads the
+/// hook JSON on stdin for `session_id`. Exit 2 with the wake lines on stderr
+/// when the user saves or comments in Glance; exit 0 in every other case.
+fn run_wait() -> i32 {
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    let (Some(session), Some(base)) = (event_session(&input), glance_lib::wake::glance_dir()) else { return 0 };
+    // SAFETY: getppid has no preconditions.
+    let parent = unsafe { libc::getppid() };
+    let parented = move || unsafe { libc::getppid() } == parent;
+    match wait_for_events(&base, &session, std::process::id(), &parented, WAIT_LIMIT, WAIT_POLL, WAIT_SETTLE) {
+        Some(lines) => {
+            for line in lines {
+                eprintln!("{line}");
+            }
+            2
+        }
+        None => 0,
+    }
 }
 
 /// The refusal for a `PreToolUse` event whose `tool_input.file_path` is a doc
@@ -390,6 +563,167 @@ mod tests {
         assert_eq!(guard_message(&base, r#"{"tool_input":{"file_path":7}}"#, pid_alive), None);
         assert_eq!(guard_message(&base, "", pid_alive), None);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn wake_base(name: &str) -> (PathBuf, String) {
+        let base = std::env::temp_dir().join(format!("glance-test-mcp-wait-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let doc = base.join("design.md");
+        std::fs::write(&doc, "x").unwrap();
+        (base, doc.to_string_lossy().into_owned())
+    }
+
+    fn ev(doc: &str, kind: &str, number: Option<u64>) -> Value {
+        let mut e = json!({ "doc": doc, "kind": kind });
+        if let Some(n) = number {
+            e["number"] = n.into();
+        }
+        e
+    }
+
+    #[test]
+    fn wake_lines_name_each_doc_once() {
+        let d = "/p/design.md";
+        let lines = wake_lines(&[ev(d, "save", None), ev(d, "comment", Some(3)), ev(d, "comment", Some(4))]);
+        assert_eq!(
+            lines,
+            vec!["Glance: the user saved design.md; new comments 3, 4 on design.md (/p/design.md). Read them with list_annotations and answer in Glance."]
+        );
+        let lines = wake_lines(&[ev(d, "save", None), ev(d, "save", None), ev("/p/b.md", "reply", Some(2)), ev("/p/b.md", "reply", Some(2))]);
+        assert_eq!(
+            lines,
+            vec![
+                "Glance: the user saved design.md (/p/design.md). Check what changed and answer in Glance.",
+                "Glance: new replies on comment 2 on b.md (/p/b.md). Read them with list_annotations and answer in Glance.",
+            ]
+        );
+        assert_eq!(
+            wake_lines(&[ev(d, "comment", Some(1))]),
+            vec!["Glance: new comment 1 on design.md (/p/design.md). Read them with list_annotations and answer in Glance."]
+        );
+        assert_eq!(
+            wake_lines(&[ev(d, "comment", None), ev(d, "comment", Some(5))]),
+            vec!["Glance: new comments on design.md (/p/design.md). Read them with list_annotations and answer in Glance."]
+        );
+        assert!(wake_lines(&[json!({"kind": "save"}), ev(d, "other", None)]).is_empty());
+    }
+
+    const QUICK: std::time::Duration = std::time::Duration::from_millis(20);
+
+    #[test]
+    fn wait_exits_at_once_when_off_or_nothing_is_owned() {
+        use glance_lib::wake::{read_waiter_in, record_owner_in, set_wake_enabled_in};
+        let (base, doc) = wake_base("idle");
+        let limit = std::time::Duration::from_secs(5);
+        let t = std::time::Instant::now();
+        assert_eq!(wait_for_events(&base, "s1", 1, &|| true, limit, QUICK, QUICK), None, "owns nothing");
+        assert_eq!(read_waiter_in(&base, "s1"), None, "no waiter file written");
+        record_owner_in(&base, &doc, "s1").unwrap();
+        set_wake_enabled_in(&base, false).unwrap();
+        assert_eq!(wait_for_events(&base, "s1", 1, &|| true, limit, QUICK, QUICK), None, "toggle off");
+        assert!(t.elapsed() < std::time::Duration::from_secs(1));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn wait_wakes_on_an_event_then_marks_the_session_busy() {
+        use glance_lib::wake::{append_event_in, read_waiter_in, record_owner_in, EventKind, Waiter};
+        let (base, doc) = wake_base("wake");
+        record_owner_in(&base, &doc, "s1").unwrap();
+        let writer = {
+            let (base, doc) = (base.clone(), doc.clone());
+            std::thread::spawn(move || {
+                // Wait for the waiter to register, then save and comment.
+                while !matches!(read_waiter_in(&base, "s1"), Some(Waiter::Waiting { .. })) {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                append_event_in(&base, &doc, EventKind::Save, None).unwrap();
+                append_event_in(&base, &doc, EventKind::Comment, Some(3)).unwrap();
+            })
+        };
+        let lines = wait_for_events(&base, "s1", 77, &|| true, std::time::Duration::from_secs(10), QUICK, std::time::Duration::from_millis(200));
+        writer.join().unwrap();
+        assert_eq!(
+            lines,
+            Some(vec![format!("Glance: the user saved design.md; new comment 3 on design.md ({doc}). Read them with list_annotations and answer in Glance.")])
+        );
+        assert_eq!(read_waiter_in(&base, "s1"), Some(Waiter::Busy));
+        // Delivered once: nothing is left for the next prompt.
+        assert!(pending_wake_lines(&base, "s1").is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn events_while_nobody_waits_reach_the_next_waiter_once() {
+        use glance_lib::wake::{append_event_in, record_owner_in, EventKind};
+        let (base, doc) = wake_base("backlog");
+        record_owner_in(&base, &doc, "s1").unwrap();
+        append_event_in(&base, &doc, EventKind::Comment, Some(1)).unwrap();
+        let limit = std::time::Duration::from_secs(5);
+        assert_eq!(wait_for_events(&base, "s1", 1, &|| true, limit, QUICK, QUICK).map(|l| l.len()), Some(1));
+        // Nothing new: the next waiter waits out its limit.
+        let t = std::time::Instant::now();
+        assert_eq!(wait_for_events(&base, "s1", 1, &|| true, std::time::Duration::from_millis(150), QUICK, QUICK), None);
+        assert!(t.elapsed() >= std::time::Duration::from_millis(150));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_prompt_cancels_the_waiter_and_takes_its_events() {
+        use glance_lib::wake::{append_event_in, read_waiter_in, record_owner_in, EventKind, Waiter};
+        let (base, doc) = wake_base("prompt");
+        record_owner_in(&base, &doc, "s1").unwrap();
+        let waiter = {
+            let base = base.clone();
+            std::thread::spawn(move || wait_for_events(&base, "s1", 1, &|| true, std::time::Duration::from_secs(10), QUICK, QUICK))
+        };
+        while !matches!(read_waiter_in(&base, "s1"), Some(Waiter::Waiting { .. })) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // The prompt lands first: it cancels the waiter, then the event comes in.
+        assert!(pending_wake_lines(&base, "s1").is_empty());
+        assert_eq!(read_waiter_in(&base, "s1"), Some(Waiter::Busy));
+        assert_eq!(waiter.join().unwrap(), None);
+        append_event_in(&base, &doc, EventKind::Save, None).unwrap();
+        assert_eq!(pending_wake_lines(&base, "s1").len(), 1, "the next prompt delivers it");
+        assert!(pending_wake_lines(&base, "s1").is_empty());
+        // A newer waiter replaces an older one.
+        let old = {
+            let base = base.clone();
+            std::thread::spawn(move || wait_for_events(&base, "s1", 1, &|| true, std::time::Duration::from_secs(10), QUICK, QUICK))
+        };
+        while !matches!(read_waiter_in(&base, "s1"), Some(Waiter::Waiting { .. })) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let new = {
+            let base = base.clone();
+            std::thread::spawn(move || wait_for_events(&base, "s1", 2, &|| true, std::time::Duration::from_millis(300), QUICK, QUICK))
+        };
+        assert_eq!(old.join().unwrap(), None);
+        assert_eq!(new.join().unwrap(), None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_orphaned_waiter_exits_without_taking_events() {
+        use glance_lib::wake::{append_event_in, record_owner_in, EventKind};
+        let (base, doc) = wake_base("orphan");
+        record_owner_in(&base, &doc, "s1").unwrap();
+        append_event_in(&base, &doc, EventKind::Save, None).unwrap();
+        let limit = std::time::Duration::from_secs(5);
+        assert_eq!(wait_for_events(&base, "s1", 1, &|| false, limit, QUICK, QUICK), None);
+        assert_eq!(pending_wake_lines(&base, "s1").len(), 1, "the event is still there");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn event_session_accepts_only_valid_ids() {
+        assert_eq!(event_session(r#"{"session_id":"abc-1"}"#).as_deref(), Some("abc-1"));
+        assert_eq!(event_session(r#"{"session_id":"../x"}"#), None);
+        assert_eq!(event_session(r#"{"session_id":5}"#), None);
+        assert_eq!(event_session("nope"), None);
     }
 
     #[test]
@@ -1795,6 +2129,9 @@ fn main() {
     }
     if argv.get(1).map(String::as_str) == Some("--guard") {
         std::process::exit(run_guard());
+    }
+    if argv.get(1).map(String::as_str) == Some("--wait") {
+        std::process::exit(run_wait());
     }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let root = std::env::current_dir().ok().and_then(|cwd| project_root(&cwd, home.as_deref()));

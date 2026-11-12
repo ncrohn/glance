@@ -35,7 +35,7 @@ vi.mock("./ipc", () => ({
   appVersion: async () => "0.0.0-test",
   openExternal: async () => {}, openFileExternal: async () => {},
   localFileUrl: (p: string) => p, resolveWikilink: async () => null,
-  setShowInFinderEnabled: async () => {}, setDocUnsaved: async () => {}, releaseDocOwner: async () => {}, revealInFinder: async () => {},
+  setShowInFinderEnabled: async () => {}, setDocUnsaved: async () => {}, wakeStatus: async () => "unowned", releaseDocOwner: async () => {}, revealInFinder: async () => {},
   readFile: async (p: string) => {
     await env.readGates.get(p);
     if (!env.fs.has(p)) throw new Error("No such file or directory (os error 2)");

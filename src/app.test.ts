@@ -26,6 +26,8 @@ const env = {
   version: "0.0.0-test",
   unsaved: new Map<string, boolean>(),
   released: [] as string[],
+  wake: "unowned" as string,
+  wakeAsked: [] as string[],
 };
 
 function resetEnv(): void {
@@ -46,6 +48,8 @@ function resetEnv(): void {
   env.latestRelease = null;
   env.unsaved = new Map();
   env.released = [];
+  env.wake = "unowned";
+  env.wakeAsked = [];
   env.version = "0.0.0-test";
 }
 
@@ -56,7 +60,7 @@ vi.mock("./ipc", () => ({
   appVersion: async () => env.version,
   openExternal: async () => {}, openFileExternal: async () => {},
   localFileUrl: (p: string) => p, resolveWikilink: async () => null,
-  setShowInFinderEnabled: async () => {}, setDocUnsaved: async (p: string, u: boolean) => { env.unsaved.set(p, u); }, releaseDocOwner: async (p: string) => { env.released.push(p); }, revealInFinder: async () => {},
+  setShowInFinderEnabled: async () => {}, setDocUnsaved: async (p: string, u: boolean) => { env.unsaved.set(p, u); }, releaseDocOwner: async (p: string) => { env.released.push(p); }, wakeStatus: async (p: string) => { env.wakeAsked.push(p); return env.wake; }, revealInFinder: async () => {},
   readFile: async (p: string) => {
     await env.readGates.get(p);
     if (!env.fs.has(p)) throw new Error("No such file or directory (os error 2)");
@@ -250,6 +254,30 @@ describe("unsaved edits on close and quit", () => {
     await click("Don't Save");
     expect(tabs()).toEqual([]);
     expect(env.unsaved.get("/a.md")).toBe(false);
+  });
+
+  it("a save shows \"Claude isn't listening\" while the doc's session has no waiter, and clears it once one listens", async () => {
+    env.fs.set("/a.md", "hello\n");
+    env.launch = ["/a.md"];
+    await boot();
+    const notice = () => document.querySelector("#titlebar-actions .wake-notice")?.textContent ?? null;
+    env.wake = "not_listening";
+    await type("ONE ");
+    await emit("menu-save");
+    expect(env.wakeAsked).toEqual(["/a.md"]);
+    expect(notice()).toBe("Claude isn't listening — this will reach it on your next prompt");
+    env.wake = "listening";
+    await type("TWO ");
+    await emit("menu-save");
+    expect(notice()).toBe(null);
+    env.wake = "not_listening";
+    await type("THREE ");
+    await emit("menu-save");
+    expect(notice()).not.toBe(null);
+    env.wake = "unowned";
+    await type("FOUR ");
+    await emit("menu-save");
+    expect(notice()).toBe(null);
   });
 
   it("Cmd+W on a dirty tab asks first; Cancel keeps the tab and the edits", async () => {

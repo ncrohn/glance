@@ -18,6 +18,7 @@
     "allow-copy-doc-to-clipboard",
     "allow-set-doc-unsaved",
     "allow-release-doc-owner",
+    "allow-wake-status",
     "allow-watch-file",
     "allow-unwatch-file",
     "allow-watch-annotations",

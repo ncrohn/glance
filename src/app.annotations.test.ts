@@ -15,6 +15,8 @@ const env = {
   // resolve finish after a later one.
   holdResolves: false,
   held: [] as (() => void)[],
+  wake: "unowned",
+  wakeAsked: [] as string[],
 };
 
 // Like the Rust resolver for an exact match: the 1-based line the quote starts on.
@@ -35,7 +37,7 @@ vi.mock("./ipc", () => ({
   appVersion: async () => "0.0.0-test",
   openExternal: async () => {}, openFileExternal: async () => {},
   localFileUrl: (p: string) => p, resolveWikilink: async () => null,
-  setShowInFinderEnabled: async () => {}, setDocUnsaved: async () => {}, releaseDocOwner: async () => {}, revealInFinder: async () => {},
+  setShowInFinderEnabled: async () => {}, setDocUnsaved: async () => {}, wakeStatus: async (p: string) => { env.wakeAsked.push(p); return env.wake; }, releaseDocOwner: async () => {}, revealInFinder: async () => {},
   readFile: async (p: string) => {
     if (!env.fs.has(p)) throw new Error("No such file or directory (os error 2)");
     return env.fs.get(p)!;
@@ -91,6 +93,8 @@ async function boot() {
 }
 
 beforeEach(() => {
+  env.wake = "unowned";
+  env.wakeAsked = [];
   env.fs = new Map();
   env.handlers = new Map();
   env.launch = [];
@@ -161,6 +165,22 @@ describe("comment Undo", () => {
     await clickAction("x", "Delete");
     await undo();
     expect(s.list.map((a) => [a.id, a.number])).toEqual([["x", 3]]);
+  });
+});
+
+describe("Claude isn't listening", () => {
+  it("a reply asks whether Claude is listening and shows the notice when it isn't", async () => {
+    env.wake = "not_listening";
+    await openWith(annotation("x"));
+    expect(env.wakeAsked).toEqual([]);
+    await clickAction("x", "Reply");
+    const box = cardFor("x").querySelector<HTMLTextAreaElement>(".note-reply-box textarea")!;
+    box.value = "see above";
+    cardFor("x").querySelector<HTMLElement>(".note-reply-send")!.click();
+    await flush();
+    expect(env.wakeAsked).toEqual(["/a.md"]);
+    expect(document.querySelector("#titlebar-actions .wake-notice")?.textContent)
+      .toBe("Claude isn't listening — this will reach it on your next prompt");
   });
 });
 

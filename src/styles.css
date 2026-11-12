@@ -1745,6 +1745,17 @@ body.rail-resizing #rail { transition: none; }
 }
 .review-btn:hover { background: var(--accent); color: var(--bg); }
 
+/* "Claude isn't listening" — a save or comment won't wake the session. */
+.wake-notice {
+  margin-left: 10px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
 /* ---- Click-to-edit block editor --------------------------------------- */
 /* The editor sits inside the unit it opened and inherits its type; only the
    markdown symbols appear (dimmed). Code, diagrams and frontmatter show their

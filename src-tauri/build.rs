@@ -9,6 +9,7 @@ const COMMANDS: &[&str] = &[
     "copy_doc_to_clipboard",
     "set_doc_unsaved",
     "release_doc_owner",
+    "wake_status",
     "watch_file",
     "unwatch_file",
     "watch_annotations",
