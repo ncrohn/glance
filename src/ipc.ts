@@ -53,6 +53,17 @@ export function setShowInFinderEnabled(enabled: boolean): Promise<void> {
   return invoke<void>("set_show_in_finder_enabled", { enabled });
 }
 
+// Mark an open doc as having unsaved edits, or clear the mark. Rust keeps a
+// marker file per doc so a Claude session won't edit over the user's changes.
+export function setDocUnsaved(path: string, unsaved: boolean): Promise<void> {
+  return invoke<void>("set_doc_unsaved", { path, unsaved });
+}
+
+// The user opened a doc by hand, so no Claude session owns it any more.
+export function releaseDocOwner(path: string): Promise<void> {
+  return invoke<void>("release_doc_owner", { path });
+}
+
 // Copy an open document's name, path, folder or a markdown link to it. Rust
 // builds the text from the path, so the page can't put arbitrary text on the
 // clipboard; it also sidesteps the webview Clipboard API, which wants a user

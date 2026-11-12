@@ -16,7 +16,7 @@ import {
   readAnnotations, addStoredAnnotation, removeStoredAnnotation, updateStoredAnnotation, addStoredReply, resolveAnchors, ensureAnnotationStore,
   watchAnnotations, onAnnotationsChanged, onShowIntegrationPicker, listIntegrationTargets, runIntegration,
   onShowAbout, onShowWhatsNew, onShowTheme, onCloseActiveTab, onMenuSave, onSelectAll, appVersion,
-  onShowInFinder, revealInFinder, copyDocToClipboard, popupContextMenu, setShowInFinderEnabled, onQuitRequested, quitApp,
+  onShowInFinder, revealInFinder, copyDocToClipboard, popupContextMenu, setShowInFinderEnabled, setDocUnsaved, releaseDocOwner, onQuitRequested, quitApp,
   readReviewed, writeReviewed, openExternal, openFileExternal, localFileUrl, resolveWikilink,
   canonicalizePath, onFileError,
 } from "./ipc";
@@ -494,6 +494,7 @@ function refreshTabDirty(): void {
     const d = state.docs.find((x) => x.id === tab.dataset.id);
     if (d) tab.classList.toggle("dirty", isDirty(d));
   }
+  syncUnsavedMarkers();
 }
 
 // ---- Tab hover preview --------------------------------------------------
@@ -669,7 +670,7 @@ function renderContent(): void {
         li.appendChild(el("span", "name", basename(p)));
         li.appendChild(el("span", "path", p));
         li.onclick = () => {
-          void openPath(p).catch((err) => {
+          void openPath(p, { byHand: true }).catch((err) => {
             if (isNotFound(err)) { forgetRecent(p); render(); }
             showNotice(`Couldn't open ${p}: ${err}`, false);
           });
@@ -787,6 +788,29 @@ function syncShowInFinderMenu(): void {
   void setShowInFinderEnabled(enabled).catch(() => { showInFinderEnabled = null; });
 }
 
+// absPath → the unsaved state we last told Rust. Like the Show in Finder item,
+// only cross the IPC boundary when a doc's answer flips. A doc missing from
+// state.docs was closed: clear its marker and forget it. A doc deleted on disk
+// keeps its marker while it has unsaved edits.
+const unsavedSent = new Map<string, boolean>();
+
+function syncUnsavedMarkers(): void {
+  const open = new Set<string>();
+  for (const doc of state.docs) {
+    open.add(doc.absPath);
+    const dirty = isDirty(doc);
+    if (unsavedSent.get(doc.absPath) === dirty) continue;
+    unsavedSent.set(doc.absPath, dirty);
+    void setDocUnsaved(doc.absPath, dirty).catch(() => { unsavedSent.delete(doc.absPath); });
+  }
+  for (const [path, sent] of unsavedSent) {
+    if (open.has(path)) continue;
+    unsavedSent.delete(path);
+    // Keep a failed clear in the map so the next sync tries again.
+    if (sent) void setDocUnsaved(path, false).catch(() => { if (!unsavedSent.has(path)) unsavedSent.set(path, true); });
+  }
+}
+
 export function render(): void {
   // The mermaid zoom overlay lives on document.body, outside the rendered view,
   // so it would otherwise survive a tab switch / re-render on top of the new
@@ -820,6 +844,7 @@ export function render(): void {
   lastRenderedId = next.id;
   lastRenderedMode = next.mode;
   syncShowInFinderMenu();
+  syncUnsavedMarkers();
   if (findBar?.isOpen()) runFind(false);
   if (teardownHovers) { teardownHovers(); teardownHovers = null; }
   const renderedView = document.querySelector<HTMLElement>(".rendered");
@@ -1142,6 +1167,7 @@ async function handleDiskChange(path: string, contents: string): Promise<void> {
     state = setDiskContent(state, doc.id, latest);
     renderTabBar();
     renderActions();
+    syncUnsavedMarkers();
   }
 }
 
@@ -1157,11 +1183,15 @@ function forgetRecent(path: string): void {
   localStorage.setItem(LS_RECENT, JSON.stringify(loadRecent().filter((p) => p !== path)));
 }
 
-export async function openPath(requested: string): Promise<void> {
+// `byHand`: the user opened it from inside Glance (Recent, a link), so no Claude
+// session owns it any more. Switching to a doc that's already in a tab isn't an
+// open and keeps its owner. Rust handles argv, Finder and File menu opens.
+export async function openPath(requested: string, opts: { byHand?: boolean } = {}): Promise<void> {
   const absPath = await canonical(requested);
   const already = state.docs.find((d) => d.absPath === absPath);
   if (already) { state = setActive(state, already.id); render(); return; }
   const contents = await readFile(absPath);
+  if (opts.byHand) void releaseDocOwner(absPath).catch(() => {});
   state = openDoc(state, absPath, contents);
   // The tab can be closed while any of the awaits below is pending. closeTab
   // can only release watchers that exist by then, so each step checks and
@@ -1224,7 +1254,7 @@ function handleLinkClick(ev: MouseEvent): void {
       void openExternal(target.url).catch(() => showNotice(`Couldn't open ${target.url}.`, false));
       break;
     case "markdown":
-      void openPath(target.path).catch(() => showNotice(`Couldn't open ${target.path}.`, false));
+      void openPath(target.path, { byHand: true }).catch(() => showNotice(`Couldn't open ${target.path}.`, false));
       break;
     case "file":
       void openLinkedFile(target.path);
@@ -1273,7 +1303,7 @@ async function followWikilink(docPath: string, raw: string): Promise<void> {
     void openLinkedFile(path);
     return;
   }
-  await openPath(path).catch(() => showNotice(`Couldn't open ${path}.`, false));
+  await openPath(path, { byHand: true }).catch(() => showNotice(`Couldn't open ${path}.`, false));
   // render() restores scroll in a frame; land on the heading after that.
   if (link.heading) requestAnimationFrame(() => requestAnimationFrame(() => scrollToHeading(link.heading)));
 }

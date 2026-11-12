@@ -93,7 +93,8 @@ fn launch_tail(opener: &str) -> String {
          \x20 fi\n\
          \x20 set -- \"$@\" \"$a\"\n\
          done\n\
-         exec {} -n -a \"${{GLANCE_APP%/Contents/MacOS/*}}\" --args \"$@\" >/dev/null\n",
+         # From a Claude Code session, Glance records which session opened the doc.\n\
+         exec {} -n -a \"${{GLANCE_APP%/Contents/MacOS/*}}\" --args ${{CLAUDE_CODE_SESSION_ID:+\"--session=$CLAUDE_CODE_SESSION_ID\"}} \"$@\" >/dev/null\n",
         sh_quote(opener)
     )
 }
@@ -225,7 +226,14 @@ mod tests {
         std::fs::write(&wrapper, mdview_script_with(&app.to_string_lossy(), &opener.to_string_lossy())).unwrap();
 
         let args = ["a b.md", "/abs/x.md", "--flag", "-dash.md", "../up.md", "", "--", "-after.md", "--"];
-        let out = std::process::Command::new("sh").arg(&wrapper).args(args).current_dir(&link).env("PWD", &link).output().unwrap();
+        let out = std::process::Command::new("sh")
+            .arg(&wrapper)
+            .args(args)
+            .current_dir(&link)
+            .env("PWD", &link)
+            .env_remove("CLAUDE_CODE_SESSION_ID")
+            .output()
+            .unwrap();
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let resolved = std::fs::canonicalize(&real).unwrap();
         let here = |p: &str| resolved.join(p).to_string_lossy().into_owned();
@@ -244,6 +252,26 @@ mod tests {
             here("-after.md"),
             here("--"),
         ];
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), want.join("\n") + "\n");
+
+        // From a Claude Code session the id goes first, as one token.
+        let out = std::process::Command::new("sh")
+            .arg(&wrapper)
+            .arg("/abs/x.md")
+            .env("CLAUDE_CODE_SESSION_ID", "e7f9-81f3")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let want = ["-n", "-a", &bundle.to_string_lossy(), "--args", "--session=e7f9-81f3", "/abs/x.md"];
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), want.join("\n") + "\n");
+        let out = std::process::Command::new("sh")
+            .arg(&wrapper)
+            .arg("/abs/x.md")
+            .env("CLAUDE_CODE_SESSION_ID", "")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let want = ["-n", "-a", &bundle.to_string_lossy(), "--args", "/abs/x.md"];
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), want.join("\n") + "\n");
 
         std::fs::write(&wrapper, mdview_script(&dir.join("gone").join("glance").to_string_lossy())).unwrap();

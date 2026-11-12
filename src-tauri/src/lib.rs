@@ -1,6 +1,7 @@
 pub mod anchor;
 pub mod annotations;
 pub mod reviewed;
+pub mod wake;
 mod cli;
 mod cli_install;
 mod commands;
@@ -217,6 +218,21 @@ fn navigation_guard() -> tauri::plugin::TauriPlugin<tauri::Wry> {
         .build()
 }
 
+/// The latest opener owns a doc. A launch from `mdview` or the auto-open hook
+/// in a Claude Code session makes that session the owner; any other open (a
+/// plain shell, Finder) leaves the doc with no owner, so it wakes nobody.
+fn record_owners(argv: &[String], paths: &[String]) {
+    let session = cli::session_from_argv(argv);
+    for p in paths {
+        match &session {
+            Some(s) => {
+                let _ = wake::record_owner(p, s);
+            }
+            None => wake::clear_owner(p),
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let context = tauri::generate_context!();
@@ -226,10 +242,11 @@ pub fn run() {
             // In a cold burst these arrive before the frontend's listener
             // exists, so they go through the same buffer as Finder opens.
             let cwd_path = Path::new(&cwd);
-            let paths = cli::md_paths_from_argv(&argv, cwd_path)
+            let paths: Vec<String> = cli::md_paths_from_argv(&argv, cwd_path)
                 .iter()
                 .map(|raw| cli::to_abs(raw, cwd_path))
                 .collect();
+            record_owners(&argv, &paths);
             deliver_open_files(app, paths);
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_focus();
@@ -264,6 +281,8 @@ pub fn run() {
             commands::resolve_open_target,
             commands::canonicalize_path,
             commands::copy_doc_to_clipboard,
+            commands::set_doc_unsaved,
+            commands::release_doc_owner,
             watcher::watch_file,
             watcher::unwatch_file,
             watcher::watch_annotations,
@@ -299,6 +318,7 @@ pub fn run() {
                                 // Create the empty file so the open flow (which reads
                                 // from disk) has something to open, then reuse it.
                                 if std::fs::write(&p, "").is_ok() {
+                                    wake::clear_owner(&p);
                                     let _ = app2.emit("open-file", p);
                                 }
                             }
@@ -312,8 +332,11 @@ pub fn run() {
                         .add_filter("Markdown", &["md", "markdown"])
                         .pick_file(move |path| {
                             if let Some(path) = path {
-                                // Reuse the existing open-file flow (onOpenFile → openPath).
-                                let _ = app2.emit("open-file", path.to_string());
+                                // Opened by hand: no session owns it. Then reuse the
+                                // existing open-file flow (onOpenFile → openPath).
+                                let p = path.to_string();
+                                wake::clear_owner(&p);
+                                let _ = app2.emit("open-file", p);
                             }
                         });
                 }
@@ -550,9 +573,12 @@ pub fn run() {
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
             let launch_args = app.state::<LaunchArgs>();
             let mut stored = launch_args.0.lock().unwrap_or_else(|e| e.into_inner());
-            for raw in cli::md_paths_from_argv(&argv, &cwd) {
-                stored.push(cli::to_abs(&raw, &cwd));
-            }
+            // Only the process that owns the window gets here, so a marker left
+            // by an earlier Glance that crashed is never trusted.
+            wake::clear_unsaved();
+            let paths: Vec<String> = cli::md_paths_from_argv(&argv, &cwd).iter().map(|raw| cli::to_abs(raw, &cwd)).collect();
+            record_owners(&argv, &paths);
+            stored.extend(paths);
             Ok(())
         })
         .build(context)
@@ -561,6 +587,11 @@ pub fn run() {
     // forwarded its files and exited, or bound the single-instance socket.
     drop(launch_lock);
     app.run(|app, event| {
+        // A quit that discards unsaved edits leaves the tabs dirty; their
+        // markers must not outlive the app.
+        if matches!(event, tauri::RunEvent::Exit) {
+            wake::clear_unsaved();
+        }
         // macOS delivers files opened from Finder ("Open With", double-click)
         // as an Apple Event, not argv.
         #[cfg(target_os = "macos")]
@@ -572,6 +603,7 @@ pub fn run() {
                 // old spelling to move comments filed under it.
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect();
+            record_owners(&[], &paths);
             deliver_open_files(app, paths);
         }
     });
@@ -659,7 +691,7 @@ mod tests {
         // Every command the app registers gets past the ACL; none is
         // registered in this mock app, so each then fails only as unknown.
         let commands = registered_commands();
-        assert_eq!(commands.len(), 24);
+        assert_eq!(commands.len(), 26);
         for cmd in commands {
             assert_eq!(invoke(&webview, cmd), Err(format!("Command {cmd} not found")));
         }

@@ -333,7 +333,7 @@ if [ "$_GLANCE_PY_BIN" = /usr/bin/python3 ]; then
   /usr/bin/xcode-select -p >/dev/null 2>&1 || exit 0
 fi
 _GLANCE_PY=$(cat <<'PY'
-import sys, json, os, subprocess
+import sys, json, os, re, subprocess
 try:
     d = json.load(sys.stdin)
 except Exception:
@@ -399,6 +399,12 @@ for fp in cands:
     ap = project_md(fp)
     if ap and ap not in targets:
         targets.append(ap)
+# Claude Code's Write event names the session; Glance records it as the owner
+# of what it opens. Codex events (apply_patch) pass no session.
+sid = d.get("session_id")
+session = []
+if tool == "Write" and isinstance(sid, str) and re.fullmatch(r"[A-Za-z0-9-]{1,64}", sid):
+    session = ["--session=" + sid]
 if targets:
     # One launch, every doc as an argument (Glance opens each as a tab).
     # Detached with every fd on /dev/null: the agent reads this hook's stdout
@@ -411,7 +417,7 @@ if targets:
     bundle = app[:i] if i > 0 else app
     try:
         subprocess.Popen(
-            [os.environ["GLANCE_OPEN"], "-n", "-a", bundle, "--args"] + targets,
+            [os.environ["GLANCE_OPEN"], "-n", "-a", bundle, "--args"] + session + targets,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -2290,6 +2296,57 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert_eq!(got, format!("-n\n-a\n/Apps/My Glance.app\n--args\n{md}\n"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn hook_passes_the_claude_session_but_not_a_bad_id_or_codex() {
+        if !python3_available() {
+            eprintln!("skipping hook_passes_the_claude_session_but_not_a_bad_id_or_codex: python3 not available");
+            return;
+        }
+        let base = std::env::temp_dir().join(format!("glance-hook-session-{}", std::process::id()));
+        let proj = base.join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let marker = base.join("marker");
+        let opener = base.join("open");
+        std::fs::write(&opener, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n", marker.display())).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let script = base.join("open-md-hook.sh");
+        std::fs::write(&script, hook_script_with("/Apps/Glance.app/Contents/MacOS/glance", &opener.to_string_lossy())).unwrap();
+        let cwd = proj.to_string_lossy().to_string();
+        let md = proj.join("notes.md").to_string_lossy().to_string();
+        let run = |json: String| -> String {
+            let _ = std::fs::remove_file(&marker);
+            let mut child = std::process::Command::new("sh")
+                .arg(&script)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(json.as_bytes()).unwrap();
+            let _ = child.wait();
+            for _ in 0..40 {
+                let got = std::fs::read_to_string(&marker).unwrap_or_default();
+                if got.ends_with(".md\n") {
+                    return got;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            String::new()
+        };
+        let write = |sid: &str| {
+            format!(r#"{{"tool_name":"Write","session_id":"{sid}","cwd":"{cwd}","tool_input":{{"file_path":"{md}"}}}}"#)
+        };
+        assert_eq!(run(write("e7f9-81f3")), format!("-n\n-a\n/Apps/Glance.app\n--args\n--session=e7f9-81f3\n{md}\n"));
+        assert_eq!(run(write("../x")), format!("-n\n-a\n/Apps/Glance.app\n--args\n{md}\n"));
+        let patch = format!(
+            r#"{{"tool_name":"apply_patch","session_id":"abc","cwd":"{cwd}","tool_input":{{"command":"*** Add File: {md}\n"}}}}"#
+        );
+        assert_eq!(run(patch), format!("-n\n-a\n/Apps/Glance.app\n--args\n{md}\n"));
         let _ = std::fs::remove_dir_all(&base);
     }
 
