@@ -451,7 +451,11 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  flex: 1 1 auto;
+  /* Basis 0: the strip takes what the titlebar actions leave, and scrolls,
+     instead of squeezing them off the right edge when many tabs are open.
+     It keeps 120px; below that the not-listening pill shrinks instead. */
+  flex: 1 1 0;
+  min-width: 120px;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
