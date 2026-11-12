@@ -1689,6 +1689,78 @@ pub fn run_integration(action: String, ids: Vec<String>) -> Vec<StepResult> {
     results
 }
 
+/// What the launch check in [`refresh_on_update`] did.
+pub enum UpdateRefresh {
+    /// The recorded version is the running one; nothing ran.
+    Current,
+    /// The binaries could not be located, so nothing ran and no version was
+    /// recorded: a later launch from `/Applications` tries again.
+    Skipped(String),
+    /// The version was recorded. Holds every step that ran, the version write
+    /// last; that write is the only step when Claude Code's Glance skill has no
+    /// manifest.
+    Done(Vec<StepResult>),
+}
+
+/// `~/.glance/integration-version`: the Glance version that last checked the
+/// AI integration at launch.
+fn integration_version_path(home: &Path) -> PathBuf {
+    home.join(".glance").join("integration-version")
+}
+
+/// On the first launch of a new Glance version, re-run what **Set up AI
+/// Integration…** does for Claude Code (the `mdview` wrapper, then
+/// [`setup_adapter`]) so existing installs get new hooks and skill text. Runs
+/// only when Claude Code's Glance skill manifest exists: anyone who never set
+/// up the integration, or removed it, is left alone. Codex and Cursor are
+/// never touched.
+pub fn refresh_on_update(home: &Path, version: &str, resolve: impl FnOnce(&Path) -> Result<Binaries, String>) -> UpdateRefresh {
+    let marker = integration_version_path(home);
+    if std::fs::read_to_string(&marker).is_ok_and(|v| v.trim() == version) {
+        return UpdateRefresh::Current;
+    }
+    let skill_dir = home.join(".claude").join("skills").join("glance");
+    let mut steps = Vec::new();
+    if skill_dir.join(SKILL_MANIFEST).is_file() {
+        let bins = match resolve(home) {
+            Ok(b) => b,
+            Err(e) => return UpdateRefresh::Skipped(e),
+        };
+        let cli = install_cli_tool(home, Path::new(&bins.app_bin));
+        steps.push(StepResult { ok: cli.ok, label: "Install mdview CLI".to_string(), message: cli.message, group: "Shared".to_string() });
+        steps.extend(setup_adapter(&ClaudeAdapter, &bins, home));
+    }
+    let recorded = marker
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| atomic_write(&marker, &format!("{version}\n"), None));
+    steps.push(StepResult {
+        ok: recorded.is_ok(),
+        label: "Record Glance version".to_string(),
+        message: match recorded {
+            Ok(()) => format!("Recorded {version} in {}.", marker.display()),
+            Err(e) => format!("Could not write {}: {e}", marker.display()),
+        },
+        group: "Shared".to_string(),
+    });
+    UpdateRefresh::Done(steps)
+}
+
+/// The launch-time call of [`refresh_on_update`] for the running Glance.
+/// Failures go to stderr only: launch never waits on it or shows a modal.
+pub fn refresh_integration_at_launch(version: &str) {
+    let Some(home) = home() else { return };
+    match refresh_on_update(&home, version, resolve_binaries) {
+        UpdateRefresh::Current => {}
+        UpdateRefresh::Skipped(e) => eprintln!("glance: AI integration not refreshed for {version}: {e}"),
+        UpdateRefresh::Done(steps) => {
+            for s in steps.iter().filter(|s| !s.ok) {
+                eprintln!("glance: AI integration refresh, {} — {}: {}", s.group, s.label, s.message);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2448,6 +2520,114 @@ mod tests {
         assert!(steps.iter().all(|s| s.group == "Cursor"));
         assert!(steps.iter().all(|s| s.ok));
         assert!(steps.iter().all(|s| s.message != "Not applicable to this client."));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    fn fake_bins(_: &Path) -> Result<Binaries, String> {
+        Ok(Binaries { mcp_bin: "/bin/glance-mcp".to_string(), app_bin: "/bin/glance".to_string() })
+    }
+
+    fn unreachable_bins(_: &Path) -> Result<Binaries, String> {
+        panic!("binaries resolved when nothing should run")
+    }
+
+    /// Every file under `dir`, with its contents, for before/after checks.
+    fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&d) else { continue };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push((p.clone(), std::fs::read(&p).unwrap()));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn update_refreshes_an_older_claude_install_once_then_records_the_version() {
+        let home = tmp_home("refresh-older");
+        let bins = fake_bins(&home).unwrap();
+        install_cli_tool(&home, Path::new(&bins.app_bin));
+        setup_adapter(&ClaudeAdapter, &bins, &home);
+        // An install from an older Glance: no Stop hook, an old skill text and wrapper.
+        let settings = home.join(".claude").join("settings.json");
+        let skill = home.join(".claude").join("skills").join("glance").join("SKILL.md");
+        let mdview = home.join(".local").join("bin").join("mdview");
+        std::fs::write(&settings, "{}\n").unwrap();
+        std::fs::write(&skill, "---\nname: glance\n---\nold\n").unwrap();
+        std::fs::write(&mdview, "#!/bin/sh\n# Glance CLI: old\n").unwrap();
+        std::fs::create_dir_all(home.join(".glance")).unwrap();
+        std::fs::write(home.join(".glance").join("integration-version"), "0.14.0\n").unwrap();
+        // Codex and Cursor are installed, so a refresh that ran them would write here.
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        assert!(CodexAdapter.is_present(&home) && CursorAdapter.is_present(&home));
+
+        let UpdateRefresh::Done(steps) = refresh_on_update(&home, "0.14.1", fake_bins) else {
+            panic!("expected Done")
+        };
+        assert!(steps.len() > 1);
+        assert!(steps.iter().all(|s| s.ok), "{:?}", steps);
+        assert!(steps.iter().all(|s| s.group == "Shared" || s.group == "Claude Code"));
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["asyncRewake"], true);
+        assert!(v["hooks"]["PreToolUse"].is_array());
+        assert_eq!(std::fs::read_to_string(&skill).unwrap(), skill_doc());
+        assert_eq!(std::fs::read_to_string(&mdview).unwrap(), crate::cli_install::mdview_script(&bins.app_bin));
+        assert_eq!(std::fs::read_to_string(home.join(".glance").join("integration-version")).unwrap(), "0.14.1\n");
+        // Codex and Cursor are never refreshed.
+        assert!(snapshot(&home.join(".codex")).is_empty());
+        assert!(snapshot(&home.join(".cursor")).is_empty());
+
+        // A second launch of the same version touches nothing.
+        std::fs::write(&settings, "{}\n").unwrap();
+        let before = snapshot(&home);
+        assert!(matches!(refresh_on_update(&home, "0.14.1", unreachable_bins), UpdateRefresh::Current));
+        assert_eq!(snapshot(&home), before);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn update_without_a_skill_manifest_only_records_the_version() {
+        let home = tmp_home("refresh-no-manifest");
+        // Claude Code is installed, and a pre-manifest skill dir exists, but no manifest.
+        let skill_dir = home.join(".claude").join("skills").join("glance");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "mine\n").unwrap();
+        std::fs::write(home.join(".claude.json"), "{}\n").unwrap();
+        let before = snapshot(&home);
+
+        let UpdateRefresh::Done(steps) = refresh_on_update(&home, "0.14.1", unreachable_bins) else {
+            panic!("expected Done")
+        };
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].ok);
+        assert!(!home.join(".local").exists());
+        let after: Vec<_> = snapshot(&home).into_iter().filter(|(p, _)| !p.starts_with(home.join(".glance"))).collect();
+        assert_eq!(after, before);
+        assert_eq!(std::fs::read_to_string(home.join(".glance").join("integration-version")).unwrap(), "0.14.1\n");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn update_that_cannot_find_the_binaries_records_nothing_so_a_later_launch_retries() {
+        let home = tmp_home("refresh-no-bins");
+        let skill_dir = home.join(".claude").join("skills").join("glance");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join(SKILL_MANIFEST), "{\"files\":{}}\n").unwrap();
+        let before = snapshot(&home);
+
+        let out = refresh_on_update(&home, "0.14.1", |_| Err("running from a disk image".to_string()));
+        assert!(matches!(out, UpdateRefresh::Skipped(ref e) if e == "running from a disk image"));
+        assert_eq!(snapshot(&home), before);
+        assert!(!home.join(".glance").exists());
         let _ = std::fs::remove_dir_all(&home);
     }
 
