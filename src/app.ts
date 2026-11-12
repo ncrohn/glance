@@ -546,7 +546,12 @@ function renderTabBar(): void {
     stripCheckFrame = null;
     const check = stripCheck!;
     stripCheck = null;
-    const decision = revealDecision({ ...check, userScrolling: performance.now() < stripScrollUntil });
+    const node = tabNode(bar, state.activeId);
+    const decision = revealDecision({
+      ...check,
+      isVisible: !!node && isTabVisible(stripView(bar), tabSpan(bar, node)),
+      userScrolling: performance.now() < stripScrollUntil,
+    });
     if (decision === "reveal") revealActiveTab(bar);
     else if (decision === "defer") scheduleStripReveal(bar);
   });

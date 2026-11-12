@@ -46,10 +46,11 @@ export function mergeReveal(prev: PendingReveal | null, next: PendingReveal): Pe
 /** Whether a re-render should scroll the active tab into view.
  *  - A new active tab is always revealed, but not under the user's fingers:
  *    mid-scroll it waits until the scroll settles.
- *  - The same active tab is kept in view only if it was in view before the
- *    render, so a tab the user scrolled away from stays where they left it. */
-export function revealDecision(input: { activeChanged: boolean; wasVisible: boolean; userScrolling: boolean }): RevealDecision {
+ *  - The same active tab is scrolled back only if it was in view before the
+ *    render and is not now, so a tab the user scrolled away from stays where
+ *    they left it and a visible one is not nudged. */
+export function revealDecision(input: { activeChanged: boolean; wasVisible: boolean; isVisible: boolean; userScrolling: boolean }): RevealDecision {
   if (input.activeChanged) return input.userScrolling ? "defer" : "reveal";
   if (input.userScrolling) return "keep";
-  return input.wasVisible ? "reveal" : "keep";
+  return input.wasVisible && !input.isVisible ? "reveal" : "keep";
 }

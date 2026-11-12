@@ -35,24 +35,30 @@ describe("revealScrollLeft", () => {
 });
 
 describe("revealDecision", () => {
+  const base = { activeChanged: false, wasVisible: true, isVisible: true, userScrolling: false };
+
   it("reveals a newly active tab", () => {
-    expect(revealDecision({ activeChanged: true, wasVisible: false, userScrolling: false })).toBe("reveal");
+    expect(revealDecision({ ...base, activeChanged: true, wasVisible: false, isVisible: false })).toBe("reveal");
   });
 
   it("defers a newly active tab while the user is scrolling the strip", () => {
-    expect(revealDecision({ activeChanged: true, wasVisible: false, userScrolling: true })).toBe("defer");
+    expect(revealDecision({ ...base, activeChanged: true, userScrolling: true })).toBe("defer");
   });
 
-  it("keeps the same active tab in view when a render shifts it", () => {
-    expect(revealDecision({ activeChanged: false, wasVisible: true, userScrolling: false })).toBe("reveal");
+  it("scrolls the same active tab back when a render pushed it out of view", () => {
+    expect(revealDecision({ ...base, isVisible: false })).toBe("reveal");
+  });
+
+  it("does not nudge the same active tab while it is still fully visible", () => {
+    expect(revealDecision(base)).toBe("keep");
   });
 
   it("leaves the strip alone when the user had scrolled the active tab away", () => {
-    expect(revealDecision({ activeChanged: false, wasVisible: false, userScrolling: false })).toBe("keep");
+    expect(revealDecision({ ...base, wasVisible: false, isVisible: false })).toBe("keep");
   });
 
   it("never moves the strip for the same tab mid-scroll", () => {
-    expect(revealDecision({ activeChanged: false, wasVisible: true, userScrolling: true })).toBe("keep");
+    expect(revealDecision({ ...base, isVisible: false, userScrolling: true })).toBe("keep");
   });
 });
 
