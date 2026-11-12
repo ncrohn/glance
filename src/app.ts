@@ -636,7 +636,8 @@ function renderActions(): void {
     host.appendChild(seg);
   }
   if (notListening.has(doc.absPath)) {
-    const notice = el("span", "wake-notice", NOT_LISTENING);
+    const notice = el("span", "wake-notice");
+    notice.appendChild(el("span", "wake-notice-text", NOT_LISTENING));
     notice.setAttribute("role", "status");
     notice.title = NOT_LISTENING;
     host.appendChild(notice);
