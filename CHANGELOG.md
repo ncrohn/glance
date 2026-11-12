@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.15.0
+
+Claude hears you when you save or comment in Glance.
+
+- Save a file or add a comment in Glance and the Claude Code session that opened it picks it up and replies on the comment cards. No need to switch back to the terminal.
+- If that session isn't listening, Glance says so, and your change reaches Claude on your next prompt.
+- Glance ▸ Wake Claude on save and comment turns this on or off.
+- While you have unsaved changes in a tab, Claude can't overwrite that file. It waits for you to save.
+- After an update, Glance refreshes its Claude Code integration on first launch, so you get these without re-running setup.
+- The active tab stays in view in the tab strip, even with many tabs open.
+
 ## 0.14.1
 
 Security fixes for updates.
