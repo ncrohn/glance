@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.0
+
+Your open files can live in a sidebar, grouped by folder.
+
+- View ▸ Show Files in Sidebar (⌃⌘S) swaps the tab strip for a sidebar that lists open files under the folder they're in. Turn it off to get tabs back. Glance remembers which you picked.
+- In sidebar mode the title bar goes away and the sidebar runs the full height of the window.
+- Collapse a folder to tuck its files away. Its header still shows when one of them has unsaved edits, changed on disk, or has a new reply from Claude.
+
 ## 0.15.0
 
 Claude hears you when you save or comment in Glance.
