@@ -1375,6 +1375,84 @@ body {
 /* ── Annotation workspace + rail ───────────────────────────── */
 #workspace { display: flex; flex: 1; min-height: 0; position: relative; }
 
+/* ---- File sidebar: open docs grouped by folder ------------------------- */
+/* Narrower on small windows, and the rail is capped beside it, so the reading
+   pane keeps room: about 280px at the 640px minimum window, 360px from ~900px. */
+#sidebar {
+  width: clamp(160px, 22vw, 220px); flex: 0 0 auto;
+  display: flex; flex-direction: column; min-height: 0;
+  border-right: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  font: 12.5px/1.3 var(--font-ui);
+}
+#sidebar.hidden { display: none; }
+/* In sidebar mode the titlebar is gone: the sidebar runs to the top of the
+   window, the traffic lights sit on its drag strip, and the active doc's
+   actions take a row under it. */
+body.sidebar-mode #titlebar { display: none; }
+body.sidebar-mode #rail:not(.collapsed) {
+  max-width: max(200px, calc(100vw - clamp(160px, 22vw, 220px) - 360px));
+}
+.sb-drag { flex: 0 0 46px; -webkit-app-region: drag; }
+.sb-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 0 10px 8px;
+}
+.sb-actions:empty { display: none; }
+.sb-actions > * { margin: 0; }
+.sb-actions .wake-notice { max-width: 100%; }
+.sb-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 2px 8px 16px; }
+.sb-group + .sb-group { margin-top: 10px; }
+.sb-folder {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 4px 6px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--ink-soft); font: 600 12px/1.2 var(--font-ui); text-align: left; cursor: default;
+}
+.sb-folder:hover { background: color-mix(in srgb, var(--raised) 60%, transparent); }
+.sb-chevron {
+  flex: 0 0 10px; color: var(--faint); font-size: 13px; line-height: 1;
+  transform: rotate(90deg); transition: transform 0.12s ease;
+}
+.sb-group.collapsed .sb-chevron { transform: none; }
+.sb-folder-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-folder.has-active .sb-folder-name { color: var(--accent); }
+.sb-count { color: var(--faint); font-weight: 500; font-size: 11px; }
+.sb-parent {
+  padding: 0 6px 4px 22px; color: var(--faint); font: 11px/1.2 var(--font-mono, monospace);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sb-file {
+  display: flex; align-items: center; gap: 6px; position: relative;
+  height: 26px; padding: 0 4px 0 22px; border-radius: 6px;
+  color: var(--muted); white-space: nowrap; cursor: default;
+}
+.sb-file:hover { background: color-mix(in srgb, var(--raised) 60%, transparent); color: var(--ink-soft); }
+.sb-file.active { background: var(--surface); color: var(--ink); box-shadow: 0 0 0 1px var(--border); }
+.sb-file.active .label { color: var(--accent); }
+.sb-file .label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sb-file .dot {
+  position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
+  width: 5px; height: 5px; border-radius: 50%; background: var(--accent);
+  opacity: 0; transition: opacity 0.14s ease;
+}
+.sb-file.dirty .dot { opacity: 1; }
+.sb-file .change-dot, .sb-file .claude-dot,
+.sb-folder .change-dot, .sb-folder .claude-dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
+.sb-file .change-dot, .sb-folder .change-dot { background: var(--accent); }
+.sb-file .claude-dot, .sb-folder .claude-dot { background: var(--anno-color, var(--accent)); box-shadow: 0 0 0 2px var(--surface); }
+/* A collapsed folder's header stands in for its hidden rows' markers. */
+.sb-folder .dot { display: none; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: 0 0 auto; }
+.sb-folder.dirty .dot { display: block; }
+.sb-file .removed { color: var(--accent); font-size: 10.5px; font-style: italic; }
+.sb-file .close {
+  display: grid; place-items: center; margin-left: auto; flex: 0 0 18px;
+  width: 18px; height: 18px; border-radius: 5px;
+  color: var(--faint); font-size: 14px; line-height: 1;
+  opacity: 0; transition: opacity 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+.sb-file:hover .close { opacity: 0.72; }
+.sb-file .close:hover { opacity: 1; background: var(--accent-tint); color: var(--accent); }
+
 /* ---- Find in file (⌘F) ------------------------------------------------ */
 .find-bar {
   position: absolute; top: 10px; right: 20px; z-index: 40;

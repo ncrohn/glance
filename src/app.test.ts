@@ -87,7 +87,7 @@ vi.mock("./ipc", () => ({
   ensureAnnotationStore: async (p: string) => { await env.storeGate; return "/store" + p; },
   watchAnnotations: async (s: string) => { env.watched.push(s); }, onAnnotationsChanged: on("annotations-changed"),
   onShowIntegrationPicker: on("x1"), listIntegrationTargets: async () => [], runIntegration: async () => [],
-  onShowAbout: on("x2"), onShowWhatsNew: on("x3"), onShowTheme: on("x4"), onShowReadingWidth: on("x4w"),
+  onShowAbout: on("x2"), onShowWhatsNew: on("x3"), onShowTheme: on("x4"), onShowReadingWidth: on("x4w"), onToggleSidebar: on("toggle-sidebar"), setSidebarChecked: async () => {},
   onCheckForUpdates: on("check-for-updates"), fetchLatestRelease: async () => env.latestRelease,
   checkForAppUpdate: async () => {
     if (env.update === "no-manifest") throw new Error("Could not fetch a valid release JSON from the remote");
@@ -107,7 +107,7 @@ const flush = async () => { for (let i = 0; i < 30; i++) await new Promise((r) =
 async function boot() {
   vi.resetModules();
   document.body.innerHTML = `<header id="titlebar"><div id="tabs"></div><div id="titlebar-actions"></div></header>
-    <div id="workspace"><main id="content"></main><div id="rail-grip"></div><aside id="rail"></aside></div>
+    <div id="workspace"><nav id="sidebar" class="hidden"></nav><main id="content"></main><div id="rail-grip"></div><aside id="rail"></aside></div>
     <div id="modal-root"></div>`;
   const app = await import("./app");
   const started = app.start();
@@ -1081,5 +1081,128 @@ describe("find in file keeps up with changes", () => {
     await emit("menu-find", "open");
     await search("quick brown");
     expect(count()).toBe("1 of 1");
+  });
+});
+
+describe("file sidebar", () => {
+  const groups = () => Array.from(document.querySelectorAll<HTMLElement>("#sidebar .sb-group")).map((g) => ({
+    folder: g.querySelector(".sb-folder-name")!.textContent,
+    files: Array.from(g.querySelectorAll<HTMLElement>(".sb-file")).map((f) => f.dataset.id),
+  }));
+  const sidebarHidden = () => document.getElementById("sidebar")!.classList.contains("hidden");
+  const activeFile = () => document.querySelector<HTMLElement>("#sidebar .sb-file.active")?.dataset.id ?? null;
+  const selectSidebar = async (id: string) => {
+    document.querySelector<HTMLElement>(`#sidebar .sb-file[data-id="${id}"] .label`)!.click();
+    await flush();
+  };
+  const open3 = async (pref: string | null) => {
+    env.fs.set("/p/one/a.md", "# A");
+    env.fs.set("/p/two/b.md", "# B");
+    env.fs.set("/p/one/c.md", "# C");
+    env.launch = ["/p/one/a.md", "/p/two/b.md", "/p/one/c.md"];
+    if (pref) localStorage.setItem("glance.sidebar", pref);
+    await boot();
+  };
+
+  it("is off by default: tabs show and the sidebar doesn't", async () => {
+    await open3(null);
+    expect(sidebarHidden()).toBe(true);
+    expect(tabs()).toEqual(["/p/one/a.md", "/p/two/b.md", "/p/one/c.md"]);
+  });
+
+  it("replaces the tabs, grouping open files by folder", async () => {
+    await open3("shown");
+    expect(sidebarHidden()).toBe(false);
+    expect(tabs()).toEqual([]);
+    expect(groups()).toEqual([
+      { folder: "one", files: ["/p/one/a.md", "/p/one/c.md"] },
+      { folder: "two", files: ["/p/two/b.md"] },
+    ]);
+    expect(activeFile()).toBe("/p/one/c.md");
+  });
+
+  it("switches files on click and closes from the ×", async () => {
+    await open3("shown");
+    document.querySelector<HTMLElement>('#sidebar .sb-file[data-id="/p/two/b.md"] .label')!.click();
+    await flush();
+    expect(activeFile()).toBe("/p/two/b.md");
+    document.querySelector<HTMLElement>('#sidebar .sb-file[data-id="/p/two/b.md"] .close')!.click();
+    await flush();
+    expect(groups()).toEqual([{ folder: "one", files: ["/p/one/a.md", "/p/one/c.md"] }]);
+  });
+
+  it("collapses a folder from its header", async () => {
+    await open3("shown");
+    document.querySelector<HTMLElement>('#sidebar .sb-folder[data-dir="/p/one"]')!.click();
+    await flush();
+    expect(groups()[0]).toEqual({ folder: "one", files: [] });
+    expect(document.querySelector('#sidebar .sb-folder[data-dir="/p/one"]')!.classList.contains("has-active")).toBe(true);
+  });
+
+  it("shows a collapsed folder's hidden rows' markers on its header", async () => {
+    await open3("shown");
+    await selectSidebar("/p/two/b.md");
+    document.querySelector<HTMLElement>('#sidebar .sb-folder[data-dir="/p/one"]')!.click();
+    await flush();
+    const head = () => document.querySelector<HTMLElement>('#sidebar .sb-folder[data-dir="/p/one"]')!;
+    expect(head().querySelector(".change-dot")).toBeNull();
+    await diskChange("/p/one/a.md", "# A changed");
+    expect(groups()[0].files).toEqual([]);
+    expect(head().querySelector(".change-dot")).not.toBeNull();
+  });
+
+  it("expands a collapsed folder when one of its files becomes active", async () => {
+    await open3("shown");
+    await selectSidebar("/p/two/b.md");
+    document.querySelector<HTMLElement>('#sidebar .sb-folder[data-dir="/p/one"]')!.click();
+    await flush();
+    expect(groups()[0].files).toEqual([]);
+    await emit("open-file", "/p/one/a.md");
+    expect(activeFile()).toBe("/p/one/a.md");
+    expect(groups()[0].files).toEqual(["/p/one/a.md", "/p/one/c.md"]);
+  });
+
+  it("marks a file dirty while typing", async () => {
+    await open3("shown");
+    const view = await editorView();
+    view.dispatch({ changes: { from: 0, insert: "x" } });
+    await flush();
+    expect(document.querySelector('#sidebar .sb-file.dirty[data-id="/p/one/c.md"]')).not.toBeNull();
+  });
+
+  it("hides the titlebar and carries the doc's actions in the sidebar", async () => {
+    await open3("shown");
+    expect(document.body.classList.contains("sidebar-mode")).toBe(true);
+    await diskChange("/p/one/c.md", "# C changed");
+    expect(document.querySelector("#sidebar .sb-actions .review-btn")).not.toBeNull();
+    expect(document.getElementById("titlebar-actions")!.childElementCount).toBe(0);
+    expect(document.querySelector("#sidebar .sb-drag[data-tauri-drag-region]")).not.toBeNull();
+  });
+
+  it("brings the titlebar back when the last file closes", async () => {
+    await open3("shown");
+    for (const id of ["/p/one/a.md", "/p/two/b.md", "/p/one/c.md"]) {
+      document.querySelector<HTMLElement>(`#sidebar .sb-file[data-id="${id}"] .close`)!.click();
+      await flush();
+    }
+    expect(sidebarHidden()).toBe(true);
+    expect(document.body.classList.contains("sidebar-mode")).toBe(false);
+  });
+
+  it("swaps between tabs and sidebar from the View menu and remembers the choice", async () => {
+    await open3(null);
+    await emit("toggle-sidebar");
+    expect(sidebarHidden()).toBe(false);
+    expect(tabs()).toEqual([]);
+    expect(localStorage.getItem("glance.sidebar")).toBe("shown");
+    await diskChange("/p/one/c.md", "# C changed");
+    expect(document.querySelector("#sidebar .sb-actions .review-btn")).not.toBeNull();
+    await emit("toggle-sidebar");
+    expect(sidebarHidden()).toBe(true);
+    expect(document.querySelector("#titlebar-actions .review-btn")).not.toBeNull();
+    expect(document.querySelector("#sidebar .review-btn")).toBeNull();
+    expect(tabs()).toEqual(["/p/one/a.md", "/p/two/b.md", "/p/one/c.md"]);
+    expect(activeTab()).toBe("/p/one/c.md");
+    expect(localStorage.getItem("glance.sidebar")).toBe("hidden");
   });
 });

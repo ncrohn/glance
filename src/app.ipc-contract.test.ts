@@ -149,7 +149,7 @@ vi.mock("./ipc", () => ({
   onFileError: on("file-error"), onAnnotationsChanged: on("annotations-changed"),
   takeLaunchArgs: async () => env.launch,
   onShowIntegrationPicker: on("x1"), listIntegrationTargets: async () => [], runIntegration: async () => [],
-  onShowAbout: on("x2"), onShowWhatsNew: on("x3"), onShowTheme: on("x4"), onShowReadingWidth: on("x4w"),
+  onShowAbout: on("x2"), onShowWhatsNew: on("x3"), onShowTheme: on("x4"), onShowReadingWidth: on("x4w"), onToggleSidebar: on("toggle-sidebar"), setSidebarChecked: async () => {},
   onCheckForUpdates: on("x7"), fetchLatestRelease: async () => null, checkForAppUpdate: async () => null, relaunchApp: async () => {},
   onCloseActiveTab: on("close-active-tab"), onMenuSave: on("menu-save"), onSelectAll: on("x5"), onMenuFind: on("menu-find"),
   onShowInFinder: on("x6"), onQuitRequested: on("quit-requested"),
