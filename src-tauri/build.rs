@@ -25,6 +25,7 @@ const COMMANDS: &[&str] = &[
     "list_integration_targets",
     "run_integration",
     "set_show_in_finder_enabled",
+    "set_sidebar_checked",
     "take_launch_args",
     "quit_app",
     "quit_ack",

@@ -49,6 +49,16 @@ fn set_show_in_finder_enabled(
     item.0.set_enabled(enabled).map_err(|e| e.to_string())
 }
 
+/// Handle to View → Show Files in Sidebar. The preference lives in the
+/// frontend's localStorage, so the frontend sets the check at launch and after
+/// every toggle.
+struct SidebarItem(CheckMenuItem<tauri::Wry>);
+
+#[tauri::command]
+fn set_sidebar_checked(item: tauri::State<SidebarItem>, checked: bool) -> Result<(), String> {
+    item.0.set_checked(checked).map_err(|e| e.to_string())
+}
+
 /// Emits straight to the frontend once its listener is live, otherwise buffers
 /// for `take_launch_args`. The ready check runs under the buffer's lock, as
 /// does the drain, so a path can't land in the buffer just after it was drained
@@ -303,6 +313,7 @@ pub fn run() {
             setup::list_integration_targets,
             setup::run_integration,
             set_show_in_finder_enabled,
+            set_sidebar_checked,
             take_launch_args,
             quit_app,
             quit_ack,
@@ -398,6 +409,9 @@ pub fn run() {
                 }
                 "open_reading_width" => {
                     let _ = app.emit("show-reading-width", ());
+                }
+                "toggle_sidebar" => {
+                    let _ = app.emit("toggle-sidebar", ());
                 }
                 _ => {}
             }
@@ -585,8 +599,26 @@ pub fn run() {
                 true,
                 None::<&str>,
             )?;
-            let view_menu =
-                Submenu::with_items(handle, "View", true, &[&theme_item, &reading_width_item])?;
+            let sidebar_item = CheckMenuItem::with_id(
+                handle,
+                "toggle_sidebar",
+                "Show Files in Sidebar",
+                true,
+                false,
+                Some("Ctrl+Cmd+S"),
+            )?;
+            app.manage(SidebarItem(sidebar_item.clone()));
+            let view_menu = Submenu::with_items(
+                handle,
+                "View",
+                true,
+                &[
+                    &sidebar_item,
+                    &PredefinedMenuItem::separator(handle)?,
+                    &theme_item,
+                    &reading_width_item,
+                ],
+            )?;
             let menu = Menu::with_items(handle, &[&app_menu, &file_menu, &edit_menu, &view_menu])?;
             app.set_menu(menu)?;
 

@@ -34,6 +34,7 @@
     "allow-list-integration-targets",
     "allow-run-integration",
     "allow-set-show-in-finder-enabled",
+    "allow-set-sidebar-checked",
     "allow-take-launch-args",
     "allow-quit-app",
     "allow-quit-ack",

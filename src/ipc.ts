@@ -299,6 +299,14 @@ export function onShowReadingWidth(cb: () => void): Promise<UnlistenFn> {
   return listen("show-reading-width", () => cb());
 }
 
+export function setSidebarChecked(checked: boolean): Promise<void> {
+  return invoke<void>("set_sidebar_checked", { checked });
+}
+
+export function onToggleSidebar(cb: () => void): Promise<UnlistenFn> {
+  return listen("toggle-sidebar", () => cb());
+}
+
 export function onCloseActiveTab(cb: () => void): Promise<UnlistenFn> {
   return listen("close-active-tab", () => cb());
 }

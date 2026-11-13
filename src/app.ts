@@ -50,7 +50,8 @@ import { confirmOpenFile, confirmReload, showNotice, showSetupResult, showIntegr
 import { showUpdateAvailable, showUpToDate } from "./modal";
 import { showUpdateProgress } from "./modal";
 import { fetchLatestRelease, onCheckForUpdates } from "./ipc";
-import { onShowReadingWidth } from "./ipc";
+import { onShowReadingWidth, onToggleSidebar, setSidebarChecked } from "./ipc";
+import { LS_SIDEBAR, groupByFolder, parseSidebarPref, tildePath } from "./sidebar";
 import { showReadingWidthPicker } from "./modal";
 import { applyWidth, loadWidthPref, saveWidthPref } from "./reading-width";
 import {
@@ -437,8 +438,7 @@ function bindTabBar(bar: HTMLElement): void {
     if (!id) return;
     ev.preventDefault();
     hideTabPreview();
-    const entries = tabMenuEntries(state, id).map((e) => e === "separator" ? e : { id: e.action, text: e.text, enabled: e.enabled });
-    void popupContextMenu(entries, (action) => { void runTabMenuAction(id, action as TabMenuAction); });
+    openTabMenu(id);
   });
   bindTabHover(bar);
   bar.addEventListener("wheel", () => {
@@ -504,6 +504,11 @@ async function copyForTab(path: string, kind: CopyKind, what: string): Promise<v
   }
 }
 
+function openTabMenu(id: string): void {
+  const entries = tabMenuEntries(state, id).map((e) => e === "separator" ? e : { id: e.action, text: e.text, enabled: e.enabled });
+  void popupContextMenu(entries, (action) => { void runTabMenuAction(id, action as TabMenuAction); });
+}
+
 async function runTabMenuAction(id: string, action: TabMenuAction): Promise<void> {
   const d = state.docs.find((x) => x.id === id);
   if (!d) return; // closed while the menu was open
@@ -527,10 +532,139 @@ async function runTabMenuAction(id: string, action: TabMenuAction): Promise<void
   }
 }
 
+// ---- File sidebar -------------------------------------------------------
+// Open docs grouped by folder, on the left. It replaces the tab strip: the user
+// picks one (View → Show Files in Sidebar), and renderTabBar draws whichever.
+
+let sidebarShown = parseSidebarPref(localStorage.getItem(LS_SIDEBAR));
+const collapsedFolders = new Set<string>();
+
+function syncSidebarMenu(): void {
+  void setSidebarChecked(sidebarShown).catch(() => {});
+}
+
+function toggleSidebar(): void {
+  sidebarShown = !sidebarShown;
+  localStorage.setItem(LS_SIDEBAR, sidebarShown ? "shown" : "hidden");
+  syncSidebarMenu();
+  render();
+}
+
+function bindSidebar(host: HTMLElement): void {
+  if (host.dataset.bound) return;
+  host.dataset.bound = "1";
+  host.addEventListener("click", (ev) => {
+    const target = ev.target as HTMLElement;
+    const folder = target.closest<HTMLElement>(".sb-folder")?.dataset.dir;
+    if (folder) {
+      if (!collapsedFolders.delete(folder)) collapsedFolders.add(folder);
+      renderSidebar();
+      return;
+    }
+    const id = target.closest<HTMLElement>(".sb-file")?.dataset.id;
+    if (!id) return;
+    if (target.closest(".close")) { void closeTab(id); return; }
+    if (id !== state.activeId) { state = setActive(state, id); render(); }
+  });
+  host.addEventListener("contextmenu", (ev) => {
+    const id = (ev.target as HTMLElement).closest<HTMLElement>(".sb-file")?.dataset.id;
+    if (!id) return;
+    ev.preventDefault();
+    openTabMenu(id);
+  });
+}
+
+// The sidebar's fixed parts: a drag strip under the traffic lights, then the
+// active doc's actions (the titlebar's job, while the titlebar is hidden), then
+// the scrolling list.
+function sidebarParts(host: HTMLElement): { actions: HTMLElement; list: HTMLElement } {
+  let actions = host.querySelector<HTMLElement>(":scope > .sb-actions");
+  let list = host.querySelector<HTMLElement>(":scope > .sb-list");
+  if (!actions || !list) {
+    host.innerHTML = "";
+    const drag = el("div", "sb-drag");
+    drag.setAttribute("data-tauri-drag-region", "");
+    actions = el("div", "sb-actions");
+    list = el("div", "sb-list");
+    host.append(drag, actions, list);
+  }
+  return { actions, list };
+}
+
+// Sidebar mode with files open: the sidebar stands in for the whole titlebar.
+// With nothing open the titlebar stays, so the window can still be dragged.
+function sidebarVisible(): boolean {
+  return sidebarShown && state.docs.length > 0;
+}
+
+function actionsHost(): HTMLElement | null {
+  const sidebar = document.getElementById("sidebar");
+  if (sidebarVisible() && sidebar) return sidebarParts(sidebar).actions;
+  return document.getElementById("titlebar-actions");
+}
+
+function renderSidebar(): void {
+  const host = document.getElementById("sidebar");
+  if (!host) return;
+  bindSidebar(host);
+  const visible = sidebarVisible();
+  host.classList.toggle("hidden", !visible);
+  document.body.classList.toggle("sidebar-mode", visible);
+  const { list } = sidebarParts(host);
+  if (!visible) { list.innerHTML = ""; return; }
+  const scrollTop = list.scrollTop;
+  list.innerHTML = "";
+  for (const g of groupByFolder(state.docs)) {
+    const collapsed = collapsedFolders.has(g.dir);
+    const group = el("section", "sb-group");
+    if (collapsed) group.classList.add("collapsed");
+    const head = el("button", "sb-folder");
+    head.dataset.dir = g.dir;
+    head.title = tildePath(g.dir);
+    head.setAttribute("aria-expanded", String(!collapsed));
+    if (collapsed && g.docs.some((d) => d.id === state.activeId)) head.classList.add("has-active");
+    head.appendChild(el("span", "sb-chevron", "›"));
+    head.appendChild(el("span", "sb-folder-name", g.name));
+    head.appendChild(el("span", "sb-count", String(g.docs.length)));
+    group.appendChild(head);
+    if (g.parent) group.appendChild(el("div", "sb-parent", g.parent));
+    if (!collapsed) {
+      for (const d of g.docs) {
+        const item = el("div", "sb-file");
+        item.dataset.id = d.id;
+        item.title = tildePath(d.absPath);
+        if (d.id === state.activeId) item.classList.add("active");
+        if (isDirty(d)) item.classList.add("dirty");
+        item.appendChild(el("span", "dot"));
+        item.appendChild(el("span", "label", d.fileName));
+        if (hasUnreviewedChanges(d)) item.appendChild(el("span", "change-dot"));
+        if (d.claudeActivity.length > 0) {
+          const dot = el("span", "claude-dot");
+          const first = d.annotations.find((a) => a.id === d.claudeActivity[0]);
+          if (first) dot.style.setProperty("--anno-color", markerColor(first.number));
+          item.appendChild(dot);
+        }
+        if (!d.existsOnDisk) item.appendChild(el("span", "removed", "(deleted)"));
+        item.appendChild(el("span", "close", "×"));
+        group.appendChild(item);
+      }
+    }
+    list.appendChild(group);
+  }
+  list.scrollTop = scrollTop;
+}
+
 function renderTabBar(): void {
+  renderSidebar();
   const bar = document.getElementById("tabs")!;
   bindTabBar(bar);
   hideTabPreview(); // rebuilding the nodes invalidates any open preview's anchor
+  if (sidebarShown) {
+    // The empty strip stays as titlebar drag space.
+    bar.innerHTML = "";
+    tabBarActiveId = null; // so switching back reveals the active tab
+    return;
+  }
   const activeChanged = state.activeId !== tabBarActiveId;
   const oldActive = activeChanged ? null : tabNode(bar, state.activeId);
   const wasVisible = !!oldActive && isTabVisible(stripView(bar), tabSpan(bar, oldActive));
@@ -577,11 +711,9 @@ function renderTabBar(): void {
 // user edits, so toggle that class in place instead of tearing down and
 // rebuilding every tab node (which discarded any in-flight click).
 function refreshTabDirty(): void {
-  const bar = document.getElementById("tabs");
-  if (!bar) return;
-  for (const tab of Array.from(bar.children) as HTMLElement[]) {
-    const d = state.docs.find((x) => x.id === tab.dataset.id);
-    if (d) tab.classList.toggle("dirty", isDirty(d));
+  for (const node of Array.from(document.querySelectorAll<HTMLElement>("#tabs > .tab, #sidebar .sb-file"))) {
+    const d = state.docs.find((x) => x.id === node.dataset.id);
+    if (d) node.classList.toggle("dirty", isDirty(d));
   }
   syncUnsavedMarkers();
 }
@@ -617,7 +749,7 @@ function metaRow(key: string, value: string): HTMLElement {
 // preview so same-named files across folders (e.g. many index.md) are tellable
 // apart at a glance.
 function dirLabel(absPath: string): string {
-  return parentDir(absPath).replace(/^\/Users\/[^/]+/, "~");
+  return tildePath(parentDir(absPath));
 }
 
 function buildTabPreview(host: HTMLElement, d: Doc): void {
@@ -694,8 +826,9 @@ function bindTabHover(bar: HTMLElement): void {
 }
 
 function renderActions(): void {
-  const host = document.getElementById("titlebar-actions")!;
-  host.innerHTML = "";
+  for (const old of Array.from(document.querySelectorAll("#titlebar-actions, #sidebar > .sb-actions"))) old.innerHTML = "";
+  const host = actionsHost();
+  if (!host) return;
   const doc = getActive(state);
   if (!doc) return;
   // Editing happens in place by clicking a block; ⌘E's whole-file source view
@@ -1872,6 +2005,8 @@ export async function start(): Promise<void> {
       onCommit: (id) => { saveWidthPref(id); applyWidth(id); },
     });
   });
+  await onToggleSidebar(toggleSidebar);
+  syncSidebarMenu();
   await onCloseActiveTab(() => { const d = getActive(state); if (d) void closeTab(d.id); });
   await onQuitRequested(() => { void requestQuit(); });
   await onMenuSave(() => saveActive());
