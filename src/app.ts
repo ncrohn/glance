@@ -51,7 +51,7 @@ import { showUpdateAvailable, showUpToDate } from "./modal";
 import { showUpdateProgress } from "./modal";
 import { fetchLatestRelease, onCheckForUpdates } from "./ipc";
 import { onShowReadingWidth, onToggleSidebar, setSidebarChecked } from "./ipc";
-import { LS_SIDEBAR, groupByFolder, parseSidebarPref, tildePath } from "./sidebar";
+import { LS_SIDEBAR, folderMarks, groupByFolder, parseSidebarPref, tildePath } from "./sidebar";
 import { showReadingWidthPicker } from "./modal";
 import { applyWidth, loadWidthPref, saveWidthPref } from "./reading-width";
 import {
@@ -538,6 +538,15 @@ async function runTabMenuAction(id: string, action: TabMenuAction): Promise<void
 
 let sidebarShown = parseSidebarPref(localStorage.getItem(LS_SIDEBAR));
 const collapsedFolders = new Set<string>();
+// The active doc the sidebar last drew, so a newly active one is revealed.
+let sidebarActiveId: string | null = null;
+
+function claudeDot(d: Doc): HTMLElement {
+  const dot = el("span", "claude-dot");
+  const first = d.annotations.find((a) => a.id === d.claudeActivity[0]);
+  if (first) dot.style.setProperty("--anno-color", markerColor(first.number));
+  return dot;
+}
 
 function syncSidebarMenu(): void {
   void setSidebarChecked(sidebarShown).catch(() => {});
@@ -611,10 +620,19 @@ function renderSidebar(): void {
   host.classList.toggle("hidden", !visible);
   document.body.classList.toggle("sidebar-mode", visible);
   const { list } = sidebarParts(host);
-  if (!visible) { list.innerHTML = ""; return; }
+  if (!visible) { list.innerHTML = ""; sidebarActiveId = null; return; }
+  const groups = groupByFolder(state.docs);
+  for (const dir of Array.from(collapsedFolders)) {
+    if (!groups.some((g) => g.dir === dir)) collapsedFolders.delete(dir);
+  }
+  // A newly active doc is never left hidden in a collapsed folder.
+  const activeChanged = state.activeId !== sidebarActiveId;
+  sidebarActiveId = state.activeId;
+  const active = getActive(state);
+  if (activeChanged && active) collapsedFolders.delete(parentDir(active.absPath));
   const scrollTop = list.scrollTop;
   list.innerHTML = "";
-  for (const g of groupByFolder(state.docs)) {
+  for (const g of groups) {
     const collapsed = collapsedFolders.has(g.dir);
     const group = el("section", "sb-group");
     if (collapsed) group.classList.add("collapsed");
@@ -622,9 +640,16 @@ function renderSidebar(): void {
     head.dataset.dir = g.dir;
     head.title = tildePath(g.dir);
     head.setAttribute("aria-expanded", String(!collapsed));
-    if (collapsed && g.docs.some((d) => d.id === state.activeId)) head.classList.add("has-active");
     head.appendChild(el("span", "sb-chevron", "›"));
     head.appendChild(el("span", "sb-folder-name", g.name));
+    if (collapsed) {
+      if (g.docs.some((d) => d.id === state.activeId)) head.classList.add("has-active");
+      const marks = folderMarks(g.docs);
+      if (marks.dirty) head.classList.add("dirty");
+      head.appendChild(el("span", "dot"));
+      if (marks.changed) head.appendChild(el("span", "change-dot"));
+      if (marks.claude) head.appendChild(claudeDot(marks.claude));
+    }
     head.appendChild(el("span", "sb-count", String(g.docs.length)));
     group.appendChild(head);
     if (g.parent) group.appendChild(el("div", "sb-parent", g.parent));
@@ -638,12 +663,7 @@ function renderSidebar(): void {
         item.appendChild(el("span", "dot"));
         item.appendChild(el("span", "label", d.fileName));
         if (hasUnreviewedChanges(d)) item.appendChild(el("span", "change-dot"));
-        if (d.claudeActivity.length > 0) {
-          const dot = el("span", "claude-dot");
-          const first = d.annotations.find((a) => a.id === d.claudeActivity[0]);
-          if (first) dot.style.setProperty("--anno-color", markerColor(first.number));
-          item.appendChild(dot);
-        }
+        if (d.claudeActivity.length > 0) item.appendChild(claudeDot(d));
         if (!d.existsOnDisk) item.appendChild(el("span", "removed", "(deleted)"));
         item.appendChild(el("span", "close", "×"));
         group.appendChild(item);
@@ -652,6 +672,10 @@ function renderSidebar(): void {
     list.appendChild(group);
   }
   list.scrollTop = scrollTop;
+  if (activeChanged) {
+    const row = list.querySelector<HTMLElement>(".sb-file.active");
+    row?.scrollIntoView?.({ block: "nearest" });
+  }
 }
 
 function renderTabBar(): void {
@@ -714,6 +738,9 @@ function refreshTabDirty(): void {
   for (const node of Array.from(document.querySelectorAll<HTMLElement>("#tabs > .tab, #sidebar .sb-file"))) {
     const d = state.docs.find((x) => x.id === node.dataset.id);
     if (d) node.classList.toggle("dirty", isDirty(d));
+  }
+  for (const head of Array.from(document.querySelectorAll<HTMLElement>("#sidebar .sb-group.collapsed .sb-folder"))) {
+    head.classList.toggle("dirty", state.docs.some((d) => parentDir(d.absPath) === head.dataset.dir && isDirty(d)));
   }
   syncUnsavedMarkers();
 }

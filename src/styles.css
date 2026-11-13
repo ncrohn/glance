@@ -1376,8 +1376,10 @@ body {
 #workspace { display: flex; flex: 1; min-height: 0; position: relative; }
 
 /* ---- File sidebar: open docs grouped by folder ------------------------- */
+/* Narrower on small windows, and the rail is capped beside it, so the reading
+   pane keeps room: about 280px at the 640px minimum window, 360px from ~900px. */
 #sidebar {
-  width: 220px; flex: 0 0 auto;
+  width: clamp(160px, 22vw, 220px); flex: 0 0 auto;
   display: flex; flex-direction: column; min-height: 0;
   border-right: 1px solid var(--border);
   background: color-mix(in srgb, var(--surface) 55%, transparent);
@@ -1388,6 +1390,9 @@ body {
    window, the traffic lights sit on its drag strip, and the active doc's
    actions take a row under it. */
 body.sidebar-mode #titlebar { display: none; }
+body.sidebar-mode #rail:not(.collapsed) {
+  max-width: max(200px, calc(100vw - clamp(160px, 22vw, 220px) - 360px));
+}
 .sb-drag { flex: 0 0 46px; -webkit-app-region: drag; }
 .sb-actions {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
@@ -1431,9 +1436,13 @@ body.sidebar-mode #titlebar { display: none; }
   opacity: 0; transition: opacity 0.14s ease;
 }
 .sb-file.dirty .dot { opacity: 1; }
-.sb-file .change-dot, .sb-file .claude-dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
-.sb-file .change-dot { background: var(--accent); }
-.sb-file .claude-dot { background: var(--anno-color, var(--accent)); box-shadow: 0 0 0 2px var(--surface); }
+.sb-file .change-dot, .sb-file .claude-dot,
+.sb-folder .change-dot, .sb-folder .claude-dot { width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
+.sb-file .change-dot, .sb-folder .change-dot { background: var(--accent); }
+.sb-file .claude-dot, .sb-folder .claude-dot { background: var(--anno-color, var(--accent)); box-shadow: 0 0 0 2px var(--surface); }
+/* A collapsed folder's header stands in for its hidden rows' markers. */
+.sb-folder .dot { display: none; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: 0 0 auto; }
+.sb-folder.dirty .dot { display: block; }
 .sb-file .removed { color: var(--accent); font-size: 10.5px; font-style: italic; }
 .sb-file .close {
   display: grid; place-items: center; margin-left: auto; flex: 0 0 18px;

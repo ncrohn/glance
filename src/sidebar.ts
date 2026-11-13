@@ -1,4 +1,4 @@
-import type { Doc } from "./document";
+import { hasUnreviewedChanges, isDirty, type Doc } from "./document";
 import { parentDir } from "./tab-menu";
 
 // The left sidebar: open docs grouped by the folder that holds them. Pure;
@@ -31,6 +31,22 @@ export function groupByFolder(docs: Doc[]): FolderGroup[] {
     g.docs.push(d);
   }
   return [...groups.values()];
+}
+
+/** What a collapsed folder's header shows on behalf of the rows it hides. */
+export interface FolderMarks {
+  dirty: boolean;
+  changed: boolean;
+  // The first doc with Claude activity, for the dot's colour.
+  claude: Doc | null;
+}
+
+export function folderMarks(docs: Doc[]): FolderMarks {
+  return {
+    dirty: docs.some(isDirty),
+    changed: docs.some(hasUnreviewedChanges),
+    claude: docs.find((d) => d.claudeActivity.length > 0) ?? null,
+  };
 }
 
 export const LS_SIDEBAR = "glance.sidebar";

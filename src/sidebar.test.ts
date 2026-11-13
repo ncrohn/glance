@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { emptyState, openDoc } from "./store";
-import { groupByFolder, parseSidebarPref, tildePath } from "./sidebar";
+import { folderMarks, groupByFolder, parseSidebarPref, tildePath } from "./sidebar";
 
 const docsFor = (...paths: string[]) => paths.reduce((s, p) => openDoc(s, p, ""), emptyState()).docs;
 
@@ -33,6 +33,17 @@ describe("groupByFolder", () => {
 
   it("is empty with no docs", () => {
     expect(groupByFolder([])).toEqual([]);
+  });
+});
+
+describe("folderMarks", () => {
+  it("rolls up its docs' dirty, changed and Claude state", () => {
+    const [clean, edited, changed] = docsFor("/f/a.md", "/f/b.md", "/f/c.md");
+    expect(folderMarks([clean])).toEqual({ dirty: false, changed: false, claude: null });
+    const dirty = { ...edited, editorContent: "typed" };
+    const onDisk = { ...changed, diskContent: "new", editorContent: "new" };
+    const replied = { ...clean, claudeActivity: ["n1"] };
+    expect(folderMarks([clean, dirty, onDisk, replied])).toEqual({ dirty: true, changed: true, claude: replied });
   });
 });
 

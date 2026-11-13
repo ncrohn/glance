@@ -1091,6 +1091,10 @@ describe("file sidebar", () => {
   }));
   const sidebarHidden = () => document.getElementById("sidebar")!.classList.contains("hidden");
   const activeFile = () => document.querySelector<HTMLElement>("#sidebar .sb-file.active")?.dataset.id ?? null;
+  const selectSidebar = async (id: string) => {
+    document.querySelector<HTMLElement>(`#sidebar .sb-file[data-id="${id}"] .label`)!.click();
+    await flush();
+  };
   const open3 = async (pref: string | null) => {
     env.fs.set("/p/one/a.md", "# A");
     env.fs.set("/p/two/b.md", "# B");
@@ -1133,6 +1137,29 @@ describe("file sidebar", () => {
     await flush();
     expect(groups()[0]).toEqual({ folder: "one", files: [] });
     expect(document.querySelector('#sidebar .sb-folder[data-dir="/p/one"]')!.classList.contains("has-active")).toBe(true);
+  });
+
+  it("shows a collapsed folder's hidden rows' markers on its header", async () => {
+    await open3("shown");
+    await selectSidebar("/p/two/b.md");
+    document.querySelector<HTMLElement>('#sidebar .sb-folder[data-dir="/p/one"]')!.click();
+    await flush();
+    const head = () => document.querySelector<HTMLElement>('#sidebar .sb-folder[data-dir="/p/one"]')!;
+    expect(head().querySelector(".change-dot")).toBeNull();
+    await diskChange("/p/one/a.md", "# A changed");
+    expect(groups()[0].files).toEqual([]);
+    expect(head().querySelector(".change-dot")).not.toBeNull();
+  });
+
+  it("expands a collapsed folder when one of its files becomes active", async () => {
+    await open3("shown");
+    await selectSidebar("/p/two/b.md");
+    document.querySelector<HTMLElement>('#sidebar .sb-folder[data-dir="/p/one"]')!.click();
+    await flush();
+    expect(groups()[0].files).toEqual([]);
+    await emit("open-file", "/p/one/a.md");
+    expect(activeFile()).toBe("/p/one/a.md");
+    expect(groups()[0].files).toEqual(["/p/one/a.md", "/p/one/c.md"]);
   });
 
   it("marks a file dirty while typing", async () => {
